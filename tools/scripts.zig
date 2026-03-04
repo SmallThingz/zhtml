@@ -1954,6 +1954,15 @@ fn parseWptHtmlSuiteFile(alloc: std.mem.Allocator, path: []const u8, out: *std.A
         const expected_end = quoteEnd(text, expected_q + 1) orelse break;
         pos = expected_end + 1;
 
+        // html5lib_* WPT files also contain context/fragment cases encoded as:
+        // [async_test(...), "<html>", "<tree>", "<context>"]
+        // This parser harness only validates full-document cases, so skip any
+        // entry that carries additional args after expected tree string.
+        const tail = std.mem.trimLeft(u8, text[expected_end + 1 ..], " \t\r\n");
+        if (tail.len == 0) break;
+        if (tail[0] == ',') continue;
+        if (tail[0] != ']') continue;
+
         const html_encoded = text[in_q + 1 .. in_end];
         const tree_encoded = text[expected_q + 1 .. expected_end];
 

@@ -241,7 +241,22 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
             node.name_or_text = .{ .start = @intCast(name_start), .end = @intCast(name_end) };
             node.attr_end = @intCast(attr_bytes_end);
 
-            if (!self_close and tag_name.len >= 5 and tag_name.len <= 6 and tags.isRawTextTagWithKey(tag_name, tag_name_key)) {
+            if (!self_close and tags.isPlainTextTagWithKey(tag_name, tag_name_key)) {
+                const content_start = self.i;
+                if (self.input.len > content_start) {
+                    const text_idx = try self.appendNode(.text, node_idx);
+                    var text_node = &self.doc.nodes.items[text_idx];
+                    text_node.name_or_text = .{ .start = @intCast(content_start), .end = @intCast(self.input.len) };
+                    text_node.subtree_end = text_idx;
+                }
+
+                node = &self.doc.nodes.items[node_idx];
+                node.subtree_end = @intCast(self.doc.nodes.items.len - 1);
+                self.i = self.input.len;
+                return;
+            }
+
+            if (!self_close and tags.isRawTextTagWithKey(tag_name, tag_name_key)) {
                 const content_start = self.i;
                 if (self.findRawTextClose(tag_name, self.i)) |close| {
                     if (close.content_end > content_start) {
@@ -408,6 +423,12 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
 
         fn skipComment(noalias self: *Self) void {
             self.i += 4;
+            if (self.i < self.input.len and self.input[self.i] == '>') {
+                // Fast-path malformed short comment form: "<!-->"
+                self.i += 1;
+                return;
+            }
+
             var j = self.i;
             while (j + 2 < self.input.len) {
                 const dash = scanner.findByte(self.input, j, '-') orelse {

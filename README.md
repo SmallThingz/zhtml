@@ -34,7 +34,7 @@ lexbor   │████░░░░░░░░░░░░░░░░│ 215.
 
 | Profile | nwmatcher | qwery_contextual | html5lib subset | WHATWG HTML parsing | WPT HTML parsing |
 |---|---:|---:|---:|---:|---:|
-| `strictest/fastest` | 20/20 (0 failed) | 54/54 (0 failed) | 521/600 (79 failed) | 417/500 (83 failed) | 417/500 (83 failed) |
+| `strictest/fastest` | 20/20 (0 failed) | 54/54 (0 failed) | 523/600 (77 failed) | 439/500 (61 failed) | 439/500 (61 failed) |
 
 Source: `bench/results/external_suite_report.json`
 <!-- README_AUTO_SUMMARY:END -->

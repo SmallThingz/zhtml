@@ -42,6 +42,9 @@ const KEY = struct {
 
     const SCRIPT = litKey("script");
     const STYLE = litKey("style");
+    const TITLE = litKey("title");
+    const TEXTAREA = litKey("textarea");
+    const PLAINTEXT = litKey("plaintex");
 
     const LI = litKey("li");
     const P = litKey("p");
@@ -86,7 +89,11 @@ pub fn isVoidTag(name: []const u8) bool {
     return isVoidTagWithKey(name, first8Key(name));
 }
 
-/// Returns whether tag is HTML raw-text tag (`script`, `style`).
+/// Returns whether tag is HTML text-only tag closed by explicit end-tag.
+///
+/// This intentionally includes `title` and `textarea` in addition to raw-text
+/// tags to keep parser behavior closer to HTML tokenization semantics while
+/// staying in this parser's simplified state machine.
 pub fn isRawTextTag(name: []const u8) bool {
     return isRawTextTagWithKey(name, first8Key(name));
 }
@@ -118,13 +125,19 @@ pub fn isVoidTagWithKey(name: []const u8, key: u64) bool {
     };
 }
 
-/// Fast raw-text-tag check with caller-provided key.
+/// Fast text-only-tag check with caller-provided key.
 pub fn isRawTextTagWithKey(name: []const u8, key: u64) bool {
     return switch (name.len) {
-        5 => key == KEY.STYLE,
+        5 => key == KEY.STYLE or key == KEY.TITLE,
         6 => key == KEY.SCRIPT,
+        8 => key == KEY.TEXTAREA,
         else => false,
     };
+}
+
+/// Fast check for `<plaintext>` by `(len,key)`.
+pub fn isPlainTextTagWithKey(name: []const u8, key: u64) bool {
+    return name.len == 9 and key == KEY.PLAINTEXT and tables.lower(name[8]) == 't';
 }
 
 /// Returns true when `new_tag` can trigger optional-close logic.
