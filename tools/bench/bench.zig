@@ -2,11 +2,8 @@ const std = @import("std");
 const root = @import("htmlparser");
 const default_options: root.ParseOptions = .{};
 const Document = default_options.GetDocument();
-
-const BenchMode = enum {
-    strictest,
-    fastest,
-};
+const parse_mode = @import("../parse_mode.zig");
+const ParseMode = parse_mode.ParseMode;
 
 fn elapsedNs(start: i96, finish: i96) u64 {
     if (finish <= start) return 0;
@@ -15,23 +12,6 @@ fn elapsedNs(start: i96, finish: i96) u64 {
 
 fn nowNs(io: std.Io) i96 {
     return std.Io.Timestamp.now(io, .awake).toNanoseconds();
-}
-
-fn parseMode(arg: []const u8) !BenchMode {
-    if (std.mem.eql(u8, arg, "strictest")) return .strictest;
-    if (std.mem.eql(u8, arg, "fastest")) return .fastest;
-    return error.InvalidBenchMode;
-}
-
-fn parseDocForBench(noalias doc: *Document, input: []u8, mode: BenchMode) !void {
-    switch (mode) {
-        .strictest => try doc.parse(input, .{
-            .drop_whitespace_text_nodes = false,
-        }),
-        .fastest => try doc.parse(input, .{
-            .drop_whitespace_text_nodes = true,
-        }),
-    }
 }
 
 /// Runs a built-in synthetic parse/query workload and prints elapsed ns.
@@ -62,7 +42,7 @@ pub fn runSynthetic(io: std.Io) !void {
 }
 
 /// Benchmarks parse throughput for one fixture and mode; returns total elapsed ns.
-pub fn runParseFile(io: std.Io, path: []const u8, iterations: usize, mode: BenchMode) !u64 {
+pub fn runParseFile(io: std.Io, path: []const u8, iterations: usize, mode: ParseMode) !u64 {
     const alloc = std.heap.smp_allocator;
 
     const input = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .unlimited);
@@ -86,9 +66,9 @@ pub fn runParseFile(io: std.Io, path: []const u8, iterations: usize, mode: Bench
             defer doc.deinit();
             if (working_opt) |working| {
                 @memcpy(working, input);
-                try parseDocForBench(&doc, working, mode);
+                try parse_mode.parseDoc(&doc, working, mode);
             } else {
-                try parseDocForBench(&doc, input, mode);
+                try parse_mode.parseDoc(&doc, input, mode);
             }
         }
         _ = parse_arena.reset(.retain_capacity);
@@ -117,7 +97,7 @@ pub fn runQueryParse(io: std.Io, selector: []const u8, iterations: usize) !u64 {
 }
 
 /// Benchmarks runtime query execution over a pre-parsed document.
-pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterations: usize, mode: BenchMode) !u64 {
+pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterations: usize, mode: ParseMode) !u64 {
     const alloc = std.heap.smp_allocator;
 
     const input = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .unlimited);
@@ -128,7 +108,7 @@ pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterati
 
     var doc = Document.init(alloc);
     defer doc.deinit();
-    try parseDocForBench(&doc, working, mode);
+    try parse_mode.parseDoc(&doc, working, mode);
 
     const start = nowNs(io);
     var i: usize = 0;
@@ -141,7 +121,7 @@ pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterati
 }
 
 /// Benchmarks cached-selector query execution over a pre-parsed document.
-pub fn runQueryCached(io: std.Io, path: []const u8, selector: []const u8, iterations: usize, mode: BenchMode) !u64 {
+pub fn runQueryCached(io: std.Io, path: []const u8, selector: []const u8, iterations: usize, mode: ParseMode) !u64 {
     const alloc = std.heap.smp_allocator;
 
     const input = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .unlimited);
@@ -157,7 +137,7 @@ pub fn runQueryCached(io: std.Io, path: []const u8, selector: []const u8, iterat
 
     var doc = Document.init(alloc);
     defer doc.deinit();
-    try parseDocForBench(&doc, working, mode);
+    try parse_mode.parseDoc(&doc, working, mode);
 
     const start = nowNs(io);
     var i: usize = 0;
@@ -194,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (args.len == 6 and std.mem.eql(u8, args[1], "query-match")) {
-        const mode = try parseMode(args[2]);
+        const mode = parse_mode.parseMode(args[2]) orelse return error.InvalidBenchMode;
         const iterations = try std.fmt.parseInt(usize, args[5], 10);
         const total_ns = try runQueryMatch(io, args[3], args[4], iterations, mode);
         std.debug.print("{d}\n", .{total_ns});
@@ -209,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (args.len == 6 and std.mem.eql(u8, args[1], "query-cached")) {
-        const mode = try parseMode(args[2]);
+        const mode = parse_mode.parseMode(args[2]) orelse return error.InvalidBenchMode;
         const iterations = try std.fmt.parseInt(usize, args[5], 10);
         const total_ns = try runQueryCached(io, args[3], args[4], iterations, mode);
         std.debug.print("{d}\n", .{total_ns});
@@ -217,7 +197,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (args.len == 5 and std.mem.eql(u8, args[1], "parse")) {
-        const mode = try parseMode(args[2]);
+        const mode = parse_mode.parseMode(args[2]) orelse return error.InvalidBenchMode;
         const iterations = try std.fmt.parseInt(usize, args[4], 10);
         const total_ns = try runParseFile(io, args[3], iterations, mode);
         std.debug.print("{d}\n", .{total_ns});

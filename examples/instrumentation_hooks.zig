@@ -26,7 +26,7 @@ const Hooks = struct {
     }
 };
 
-fn run() !void {
+pub fn run() !void {
     var doc = Document.init(std.testing.allocator);
     defer doc.deinit();
 

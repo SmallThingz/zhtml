@@ -2,27 +2,31 @@ const std = @import("std");
 const html = @import("htmlparser");
 const default_options: html.ParseOptions = .{};
 const Document = default_options.GetDocument();
+const parse_mode = @import("parse_mode.zig");
+const ParseMode = parse_mode.ParseMode;
 
-const ParseMode = enum {
-    strictest,
-    fastest,
+const ParsedFixture = struct {
+    doc: Document,
+    working: []u8,
+
+    fn deinit(self: *ParsedFixture, alloc: std.mem.Allocator) void {
+        self.doc.deinit();
+        alloc.free(self.working);
+    }
 };
 
-fn parseMode(s: []const u8) ?ParseMode {
-    if (std.mem.eql(u8, s, "strictest")) return .strictest;
-    if (std.mem.eql(u8, s, "fastest")) return .fastest;
-    return null;
-}
+fn parseFixtureDoc(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture_path: []const u8) !ParsedFixture {
+    const input = try std.Io.Dir.cwd().readFileAlloc(io, fixture_path, alloc, .unlimited);
+    defer alloc.free(input);
 
-fn parseDoc(noalias doc: *Document, input: []u8, mode: ParseMode) !void {
-    switch (mode) {
-        .strictest => try doc.parse(input, .{
-            .drop_whitespace_text_nodes = false,
-        }),
-        .fastest => try doc.parse(input, .{
-            .drop_whitespace_text_nodes = true,
-        }),
-    }
+    const working = try alloc.dupe(u8, input);
+    errdefer alloc.free(working);
+
+    var doc = Document.init(alloc);
+    errdefer doc.deinit();
+
+    try parse_mode.parseDoc(&doc, working, mode);
+    return .{ .doc = doc, .working = working };
 }
 
 fn jsonEscape(writer: anytype, s: []const u8) !void {
@@ -56,20 +60,13 @@ fn printJsonStringArray(writer: anytype, items: []const []const u8) !void {
 }
 
 fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture_path: []const u8, selector: []const u8) !void {
-    const input = try std.Io.Dir.cwd().readFileAlloc(io, fixture_path, alloc, .unlimited);
-    defer alloc.free(input);
-
-    const working = try alloc.dupe(u8, input);
-    defer alloc.free(working);
-
-    var doc = Document.init(alloc);
-    defer doc.deinit();
-    try parseDoc(&doc, working, mode);
+    var parsed = try parseFixtureDoc(io, alloc, mode, fixture_path);
+    defer parsed.deinit(alloc);
 
     var out_ids = std.ArrayList([]const u8).empty;
     defer out_ids.deinit(alloc);
 
-    var it = try doc.queryAllRuntime(selector);
+    var it = try parsed.doc.queryAllRuntime(selector);
     while (it.next()) |node| {
         if (node.getAttributeValue("id")) |id| {
             try out_ids.append(alloc, id);
@@ -84,18 +81,11 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
 }
 
 fn runSelectorCount(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture_path: []const u8, selector: []const u8) !void {
-    const input = try std.Io.Dir.cwd().readFileAlloc(io, fixture_path, alloc, .unlimited);
-    defer alloc.free(input);
-
-    const working = try alloc.dupe(u8, input);
-    defer alloc.free(working);
-
-    var doc = Document.init(alloc);
-    defer doc.deinit();
-    try parseDoc(&doc, working, mode);
+    var parsed = try parseFixtureDoc(io, alloc, mode, fixture_path);
+    defer parsed.deinit(alloc);
 
     var count: usize = 0;
-    var it = try doc.queryAllRuntime(selector);
+    var it = try parsed.doc.queryAllRuntime(selector);
     while (it.next()) |_| {
         count += 1;
     }
@@ -107,18 +97,11 @@ fn runSelectorCount(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixtu
 }
 
 fn runSelectorCountScopeTag(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture_path: []const u8, scope_tag: []const u8, selector: []const u8) !void {
-    const input = try std.Io.Dir.cwd().readFileAlloc(io, fixture_path, alloc, .unlimited);
-    defer alloc.free(input);
-
-    const working = try alloc.dupe(u8, input);
-    defer alloc.free(working);
-
-    var doc = Document.init(alloc);
-    defer doc.deinit();
-    try parseDoc(&doc, working, mode);
+    var parsed = try parseFixtureDoc(io, alloc, mode, fixture_path);
+    defer parsed.deinit(alloc);
 
     var count: usize = 0;
-    if (doc.findFirstTag(scope_tag)) |scope| {
+    if (parsed.doc.findFirstTag(scope_tag)) |scope| {
         var it = try scope.queryAllRuntime(selector);
         while (it.next()) |_| {
             count += 1;
@@ -132,22 +115,15 @@ fn runSelectorCountScopeTag(io: std.Io, alloc: std.mem.Allocator, mode: ParseMod
 }
 
 fn runParseTagsFile(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture_path: []const u8) !void {
-    const input = try std.Io.Dir.cwd().readFileAlloc(io, fixture_path, alloc, .unlimited);
-    defer alloc.free(input);
-
-    const working = try alloc.dupe(u8, input);
-    defer alloc.free(working);
-
-    var doc = Document.init(alloc);
-    defer doc.deinit();
-    try parseDoc(&doc, working, mode);
+    var parsed = try parseFixtureDoc(io, alloc, mode, fixture_path);
+    defer parsed.deinit(alloc);
 
     var tags = std.ArrayList([]const u8).empty;
     defer tags.deinit(alloc);
 
-    for (doc.nodes.items) |*n| {
+    for (parsed.doc.nodes.items) |*n| {
         if (n.kind != .element) continue;
-        try tags.append(alloc, n.name_or_text.slice(doc.source));
+        try tags.append(alloc, n.name_or_text.slice(parsed.doc.source));
     }
 
     var out_buf: std.Io.Writer.Allocating = .init(alloc);
@@ -175,28 +151,28 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, args[1], "selector-ids")) {
         if (args.len != 5) usage();
-        const mode = parseMode(args[2]) orelse usage();
+        const mode = parse_mode.parseMode(args[2]) orelse usage();
         try runSelectorIds(io, alloc, mode, args[3], args[4]);
         return;
     }
 
     if (std.mem.eql(u8, args[1], "selector-count")) {
         if (args.len != 5) usage();
-        const mode = parseMode(args[2]) orelse usage();
+        const mode = parse_mode.parseMode(args[2]) orelse usage();
         try runSelectorCount(io, alloc, mode, args[3], args[4]);
         return;
     }
 
     if (std.mem.eql(u8, args[1], "selector-count-scope-tag")) {
         if (args.len != 6) usage();
-        const mode = parseMode(args[2]) orelse usage();
+        const mode = parse_mode.parseMode(args[2]) orelse usage();
         try runSelectorCountScopeTag(io, alloc, mode, args[3], args[4], args[5]);
         return;
     }
 
     if (std.mem.eql(u8, args[1], "parse-tags-file")) {
         if (args.len != 4) usage();
-        const mode = parseMode(args[2]) orelse usage();
+        const mode = parse_mode.parseMode(args[2]) orelse usage();
         try runParseTagsFile(io, alloc, mode, args[3]);
         return;
     }

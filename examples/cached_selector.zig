@@ -3,7 +3,7 @@ const html = @import("htmlparser");
 const default_options: html.ParseOptions = .{};
 const Document = default_options.GetDocument();
 
-fn run() !void {
+pub fn run() !void {
     var doc = Document.init(std.testing.allocator);
     defer doc.deinit();
 

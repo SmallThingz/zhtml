@@ -3,7 +3,7 @@ const html = @import("htmlparser");
 const default_options: html.ParseOptions = .{};
 const Document = default_options.GetDocument();
 
-fn run() !void {
+pub fn run() !void {
     const fixture =
         "<html><body>" ++
         "<ul><li class='item'>A</li><li class='item'>B</li></ul>" ++

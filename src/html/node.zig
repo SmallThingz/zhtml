@@ -1,5 +1,6 @@
 const std = @import("std");
 const tables = @import("tables.zig");
+const attr_scan = @import("attr_scan.zig");
 const entities = @import("entities.zig");
 const attr_inline = @import("attr_inline.zig");
 const scanner = @import("scanner.zig");
@@ -324,17 +325,9 @@ fn writeAttrsHtml(doc: anytype, noalias raw: anytype, writer: anytype) WriterErr
             continue;
         }
 
-        const c = source[i];
-        if (c == '>' or c == '/') return;
-
         const name_start = i;
-        while (i < end and tables.IdentCharTable[source[i]]) : (i += 1) {}
-        if (i == name_start) {
-            i += 1;
-            continue;
-        }
-
-        const name = source[name_start..i];
+        const name = attr_scan.scanAttrNameOrSkip(source, end, &i) orelse return;
+        if (name.len == 0) continue;
         if (i >= end) {
             try writeAttrName(writer, name);
             return;
@@ -342,7 +335,7 @@ fn writeAttrsHtml(doc: anytype, noalias raw: anytype, writer: anytype) WriterErr
 
         const delim = source[i];
         if (delim == '=') {
-            const raw_value = parseRawAttrValue(source, end, i);
+            const raw_value = attr_scan.parseRawValue(source, end, i);
             // Preserve original raw attribute text when not parsed in-place.
             try writeByte(writer, ' ');
             try writer.writeAll(source[name_start..raw_value.next_start]);
@@ -351,7 +344,7 @@ fn writeAttrsHtml(doc: anytype, noalias raw: anytype, writer: anytype) WriterErr
         }
 
         if (delim == 0) {
-            const parsed = parseParsedAttrValue(source, end, i);
+            const parsed = attr_scan.parseParsedValue(source, end, i);
             try writeAttrName(writer, name);
             try writeAttrValue(writer, parsed.value);
             i = parsed.next_start;
@@ -400,96 +393,15 @@ fn writeByte(writer: anytype, b: u8) WriterError(@TypeOf(writer))!void {
     try writer.writeAll(&[_]u8{b});
 }
 
-const RawAttrValue = struct {
-    start: usize,
-    end: usize,
-    next_start: usize,
-};
+const ParsedAttrValue = attr_scan.ParsedValue;
 
-fn parseRawAttrValue(source: []const u8, span_end: usize, eq_index: usize) RawAttrValue {
-    var i = eq_index + 1;
-    while (i < span_end and tables.WhitespaceTable[source[i]]) : (i += 1) {}
-
-    if (i >= span_end) {
-        return .{ .start = i, .end = i, .next_start = i };
-    }
-
-    const c = source[i];
-    if (c == '>' or c == '/') {
-        return .{ .start = i, .end = i, .next_start = i };
-    }
-
-    if (c == '\'' or c == '"') {
-        const j = scanner.findByte(source, i + 1, c) orelse span_end;
-        const next_start = if (j < span_end) j + 1 else span_end;
-        return .{ .start = i + 1, .end = j, .next_start = next_start };
-    }
-
-    var j = i;
-    while (j < span_end) : (j += 1) {
-        const b = source[j];
-        if (b == '>' or b == '/' or tables.WhitespaceTable[b]) break;
-    }
-    return .{ .start = i, .end = j, .next_start = j };
-}
-
-const ParsedAttrValue = struct {
-    value: []const u8,
-    next_start: usize,
-};
-
-fn parseParsedAttrValue(source: []u8, span_end: usize, name_end: usize) ParsedAttrValue {
-    if (name_end + 1 >= span_end) return .{ .value = "", .next_start = span_end };
-
-    const marker = source[name_end + 1];
-    var value_start: usize = if (marker == 0) name_end + 2 else name_end + 1;
-    if (value_start > span_end) value_start = span_end;
-
-    const value_end = findAttrValueEnd(source, value_start, span_end);
-    const next = nextAfterAttrValue(source, value_end, span_end);
-    return .{ .value = source[value_start..value_end], .next_start = next };
-}
-
-fn findAttrValueEnd(source: []const u8, value_start: usize, span_end: usize) usize {
-    var i = value_start;
-    while (i < span_end and source[i] != 0) : (i += 1) {}
-    return i;
-}
-
-fn nextAfterAttrValue(source: []const u8, value_end: usize, span_end: usize) usize {
-    if (value_end >= span_end) return span_end;
-    var i = value_end + 1;
-    if (i >= span_end) return span_end;
-
-    if (source[i] == 0) {
-        if (i + 1 >= span_end) return span_end;
-
-        const len_byte = source[i + 1];
-        if (len_byte == 0xff) {
-            if (i + 6 > span_end) return span_end;
-            const skip = std.mem.readInt(u32, source[i + 2 .. i + 6][0..4], nativeEndian());
-            const next = i + 6 + @as(usize, @intCast(skip));
-            return @min(next, span_end);
-        }
-
-        const next = i + 2 + @as(usize, len_byte);
-        return @min(next, span_end);
-    }
-
-    if (tables.WhitespaceTable[source[i]]) {
-        while (i < span_end and tables.WhitespaceTable[source[i]]) : (i += 1) {}
-        return i;
-    }
-
-    return i;
-}
 
 fn skipAttrGap(source: []const u8, span_end: usize, start: usize) usize {
     if (start + 1 >= span_end) return span_end;
     const len_byte = source[start + 1];
     if (len_byte == 0xff) {
         if (start + 6 > span_end) return span_end;
-        const skip = std.mem.readInt(u32, source[start + 2 .. start + 6][0..4], nativeEndian());
+        const skip = std.mem.readInt(u32, source[start + 2 .. start + 6][0..4], attr_scan.nativeEndian());
         const next = start + 6 + @as(usize, @intCast(skip));
         return @min(next, span_end);
     }
@@ -497,9 +409,6 @@ fn skipAttrGap(source: []const u8, span_end: usize, start: usize) usize {
     return @min(next, span_end);
 }
 
-fn nativeEndian() std.builtin.Endian {
-    return @import("builtin").cpu.arch.endian();
-}
 
 fn appendDecodedSegment(noalias out: *std.ArrayList(u8), alloc: std.mem.Allocator, seg: []const u8) !void {
     try ensureOutExtra(out, alloc, seg.len);

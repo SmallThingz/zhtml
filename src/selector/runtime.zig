@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const tables = @import("../html/tables.zig");
 const tags = @import("../html/tags.zig");
+const test_helpers = @import("test_helpers.zig");
 
 /// Runtime selector parser errors.
 pub const Error = error{
@@ -232,31 +233,31 @@ const Parser = struct {
                         if (!self.consumeIf('~')) {
                             if (!self.consumeIf('|')) {
                                 if (!self.consumeIf(']')) return error.InvalidSelector;
-                                return .{ .name = name, .name_hash = hashIgnoreCaseAscii(name.slice(self.source)), .op = .exists, .value = .{} };
+                                return .{ .name = name, .name_hash = tables.hashIgnoreCaseAscii(name.slice(self.source)), .op = .exists, .value = .{} };
                             }
                             if (!self.consumeIf('=')) return error.InvalidSelector;
                             const v = try self.parseAttrValueThenClose();
-                            return .{ .name = name, .name_hash = hashIgnoreCaseAscii(name.slice(self.source)), .op = .dash_match, .value = v };
+                            return .{ .name = name, .name_hash = tables.hashIgnoreCaseAscii(name.slice(self.source)), .op = .dash_match, .value = v };
                         }
                         if (!self.consumeIf('=')) return error.InvalidSelector;
                         const v = try self.parseAttrValueThenClose();
-                        return .{ .name = name, .name_hash = hashIgnoreCaseAscii(name.slice(self.source)), .op = .includes, .value = v };
+                        return .{ .name = name, .name_hash = tables.hashIgnoreCaseAscii(name.slice(self.source)), .op = .includes, .value = v };
                     }
                     if (!self.consumeIf('=')) return error.InvalidSelector;
                     const v = try self.parseAttrValueThenClose();
-                    return .{ .name = name, .name_hash = hashIgnoreCaseAscii(name.slice(self.source)), .op = .contains, .value = v };
+                    return .{ .name = name, .name_hash = tables.hashIgnoreCaseAscii(name.slice(self.source)), .op = .contains, .value = v };
                 }
                 if (!self.consumeIf('=')) return error.InvalidSelector;
                 const v = try self.parseAttrValueThenClose();
-                return .{ .name = name, .name_hash = hashIgnoreCaseAscii(name.slice(self.source)), .op = .suffix, .value = v };
+                return .{ .name = name, .name_hash = tables.hashIgnoreCaseAscii(name.slice(self.source)), .op = .suffix, .value = v };
             }
             if (!self.consumeIf('=')) return error.InvalidSelector;
             const v = try self.parseAttrValueThenClose();
-            return .{ .name = name, .name_hash = hashIgnoreCaseAscii(name.slice(self.source)), .op = .prefix, .value = v };
+            return .{ .name = name, .name_hash = tables.hashIgnoreCaseAscii(name.slice(self.source)), .op = .prefix, .value = v };
         }
 
         const v = try self.parseAttrValueThenClose();
-        return .{ .name = name, .name_hash = hashIgnoreCaseAscii(name.slice(self.source)), .op = .eq, .value = v };
+        return .{ .name = name, .name_hash = tables.hashIgnoreCaseAscii(name.slice(self.source)), .op = .eq, .value = v };
     }
 
     fn parseAttrValueThenClose(noalias self: *Parser) Error!ast.Range {
@@ -498,14 +499,6 @@ fn parseSignedInt(bytes: []const u8) ?i32 {
     return @intCast(value);
 }
 
-fn hashIgnoreCaseAscii(bytes: []const u8) u32 {
-    var h: u32 = 2166136261;
-    for (bytes) |c| {
-        h = (h ^ @as(u32, tables.lower(c))) *% 16777619;
-    }
-    return h;
-}
-
 fn selectorRequiresParent(compounds: []const ast.Compound, pseudos: []const ast.Pseudo) bool {
     for (compounds) |comp| {
         switch (comp.combinator) {
@@ -526,35 +519,14 @@ test "runtime selector parser covers all attribute operators" {
     const alloc = std.testing.allocator;
     var sel = try compileRuntimeImpl(alloc, "div[a][b=v][c^=x][d$=y][e*=z][f~=m][g|=en]");
     defer sel.deinit(alloc);
-
-    try std.testing.expectEqual(@as(usize, 1), sel.groups.len);
-    try std.testing.expectEqual(@as(usize, 1), sel.compounds.len);
-
-    const comp = sel.compounds[0];
-    try std.testing.expectEqual(@as(u32, 7), comp.attr_len);
-    try std.testing.expect(sel.attrs[comp.attr_start + 0].op == .exists);
-    try std.testing.expect(sel.attrs[comp.attr_start + 1].op == .eq);
-    try std.testing.expect(sel.attrs[comp.attr_start + 2].op == .prefix);
-    try std.testing.expect(sel.attrs[comp.attr_start + 3].op == .suffix);
-    try std.testing.expect(sel.attrs[comp.attr_start + 4].op == .contains);
-    try std.testing.expect(sel.attrs[comp.attr_start + 5].op == .includes);
-    try std.testing.expect(sel.attrs[comp.attr_start + 6].op == .dash_match);
+    try test_helpers.expectAllAttributeOps(sel);
 }
 
 test "runtime selector parser tracks combinator chain and grouping" {
     const alloc = std.testing.allocator;
     var sel = try compileRuntimeImpl(alloc, "a b > c + d ~ e, #x");
     defer sel.deinit(alloc);
-
-    try std.testing.expectEqual(@as(usize, 2), sel.groups.len);
-    try std.testing.expectEqual(@as(usize, 6), sel.compounds.len);
-
-    try std.testing.expect(sel.compounds[0].combinator == .none);
-    try std.testing.expect(sel.compounds[1].combinator == .descendant);
-    try std.testing.expect(sel.compounds[2].combinator == .child);
-    try std.testing.expect(sel.compounds[3].combinator == .adjacent);
-    try std.testing.expect(sel.compounds[4].combinator == .sibling);
-    try std.testing.expect(sel.compounds[5].combinator == .none);
+    try test_helpers.expectCombinatorChain(sel);
 }
 
 test "runtime selector parser supports leading combinator and pseudo-only compounds" {

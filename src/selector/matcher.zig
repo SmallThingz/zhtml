@@ -9,8 +9,8 @@ const InvalidIndex: u32 = common.InvalidIndex;
 const MaxProbeEntries: usize = 24;
 const MaxCollectedAttrs: usize = 24;
 const LocalMatchFrameCap: usize = 48;
-const HashId: u32 = hashIgnoreCaseAscii("id");
-const HashClass: u32 = hashIgnoreCaseAscii("class");
+const HashId: u32 = tables.hashIgnoreCaseAscii("id");
+const HashClass: u32 = tables.hashIgnoreCaseAscii("class");
 const EnableQueryAccel = true;
 const EnableMultiAttrCollect = true;
 const isElementLike = common.isElementLike;
@@ -18,6 +18,116 @@ const matchesScopeAnchor = common.matchesScopeAnchor;
 const parentElement = common.parentElement;
 const prevElementSibling = common.prevElementSibling;
 const nextElementSibling = common.nextElementSibling;
+
+pub const TraversalBounds = struct {
+    start: u32,
+    end_excl: u32,
+};
+
+pub fn traversalBounds(comptime Doc: type, doc: *const Doc, scope_root: u32) TraversalBounds {
+    const start: u32 = if (scope_root == InvalidIndex) 1 else scope_root + 1;
+    const end_excl: u32 = if (scope_root == InvalidIndex)
+        @as(u32, @intCast(doc.nodes.items.len))
+    else
+        doc.nodes.items[scope_root].subtree_end + 1;
+    return .{ .start = start, .end_excl = end_excl };
+}
+
+pub fn tagMatches(selector_source: []const u8, comp: ast.Compound, node_name: []const u8) bool {
+    const tag = comp.tag.slice(selector_source);
+    const tag_key: u64 = if (comp.tag_key != 0) comp.tag_key else tags.first8Key(tag);
+    const node_key = tags.first8Key(node_name);
+    return tags.equalByLenAndKeyIgnoreCase(node_name, node_key, tag, tag_key);
+}
+
+pub fn evalAttrOp(raw: []const u8, value: []const u8, op: ast.AttrOp) bool {
+    return switch (op) {
+        .exists => true,
+        .eq => std.mem.eql(u8, raw, value),
+        .prefix => std.mem.startsWith(u8, raw, value),
+        .suffix => std.mem.endsWith(u8, raw, value),
+        .contains => std.mem.indexOf(u8, raw, value) != null,
+        .includes => tables.tokenIncludesAsciiWhitespace(raw, value),
+        .dash_match => std.mem.eql(u8, raw, value) or (raw.len > value.len and std.mem.startsWith(u8, raw, value) and raw[value.len] == '-'),
+    };
+}
+
+pub fn matchesAttrSelectorDebug(
+    doc: anytype,
+    node: anytype,
+    selector_source: []const u8,
+    sel: ast.AttrSelector,
+) bool {
+    const name = sel.name.slice(selector_source);
+    const raw = attr_inline.getAttrValue(doc, node, name) orelse return false;
+    const value = sel.value.slice(selector_source);
+    return evalAttrOp(raw, value, sel.op);
+}
+
+pub fn matchesNotSimpleCommon(ctx: anytype, item: ast.NotSimple) bool {
+    return switch (item.kind) {
+        .tag => tables.eqlIgnoreCaseAscii(ctx.nodeName(), item.text.slice(ctx.selector_source)),
+        .id => blk: {
+            const id = item.text.slice(ctx.selector_source);
+            const v = ctx.getAttrValue("id") orelse break :blk false;
+            break :blk std.mem.eql(u8, v, id);
+        },
+        .class => ctx.classMatches(item.text.slice(ctx.selector_source)),
+        .attr => ctx.attrMatches(item.attr),
+    };
+}
+
+pub fn NotSimpleCtxFast(comptime Doc: type, comptime Node: type) type {
+    return struct {
+        doc: Doc,
+        node: Node,
+        probe: *AttrProbe,
+        collected: ?*CollectedAttrs,
+        selector_source: []const u8,
+
+        fn nodeName(self: @This()) []const u8 {
+            return self.node.name_or_text.slice(self.doc.source);
+        }
+
+        fn getAttrValue(self: @This(), name: []const u8) ?[]const u8 {
+            const hash = if (std.mem.eql(u8, name, "id")) HashId else tables.hashIgnoreCaseAscii(name);
+            return attrValueByHashFrom(self.doc, self.node, self.probe, self.collected, name, hash);
+        }
+
+        fn classMatches(self: @This(), class_name: []const u8) bool {
+            return hasClass(self.doc, self.node, self.probe, self.collected, class_name);
+        }
+
+        fn attrMatches(self: @This(), sel: ast.AttrSelector) bool {
+            return matchesAttrSelector(self.doc, self.node, self.probe, self.collected, self.selector_source, sel);
+        }
+    };
+}
+
+pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
+    return struct {
+        doc: Doc,
+        node: Node,
+        selector_source: []const u8,
+
+        fn nodeName(self: @This()) []const u8 {
+            return self.node.name_or_text.slice(self.doc.source);
+        }
+
+        fn getAttrValue(self: @This(), name: []const u8) ?[]const u8 {
+            return attr_inline.getAttrValue(self.doc, self.node, name);
+        }
+
+        fn classMatches(self: @This(), class_name: []const u8) bool {
+            const class_attr = attr_inline.getAttrValue(self.doc, self.node, "class") orelse return false;
+            return tables.tokenIncludesAsciiWhitespace(class_attr, class_name);
+        }
+
+        fn attrMatches(self: @This(), sel: ast.AttrSelector) bool {
+            return matchesAttrSelectorDebug(self.doc, self.node, self.selector_source, sel);
+        }
+    };
+}
 
 /// Returns first matching node index for `selector` within optional `scope_root`.
 pub fn queryOneIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: u32) ?u32 {
@@ -218,14 +328,9 @@ fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selecto
         if (used) return null;
     }
 
-    const start: u32 = if (scope_root == InvalidIndex) 1 else scope_root + 1;
-    const end_excl: u32 = if (scope_root == InvalidIndex)
-        @as(u32, @intCast(doc.nodes.items.len))
-    else
-        doc.nodes.items[scope_root].subtree_end + 1;
-
-    var i = start;
-    while (i < end_excl and i < doc.nodes.items.len) : (i += 1) {
+    const bounds = traversalBounds(Doc, doc, scope_root);
+    var i = bounds.start;
+    while (i < bounds.end_excl and i < doc.nodes.items.len) : (i += 1) {
         const node = &doc.nodes.items[i];
         if (!isElementLike(node.kind)) continue;
         if (matchGroupFromRight(Doc, doc, selector, group, rightmost, i, scope_root)) return i;
@@ -251,11 +356,8 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
     const collected_ptr: ?*CollectedAttrs = if (use_collected) &collected_attrs else null;
 
     if (comp.has_tag != 0) {
-        const tag = comp.tag.slice(selector.source);
-        const tag_key: u64 = if (comp.tag_key != 0) comp.tag_key else tags.first8Key(tag);
         const node_name = node.name_or_text.slice(doc.source);
-        const node_key = tags.first8Key(node_name);
-        if (!tags.equalByLenAndKeyIgnoreCase(node_name, node_key, tag, tag_key)) return false;
+        if (!tagMatches(selector.source, comp, node_name)) return false;
     }
 
     if (comp.has_id != 0) {
@@ -312,19 +414,18 @@ fn matchesNotSimple(
     selector_source: []const u8,
     item: ast.NotSimple,
 ) bool {
-    return switch (item.kind) {
-        .tag => tables.eqlIgnoreCaseAscii(node.name_or_text.slice(doc.source), item.text.slice(selector_source)),
-        .id => blk: {
-            const id = item.text.slice(selector_source);
-            const v = attrValueByHashFrom(doc, node, probe, collected, "id", HashId) orelse break :blk false;
-            break :blk std.mem.eql(u8, v, id);
-        },
-        .class => hasClass(doc, node, probe, collected, item.text.slice(selector_source)),
-        .attr => matchesAttrSelector(doc, node, probe, collected, selector_source, item.attr),
+    const Ctx = NotSimpleCtxFast(@TypeOf(doc), @TypeOf(node));
+    const ctx = Ctx{
+        .doc = doc,
+        .node = node,
+        .probe = probe,
+        .collected = collected,
+        .selector_source = selector_source,
     };
+    return matchesNotSimpleCommon(ctx, item);
 }
 
-fn matchesPseudo(doc: anytype, node_index: u32, pseudo: ast.Pseudo) bool {
+pub fn matchesPseudo(doc: anytype, node_index: u32, pseudo: ast.Pseudo) bool {
     return switch (pseudo.kind) {
         .first_child => prevElementSibling(doc, node_index) == null,
         .last_child => nextElementSibling(doc, node_index) == null,
@@ -349,19 +450,10 @@ fn matchesAttrSelector(
     sel: ast.AttrSelector,
 ) bool {
     const name = sel.name.slice(selector_source);
-    const name_hash = if (sel.name_hash != 0) sel.name_hash else hashIgnoreCaseAscii(name);
+    const name_hash = if (sel.name_hash != 0) sel.name_hash else tables.hashIgnoreCaseAscii(name);
     const raw = attrValueByHashFrom(doc, node, probe, collected, name, name_hash) orelse return false;
     const value = sel.value.slice(selector_source);
-
-    return switch (sel.op) {
-        .exists => true,
-        .eq => std.mem.eql(u8, raw, value),
-        .prefix => std.mem.startsWith(u8, raw, value),
-        .suffix => std.mem.endsWith(u8, raw, value),
-        .contains => std.mem.indexOf(u8, raw, value) != null,
-        .includes => tables.tokenIncludesAsciiWhitespace(raw, value),
-        .dash_match => std.mem.eql(u8, raw, value) or (raw.len > value.len and std.mem.startsWith(u8, raw, value) and raw[value.len] == '-'),
-    };
+    return evalAttrOp(raw, value, sel.op);
 }
 
 fn hasClass(doc: anytype, node: anytype, noalias probe: *AttrProbe, collected: ?*CollectedAttrs, class_name: []const u8) bool {
@@ -498,7 +590,7 @@ fn prepareCollectedAttrs(selector: ast.Selector, comp: ast.Compound, out: *Colle
     while (attr_i < comp.attr_len) : (attr_i += 1) {
         const attr_sel = selector.attrs[comp.attr_start + attr_i];
         const name = attr_sel.name.slice(selector.source);
-        const hash = if (attr_sel.name_hash != 0) attr_sel.name_hash else hashIgnoreCaseAscii(name);
+        const hash = if (attr_sel.name_hash != 0) attr_sel.name_hash else tables.hashIgnoreCaseAscii(name);
         if (!pushCollectedName(out, name, hash)) return false;
     }
 
@@ -510,7 +602,7 @@ fn prepareCollectedAttrs(selector: ast.Selector, comp: ast.Compound, out: *Colle
             .class => if (!pushCollectedName(out, "class", HashClass)) return false,
             .attr => {
                 const name = item.attr.name.slice(selector.source);
-                const hash = if (item.attr.name_hash != 0) item.attr.name_hash else hashIgnoreCaseAscii(name);
+                const hash = if (item.attr.name_hash != 0) item.attr.name_hash else tables.hashIgnoreCaseAscii(name);
                 if (!pushCollectedName(out, name, hash)) return false;
             },
             else => {},
@@ -552,12 +644,4 @@ fn findProbeEntry(noalias probe: *const AttrProbe, needle: []const u8, needle_ha
         if (tables.eqlIgnoreCaseAscii(entry.name, needle)) return i;
     }
     return null;
-}
-
-fn hashIgnoreCaseAscii(bytes: []const u8) u32 {
-    var h: u32 = 2166136261;
-    for (bytes) |c| {
-        h = (h ^ @as(u32, tables.lower(c))) *% 16777619;
-    }
-    return h;
 }

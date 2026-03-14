@@ -414,6 +414,23 @@ fn freeArgv(alloc: std.mem.Allocator, argv: []const []const u8) void {
     alloc.free(argv);
 }
 
+fn freeParseSamples(alloc: std.mem.Allocator, results: []const ParseResult) void {
+    for (results) |row| {
+        alloc.free(row.samples_ns);
+    }
+}
+
+fn freeQuerySamples(alloc: std.mem.Allocator, results: []const QueryResult) void {
+    for (results) |row| {
+        alloc.free(row.samples_ns);
+    }
+}
+
+fn deinitOwnedStringList(alloc: std.mem.Allocator, list: *std.ArrayList([]const u8)) void {
+    for (list.items) |item| alloc.free(item);
+    list.deinit(alloc);
+}
+
 fn runIntCmd(io: std.Io, alloc: std.mem.Allocator, argv: []const []const u8) !u64 {
     const taskset_path: ?[]const u8 = blk: {
         if (common.fileExists(io, "/usr/bin/taskset")) break :blk "/usr/bin/taskset";
@@ -568,21 +585,6 @@ fn findReadmeQuery(rows: []const ReadmeQueryResult, parser_name: []const u8, cas
     return null;
 }
 
-fn appendUniqueString(list: *std.ArrayList([]const u8), alloc: std.mem.Allocator, value: []const u8) !void {
-    for (list.items) |it| {
-        if (std.mem.eql(u8, it, value)) return;
-    }
-    try list.append(alloc, value);
-}
-
-fn writeMaybeF64(w: anytype, value: ?f64) !void {
-    if (value) |v| {
-        try w.print("{d:.2}", .{v});
-    } else {
-        try w.writeAll("-");
-    }
-}
-
 fn renderDocumentationBenchmarkSection(alloc: std.mem.Allocator, snap: ReadmeBenchSnapshot) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
@@ -591,19 +593,40 @@ fn renderDocumentationBenchmarkSection(alloc: std.mem.Allocator, snap: ReadmeBen
     var fixtures = std.ArrayList([]const u8).empty;
     defer fixtures.deinit(alloc);
     for (snap.parse_results) |row| {
-        try appendUniqueString(&fixtures, alloc, row.fixture);
+        var seen = false;
+        for (fixtures.items) |it| {
+            if (std.mem.eql(u8, it, row.fixture)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) try fixtures.append(alloc, row.fixture);
     }
 
     var query_match_cases = std.ArrayList([]const u8).empty;
     defer query_match_cases.deinit(alloc);
     for (snap.query_match_results) |row| {
-        try appendUniqueString(&query_match_cases, alloc, row.case);
+        var seen = false;
+        for (query_match_cases.items) |it| {
+            if (std.mem.eql(u8, it, row.case)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) try query_match_cases.append(alloc, row.case);
     }
 
     var query_parse_cases = std.ArrayList([]const u8).empty;
     defer query_parse_cases.deinit(alloc);
     for (snap.query_parse_results) |row| {
-        try appendUniqueString(&query_parse_cases, alloc, row.case);
+        var seen = false;
+        for (query_parse_cases.items) |it| {
+            if (std.mem.eql(u8, it, row.case)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) try query_parse_cases.append(alloc, row.case);
     }
 
     try w.print("Source: `bench/results/latest.json` (`{s}` profile).\n\n", .{snap.profile});
@@ -613,11 +636,23 @@ fn renderDocumentationBenchmarkSection(alloc: std.mem.Allocator, snap: ReadmeBen
     try w.writeAll("|---|---:|---:|---:|\n");
     for (fixtures.items) |fixture| {
         try w.print("| `{s}` | ", .{fixture});
-        try writeMaybeF64(w, findReadmeParseThroughput(snap.parse_results, "ours", fixture));
+        if (findReadmeParseThroughput(snap.parse_results, "ours", fixture)) |v| {
+            try w.print("{d:.2}", .{v});
+        } else {
+            try w.writeAll("-");
+        }
         try w.writeAll(" | ");
-        try writeMaybeF64(w, findReadmeParseThroughput(snap.parse_results, "lol-html", fixture));
+        if (findReadmeParseThroughput(snap.parse_results, "lol-html", fixture)) |v| {
+            try w.print("{d:.2}", .{v});
+        } else {
+            try w.writeAll("-");
+        }
         try w.writeAll(" | ");
-        try writeMaybeF64(w, findReadmeParseThroughput(snap.parse_results, "lexbor", fixture));
+        if (findReadmeParseThroughput(snap.parse_results, "lexbor", fixture)) |v| {
+            try w.print("{d:.2}", .{v});
+        } else {
+            try w.writeAll("-");
+        }
         try w.writeAll(" |\n");
     }
 
@@ -627,9 +662,17 @@ fn renderDocumentationBenchmarkSection(alloc: std.mem.Allocator, snap: ReadmeBen
     for (query_match_cases.items) |case_name| {
         const ours = findReadmeQuery(snap.query_match_results, "ours", case_name);
         try w.print("| `{s}` | ", .{case_name});
-        try writeMaybeF64(w, if (ours) |s| s.ops_s else null);
+        if (ours) |s| {
+            try w.print("{d:.2}", .{s.ops_s});
+        } else {
+            try w.writeAll("-");
+        }
         try w.writeAll(" | ");
-        try writeMaybeF64(w, if (ours) |s| s.ns_per_op else null);
+        if (ours) |s| {
+            try w.print("{d:.2}", .{s.ns_per_op});
+        } else {
+            try w.writeAll("-");
+        }
         try w.writeAll(" |\n");
     }
 
@@ -639,9 +682,17 @@ fn renderDocumentationBenchmarkSection(alloc: std.mem.Allocator, snap: ReadmeBen
     for (query_match_cases.items) |case_name| {
         const ours = findReadmeQuery(snap.query_cached_results, "ours", case_name);
         try w.print("| `{s}` | ", .{case_name});
-        try writeMaybeF64(w, if (ours) |s| s.ops_s else null);
+        if (ours) |s| {
+            try w.print("{d:.2}", .{s.ops_s});
+        } else {
+            try w.writeAll("-");
+        }
         try w.writeAll(" | ");
-        try writeMaybeF64(w, if (ours) |s| s.ns_per_op else null);
+        if (ours) |s| {
+            try w.print("{d:.2}", .{s.ns_per_op});
+        } else {
+            try w.writeAll("-");
+        }
         try w.writeAll(" |\n");
     }
 
@@ -651,9 +702,17 @@ fn renderDocumentationBenchmarkSection(alloc: std.mem.Allocator, snap: ReadmeBen
     for (query_parse_cases.items) |case_name| {
         const ours = findReadmeQuery(snap.query_parse_results, "ours", case_name);
         try w.print("| `{s}` | ", .{case_name});
-        try writeMaybeF64(w, if (ours) |r| r.ops_s else null);
+        if (ours) |r| {
+            try w.print("{d:.2}", .{r.ops_s});
+        } else {
+            try w.writeAll("-");
+        }
         try w.writeAll(" | ");
-        try writeMaybeF64(w, if (ours) |r| r.ns_per_op else null);
+        if (ours) |r| {
+            try w.print("{d:.2}", .{r.ns_per_op});
+        } else {
+            try w.writeAll("-");
+        }
         try w.writeAll(" |\n");
     }
 
@@ -711,14 +770,6 @@ const ParseAverageRow = struct {
 
 fn cmpParseAverageDesc(_: void, a: ParseAverageRow, b: ParseAverageRow) bool {
     return a.avg_mb_s > b.avg_mb_s;
-}
-
-fn writeSpaces(w: anytype, count: usize) !void {
-    for (0..count) |_| try w.writeAll(" ");
-}
-
-fn writeRepeatGlyph(w: anytype, glyph: []const u8, count: usize) !void {
-    for (0..count) |_| try w.writeAll(glyph);
 }
 
 fn parseAverageRows(alloc: std.mem.Allocator, snap: ReadmeBenchSnapshot) ![]ParseAverageRow {
@@ -836,10 +887,16 @@ fn renderReadmeAutoSummary(io: std.Io, alloc: std.mem.Allocator) ![]u8 {
             else
                 @as(usize, 0);
             try w.writeAll(r.parser);
-            try writeSpaces(w, max_name_len - r.parser.len);
+            for (0..max_name_len - r.parser.len) |_| {
+                try w.writeByte(' ');
+            }
             try w.writeAll(" │");
-            try writeRepeatGlyph(w, "█", filled);
-            try writeRepeatGlyph(w, "░", width - filled);
+            for (0..filled) |_| {
+                try w.writeAll("█");
+            }
+            for (0..(width - filled)) |_| {
+                try w.writeAll("░");
+            }
             try w.print("│ {d:.2} MB/s ({d:.2}%)\n", .{ r.avg_mb_s, pct });
         }
         try w.writeAll("```\n");
@@ -1339,7 +1396,10 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
     try buildRunners(io, alloc);
 
     var parse_results = std.ArrayList(ParseResult).empty;
-    defer parse_results.deinit(alloc);
+    defer {
+        freeParseSamples(alloc, parse_results.items);
+        parse_results.deinit(alloc);
+    }
 
     for (profile.fixtures) |fixture| {
         for (parse_parsers) |parser_name| {
@@ -1350,7 +1410,10 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
     }
 
     var query_parse_results = std.ArrayList(QueryResult).empty;
-    defer query_parse_results.deinit(alloc);
+    defer {
+        freeQuerySamples(alloc, query_parse_results.items);
+        query_parse_results.deinit(alloc);
+    }
     for (query_parse_modes) |qm| {
         for (profile.query_parse_cases) |qc| {
             std.debug.print("benchmarking query-parse {s} on {s} ({d} iters)\n", .{ qm.parser, qc.name, qc.iterations });
@@ -1360,7 +1423,10 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
     }
 
     var query_match_results = std.ArrayList(QueryResult).empty;
-    defer query_match_results.deinit(alloc);
+    defer {
+        freeQuerySamples(alloc, query_match_results.items);
+        query_match_results.deinit(alloc);
+    }
     for (query_modes) |qm| {
         for (profile.query_match_cases) |qc| {
             std.debug.print("benchmarking query-match {s} on {s} ({d} iters)\n", .{ qm.parser, qc.name, qc.iterations });
@@ -1370,7 +1436,10 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
     }
 
     var query_cached_results = std.ArrayList(QueryResult).empty;
-    defer query_cached_results.deinit(alloc);
+    defer {
+        freeQuerySamples(alloc, query_cached_results.items);
+        query_cached_results.deinit(alloc);
+    }
     for (query_modes) |qm| {
         for (profile.query_cached_cases) |qc| {
             std.debug.print("benchmarking query-cached {s} on {s} ({d} iters)\n", .{ qm.parser, qc.name, qc.iterations });
@@ -1432,7 +1501,7 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
     }
 
     var failures = std.ArrayList([]const u8).empty;
-    defer failures.deinit(alloc);
+    defer deinitOwnedStringList(alloc, &failures);
 
     for (gate_rows) |g| {
         if (std.mem.eql(u8, profile.name, "stable") and !g.pass) {
@@ -2406,39 +2475,29 @@ fn loadBuildStepSet(io: std.Io, alloc: std.mem.Allocator) !std.StringHashMap(voi
     return set;
 }
 
-fn trimMarkdownLinkTarget(raw: []const u8) []const u8 {
-    var target = std.mem.trim(u8, raw, " \t\r");
+fn validateMarkdownLink(io: std.Io, alloc: std.mem.Allocator, md_path: []const u8, line_no: usize, target_raw: []const u8, ok: *bool) !void {
+    var target = std.mem.trim(u8, target_raw, " \t\r");
     if (target.len >= 2 and target[0] == '<' and target[target.len - 1] == '>') {
         target = target[1 .. target.len - 1];
     }
-    if (target.len == 0) return target;
+    if (target.len == 0) return;
     if (target[0] != '<') {
         const ws_idx = std.mem.indexOfAny(u8, target, " \t\r") orelse target.len;
         target = target[0..ws_idx];
     }
-    return target;
-}
-
-fn sliceBeforeFirstAny(haystack: []const u8, chars: []const u8) []const u8 {
-    const idx = std.mem.indexOfAny(u8, haystack, chars) orelse haystack.len;
-    return haystack[0..idx];
-}
-
-fn isRemoteLink(target: []const u8) bool {
-    if (std.mem.startsWith(u8, target, "http://")) return true;
-    if (std.mem.startsWith(u8, target, "https://")) return true;
-    if (std.mem.startsWith(u8, target, "mailto:")) return true;
-    if (std.mem.startsWith(u8, target, "tel:")) return true;
-    return std.mem.indexOf(u8, target, "://") != null;
-}
-
-fn validateMarkdownLink(io: std.Io, alloc: std.mem.Allocator, md_path: []const u8, line_no: usize, target_raw: []const u8, ok: *bool) !void {
-    const target = trimMarkdownLinkTarget(target_raw);
     if (target.len == 0) return;
     if (target[0] == '#') return;
-    if (isRemoteLink(target)) return;
+    if (std.mem.startsWith(u8, target, "http://") or
+        std.mem.startsWith(u8, target, "https://") or
+        std.mem.startsWith(u8, target, "mailto:") or
+        std.mem.startsWith(u8, target, "tel:") or
+        std.mem.indexOf(u8, target, "://") != null)
+    {
+        return;
+    }
 
-    const path_only = sliceBeforeFirstAny(target, "#?");
+    const path_end = std.mem.indexOfAny(u8, target, "#?") orelse target.len;
+    const path_only = target[0..path_end];
     if (path_only.len == 0) return;
 
     if (std.mem.startsWith(u8, path_only, "/")) {
@@ -2692,4 +2751,53 @@ pub fn main(init: std.process.Init) !void {
 
     usage();
     return error.InvalidCommand;
+}
+
+test "bench cleanup frees sample buffers" {
+    const alloc = std.testing.allocator;
+
+    var empty_parse: [0]ParseResult = .{};
+    freeParseSamples(alloc, &empty_parse);
+
+    const parse_samples = try alloc.alloc(u64, 2);
+    parse_samples[0] = 1;
+    parse_samples[1] = 2;
+    var parse_rows = [_]ParseResult{.{
+        .parser = "ours",
+        .fixture = "fixture.html",
+        .iterations = 1,
+        .samples_ns = parse_samples,
+        .median_ns = 1,
+        .throughput_mb_s = 1.0,
+    }};
+    freeParseSamples(alloc, &parse_rows);
+
+    const query_samples = try alloc.alloc(u64, 1);
+    query_samples[0] = 3;
+    var query_rows = [_]QueryResult{.{
+        .parser = "ours",
+        .mode = "fastest",
+        .case = "case",
+        .selector = "div",
+        .fixture = null,
+        .iterations = 1,
+        .samples_ns = query_samples,
+        .median_ns = 1,
+        .ops_s = 1.0,
+        .ns_per_op = 1.0,
+    }};
+    freeQuerySamples(alloc, &query_rows);
+
+    var empty_query: [0]QueryResult = .{};
+    freeQuerySamples(alloc, &empty_query);
+}
+
+test "owned string list cleanup frees entries" {
+    const alloc = std.testing.allocator;
+    var empty = std.ArrayList([]const u8).empty;
+    deinitOwnedStringList(alloc, &empty);
+    var list = std.ArrayList([]const u8).empty;
+    try list.append(alloc, try alloc.dupe(u8, "one"));
+    try list.append(alloc, try alloc.dupe(u8, "two"));
+    deinitOwnedStringList(alloc, &list);
 }
