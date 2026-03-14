@@ -7,6 +7,10 @@ const scanner = @import("scanner.zig");
 const tags = @import("tags.zig");
 const common = @import("../common.zig");
 
+// SAFETY: Node helpers assume `self.index` is in-bounds for `doc.nodes.items`
+// and that `doc.source` outlives returned slices. Attribute parsing relies on
+// `raw.attr_end <= doc.source.len`.
+
 const InvalidIndex: u32 = common.InvalidIndex;
 const isElementLike = common.isElementLike;
 
@@ -395,8 +399,9 @@ fn writeByte(writer: anytype, b: u8) WriterError(@TypeOf(writer))!void {
 
 const ParsedAttrValue = attr_scan.ParsedValue;
 
-
 fn skipAttrGap(source: []const u8, span_end: usize, start: usize) usize {
+    std.debug.assert(span_end <= source.len);
+    std.debug.assert(start < span_end);
     if (start + 1 >= span_end) return span_end;
     const len_byte = source[start + 1];
     if (len_byte == 0xff) {
@@ -408,7 +413,6 @@ fn skipAttrGap(source: []const u8, span_end: usize, start: usize) usize {
     const next = start + 2 + @as(usize, len_byte);
     return @min(next, span_end);
 }
-
 
 fn appendDecodedSegment(noalias out: *std.ArrayList(u8), alloc: std.mem.Allocator, seg: []const u8) !void {
     try ensureOutExtra(out, alloc, seg.len);

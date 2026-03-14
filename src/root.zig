@@ -186,7 +186,7 @@ test "writeHtml parses and prints complex document" {
     ;
     const src = try alloc.dupe(u8, src_const);
     defer alloc.free(src);
-    try doc.parse(src, .{.drop_whitespace_text_nodes = false});
+    try doc.parse(src, .{ .drop_whitespace_text_nodes = false });
 
     const html = doc.html() orelse return error.TestUnexpectedResult;
 

@@ -5,6 +5,10 @@ const tags = @import("../html/tags.zig");
 const attr_inline = @import("../html/attr_inline.zig");
 const common = @import("../common.zig");
 
+// SAFETY: Selector AST indices are trusted to be internally consistent
+// (group/compound/predicate ranges). Document node indices are validated
+// before use; debug asserts guard scope bounds in key entry points.
+
 const InvalidIndex: u32 = common.InvalidIndex;
 const MaxProbeEntries: usize = 24;
 const MaxCollectedAttrs: usize = 24;
@@ -25,6 +29,7 @@ pub const TraversalBounds = struct {
 };
 
 pub fn traversalBounds(comptime Doc: type, doc: *const Doc, scope_root: u32) TraversalBounds {
+    std.debug.assert(scope_root == InvalidIndex or scope_root < doc.nodes.items.len);
     const start: u32 = if (scope_root == InvalidIndex) 1 else scope_root + 1;
     const end_excl: u32 = if (scope_root == InvalidIndex)
         @as(u32, @intCast(doc.nodes.items.len))

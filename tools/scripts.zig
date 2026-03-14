@@ -988,7 +988,8 @@ fn updateReadmeAutoSummary(io: std.Io, alloc: std.mem.Allocator) !void {
     }
 }
 
-fn writeMarkdown(io: std.Io, 
+fn writeMarkdown(
+    io: std.Io,
     alloc: std.mem.Allocator,
     profile_name: []const u8,
     parse_results: []const ParseResult,
@@ -1156,7 +1157,8 @@ fn rerunFailedGateRows(io: std.Io, alloc: std.mem.Allocator, profile: Profile, g
     }
 }
 
-fn renderConsole(io: std.Io, 
+fn renderConsole(
+    io: std.Io,
     alloc: std.mem.Allocator,
     profile_name: []const u8,
     parse_results: []const ParseResult,

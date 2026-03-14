@@ -2,6 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const tables = @import("tables.zig");
 
+// SAFETY: Scanners operate on byte slices and rely on caller-provided bounds.
+// All indexing stays within `hay.len` and is guarded by bounds checks or
+// debug asserts where assumptions are made.
+
 /// Result of scanning to a tag end while respecting quoted attributes.
 pub const TagEnd = struct {
     gt_index: usize,
@@ -21,6 +25,7 @@ pub inline fn findByte(hay: []const u8, start: usize, needle: u8) ?usize {
 
 /// Scans from `start` to next `>` while skipping quoted `>` inside attributes.
 pub fn findTagEndRespectQuotes(hay: []const u8, _start: usize) ?TagEnd {
+    std.debug.assert(_start <= hay.len);
     var start = _start;
     var end = findAny3Dispatch(hay, start) orelse {
         @branchHint(.cold);

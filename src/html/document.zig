@@ -12,6 +12,10 @@ const node_api = @import("node.zig");
 const tags = @import("tags.zig");
 const common = @import("../common.zig");
 
+// SAFETY: Document owns `source` bytes for the life of nodes/iterators.
+// Node spans and indices are validated on parse; helpers guard against
+// InvalidIndex and out-of-range indexes.
+
 /// Sentinel used for missing node indexes and invalid spans.
 pub const InvalidIndex: u32 = common.InvalidIndex;
 const QueryAccelMinBudgetBytes: usize = 4096;
@@ -530,7 +534,6 @@ pub const ParseOptions = struct {
             pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
                 return self.writeHtml(writer);
             }
-
 
             fn ensureQueryOneArena(noalias self: *DocSelf) *std.heap.ArenaAllocator {
                 if (self.query_one_arena == null) {

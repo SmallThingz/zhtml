@@ -4,6 +4,9 @@ const tables = @import("../html/tables.zig");
 const tags = @import("../html/tags.zig");
 const test_helpers = @import("test_helpers.zig");
 
+// SAFETY: Runtime parser owns `source` bytes via allocator and builds AST
+// slices that refer to those owned bytes.
+
 /// Runtime selector parser errors.
 pub const Error = error{
     InvalidSelector,

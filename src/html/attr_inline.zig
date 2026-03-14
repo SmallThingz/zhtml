@@ -4,6 +4,12 @@ const attr_scan = @import("attr_scan.zig");
 const entities = @import("entities.zig");
 const scanner = @import("scanner.zig");
 
+// SAFETY: This module mutates `doc.source` in-place for attribute decoding.
+// Invariants:
+// - `node.attr_end` and `node.name_or_text.end` are within `doc.source.len`.
+// - Attribute spans passed to helpers are bounded by `span_end`.
+// - Callers uphold that `source` is the document buffer for the node.
+
 const RawValue = attr_scan.RawValue;
 
 const LookupKind = enum(u8) {
@@ -12,7 +18,6 @@ const LookupKind = enum(u8) {
     class,
     href,
 };
-
 
 // Attribute traversal and value materialization are intentionally in-place.
 // Wire states after name parsing:
@@ -263,6 +268,10 @@ pub fn collectSelectedValuesByHash(
 const ParsedValue = attr_scan.ParsedValue;
 
 fn materializeRawValue(source: []u8, span_end: usize, eq_index: usize, raw: RawValue) []const u8 {
+    std.debug.assert(span_end <= source.len);
+    std.debug.assert(eq_index < span_end);
+    std.debug.assert(raw.start <= raw.end and raw.end <= span_end);
+    std.debug.assert(raw.next_start <= span_end);
     if (raw.kind == .empty) {
         // Canonical rewrite for explicit empty assignment: `a=` -> `a `.
         source[eq_index] = ' ';
@@ -313,6 +322,8 @@ fn patchGap(source: []u8, span_end: usize, value_end: usize, raw_next_start: usi
     // - short skip metadata: 0x00, len
     // - extended skip metadata: 0x00, 0xFF, u32 len
     // This keeps traversal O(n) without reparsing shifted tails.
+    std.debug.assert(span_end <= source.len);
+    std.debug.assert(value_end <= span_end);
     if (value_end + 1 >= span_end) return;
 
     const next_start = @min(raw_next_start, span_end);
@@ -344,6 +355,24 @@ fn patchGap(source: []u8, span_end: usize, value_end: usize, raw_next_start: usi
     source[gap_start] = ' ';
 }
 
+test "materializeRawValue preserves traversal for following attrs" {
+    const testing = std.testing;
+
+    var buf = "a=\"x\" b=\"y\"".*;
+    const span_end = buf.len;
+    const eq_index = std.mem.indexOfScalar(u8, &buf, '=') orelse return error.MissingEq;
+    const raw = attr_scan.parseRawValue(&buf, span_end, eq_index);
+    const value = materializeRawValue(buf[0..], span_end, eq_index, raw);
+    try testing.expectEqualStrings("x", value);
+
+    const parsed = attr_scan.parseParsedValue(buf[0..], span_end, eq_index);
+    try testing.expectEqualStrings("x", parsed.value);
+
+    var i = parsed.next_start;
+    while (i < span_end and tables.WhitespaceTable[buf[i]]) : (i += 1) {}
+    const name = attr_scan.scanAttrNameOrSkip(&buf, span_end, &i) orelse return error.MissingAttr;
+    try testing.expectEqualStrings("b", name);
+}
 
 fn firstUnresolvedMatch(selected_names: []const []const u8, out_values: []const ?[]const u8, name: []const u8) ?usize {
     var idx: usize = 0;

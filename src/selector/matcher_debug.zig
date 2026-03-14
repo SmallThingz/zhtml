@@ -7,6 +7,8 @@ const attr_inline = @import("../html/attr_inline.zig");
 const selector_debug = @import("../debug/selector_debug.zig");
 const common = @import("../common.zig");
 
+// SAFETY: Debug matcher uses the same traversal bounds as the fast matcher
+// and only indexes validated node ranges.
 
 /// Debug matcher that returns first match and records near-miss diagnostics.
 pub fn explainFirstMatch(

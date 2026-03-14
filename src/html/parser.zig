@@ -7,8 +7,12 @@ const common = @import("../common.zig");
 const InvalidIndex: u32 = common.InvalidIndex;
 const SvgTagKey: u64 = tags.first8Key("svg");
 
+// SAFETY: Parser builds in-place spans into `input`; indices are stored as `u32`.
+// We reject inputs larger than `u32::max` to prevent truncation.
+
 /// Parses mutable HTML bytes into `doc` using permissive, in-place tree construction.
 pub fn parseInto(comptime Doc: type, noalias doc: *Doc, input: []u8, comptime opts: anytype) !void {
+    if (input.len > std.math.maxInt(u32)) return error.InputTooLarge;
     var p = Parser(Doc, opts){
         .doc = doc,
         .input = input,

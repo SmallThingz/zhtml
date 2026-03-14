@@ -2,6 +2,12 @@ const std = @import("std");
 const tables = @import("tables.zig");
 const scanner = @import("scanner.zig");
 
+// SAFETY: Callers provide slice bounds and indices. Invariants asserted in debug:
+// - `span_end <= source.len`
+// - `i.* < end` for scanAttrNameOrSkip
+// - `eq_index < span_end` for parseRawValue
+// - `value_start <= span_end` / `value_end <= span_end` for value helpers
+
 pub const RawKind = enum {
     empty,
     quoted,
@@ -24,6 +30,8 @@ pub const ParsedValue = struct {
 /// Returns null when the attribute list terminator is reached.
 /// Returns an empty slice when the cursor is advanced past a non-name byte.
 pub fn scanAttrNameOrSkip(source: []const u8, end: usize, i: *usize) ?[]const u8 {
+    std.debug.assert(end <= source.len);
+    std.debug.assert(i.* < end);
     const c = source[i.*];
     if (c == '>' or c == '/') return null;
 
@@ -38,6 +46,8 @@ pub fn scanAttrNameOrSkip(source: []const u8, end: usize, i: *usize) ?[]const u8
 
 /// Parses raw attribute value span for in-place attribute traversal.
 pub fn parseRawValue(source: []const u8, span_end: usize, eq_index: usize) RawValue {
+    std.debug.assert(span_end <= source.len);
+    std.debug.assert(eq_index < span_end);
     var i = eq_index + 1;
     while (i < span_end and tables.WhitespaceTable[source[i]]) : (i += 1) {}
 
@@ -71,6 +81,7 @@ pub fn parseRawValue(source: []const u8, span_end: usize, eq_index: usize) RawVa
 
 /// Parses parsed in-place attribute value span (after name delimiter).
 pub fn parseParsedValue(source: []u8, span_end: usize, name_end: usize) ParsedValue {
+    std.debug.assert(span_end <= source.len);
     if (name_end + 1 >= span_end) return .{ .value = "", .next_start = span_end };
 
     const marker = source[name_end + 1];
@@ -83,12 +94,16 @@ pub fn parseParsedValue(source: []u8, span_end: usize, name_end: usize) ParsedVa
 }
 
 pub fn findValueEnd(source: []const u8, value_start: usize, span_end: usize) usize {
+    std.debug.assert(span_end <= source.len);
+    std.debug.assert(value_start <= span_end);
     var i = value_start;
     while (i < span_end and source[i] != 0) : (i += 1) {}
     return i;
 }
 
 pub fn nextAfterValue(source: []const u8, value_end: usize, span_end: usize) usize {
+    std.debug.assert(span_end <= source.len);
+    std.debug.assert(value_end <= span_end);
     if (value_end >= span_end) return span_end;
     var i = value_end + 1;
     if (i >= span_end) return span_end;
@@ -118,4 +133,116 @@ pub fn nextAfterValue(source: []const u8, value_end: usize, span_end: usize) usi
 
 pub fn nativeEndian() std.builtin.Endian {
     return @import("builtin").cpu.arch.endian();
+}
+
+test "scanAttrNameOrSkip handles terminators and skips non-name bytes" {
+    const testing = std.testing;
+
+    {
+        const src = "a=1";
+        var i: usize = 0;
+        const name = scanAttrNameOrSkip(src, src.len, &i) orelse return error.UnexpectedNull;
+        try testing.expectEqualStrings("a", name);
+        try testing.expectEqual(@as(usize, 1), i);
+    }
+    {
+        const src = "=a";
+        var i: usize = 0;
+        const name = scanAttrNameOrSkip(src, src.len, &i) orelse return error.UnexpectedNull;
+        try testing.expectEqual(@as(usize, 0), name.len);
+        try testing.expectEqual(@as(usize, 1), i);
+    }
+    {
+        const src = ">";
+        var i: usize = 0;
+        try testing.expect(scanAttrNameOrSkip(src, src.len, &i) == null);
+    }
+    {
+        const src = "/";
+        var i: usize = 0;
+        try testing.expect(scanAttrNameOrSkip(src, src.len, &i) == null);
+    }
+}
+
+test "parseRawValue handles quoted, naked, empty, and unterminated" {
+    const testing = std.testing;
+
+    {
+        const src = "a=\"x\"";
+        const eq = std.mem.indexOfScalar(u8, src, '=') orelse return error.MissingEq;
+        const raw = parseRawValue(src, src.len, eq);
+        try testing.expectEqual(RawKind.quoted, raw.kind);
+        try testing.expectEqual(@as(usize, 3), raw.start);
+        try testing.expectEqual(@as(usize, 4), raw.end);
+        try testing.expectEqual(@as(usize, 5), raw.next_start);
+    }
+    {
+        const src = "a=xyz";
+        const eq = std.mem.indexOfScalar(u8, src, '=') orelse return error.MissingEq;
+        const raw = parseRawValue(src, src.len, eq);
+        try testing.expectEqual(RawKind.naked, raw.kind);
+        try testing.expectEqual(@as(usize, 2), raw.start);
+        try testing.expectEqual(@as(usize, 5), raw.end);
+        try testing.expectEqual(@as(usize, 5), raw.next_start);
+    }
+    {
+        const src = "a=   \"z\"";
+        const eq = std.mem.indexOfScalar(u8, src, '=') orelse return error.MissingEq;
+        const raw = parseRawValue(src, src.len, eq);
+        try testing.expectEqual(RawKind.quoted, raw.kind);
+        try testing.expectEqual(@as(usize, 6), raw.start);
+        try testing.expectEqual(@as(usize, 7), raw.end);
+        try testing.expectEqual(@as(usize, 8), raw.next_start);
+    }
+    {
+        const src = "a=>";
+        const eq = std.mem.indexOfScalar(u8, src, '=') orelse return error.MissingEq;
+        const raw = parseRawValue(src, src.len, eq);
+        try testing.expectEqual(RawKind.empty, raw.kind);
+        try testing.expectEqual(@as(usize, 2), raw.start);
+        try testing.expectEqual(@as(usize, 2), raw.end);
+        try testing.expectEqual(@as(usize, 2), raw.next_start);
+    }
+    {
+        const src = "a=\"xyz";
+        const eq = std.mem.indexOfScalar(u8, src, '=') orelse return error.MissingEq;
+        const raw = parseRawValue(src, src.len, eq);
+        try testing.expectEqual(RawKind.quoted, raw.kind);
+        try testing.expectEqual(@as(usize, 3), raw.start);
+        try testing.expectEqual(src.len, raw.end);
+        try testing.expectEqual(src.len, raw.next_start);
+    }
+}
+
+test "parseParsedValue honors gap markers and truncation" {
+    const testing = std.testing;
+
+    {
+        var buf = [_]u8{ 'a', 0, 'v', 'a', 'l', 0, ' ', 'b' };
+        const parsed = parseParsedValue(buf[0..], buf.len, 1);
+        try testing.expectEqualStrings("val", parsed.value);
+        try testing.expectEqual(@as(usize, 7), parsed.next_start);
+    }
+    {
+        var buf = [_]u8{ 'a', 0, 0, 'v', 'a', 'l', 0, 0, 1, 'x', 'b' };
+        const parsed = parseParsedValue(buf[0..], buf.len, 1);
+        try testing.expectEqualStrings("val", parsed.value);
+        try testing.expectEqual(@as(usize, 10), parsed.next_start);
+    }
+    {
+        var buf = [_]u8{
+            'a', 0,    0, 'v', 'a', 'l', 0,
+            0,   0xff, 2, 0,   0,   0,   'x',
+            'y', 'b',
+        };
+        const parsed = parseParsedValue(buf[0..], buf.len, 1);
+        try testing.expectEqualStrings("val", parsed.value);
+        try testing.expectEqual(@as(usize, 15), parsed.next_start);
+    }
+    {
+        var buf = [_]u8{ 'a', 0, 0, 'v', 0, 0, 0xff, 1 };
+        const parsed = parseParsedValue(buf[0..], buf.len, 1);
+        try testing.expectEqualStrings("v", parsed.value);
+        try testing.expectEqual(buf.len, parsed.next_start);
+    }
 }
