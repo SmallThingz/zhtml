@@ -343,10 +343,12 @@ pub const ParseOptions = struct {
 
             /// Clears parsed state while retaining reusable capacities.
             pub fn clear(noalias self: *DocSelf) void {
+                self.source = &[_]u8{};
                 self.nodes.clearRetainingCapacity();
                 self.parse_stack.clearRetainingCapacity();
                 if (self.query_one_arena) |*arena| _ = arena.reset(.retain_capacity);
                 if (self.query_all_arena) |*arena| _ = arena.reset(.retain_capacity);
+                self.query_accel_budget_bytes = 0;
                 self.resetQueryAccel();
                 self.query_all_generation +%= 1;
                 if (self.query_all_generation == 0) self.query_all_generation = 1;
@@ -628,7 +630,9 @@ pub const ParseOptions = struct {
                 }
 
                 var count: usize = 0;
-                for (self.nodes.items[1..]) |node| {
+                var scan_idx: usize = 1;
+                while (scan_idx < self.nodes.items.len) : (scan_idx += 1) {
+                    const node = self.nodes.items[scan_idx];
                     if (!isElementLike(node.kind)) continue;
                     const node_name = node.name_or_text.slice(self.source);
                     if (node_name.len != tag_name.len) continue;
@@ -1820,7 +1824,7 @@ test "query accel state is invalidated by parse and clear" {
     try std.testing.expect(doc.query_accel_id_built);
     try std.testing.expect(doc.query_accel_tag_nodes.items.len != 0);
 
-    var html_b = "<main><p id='z'></p></main>".*;
+    var html_b = "<main><p id='z'>owned</p></main>".*;
     try doc.parse(&html_b, .{});
     try std.testing.expect(!doc.query_accel_id_built);
     try std.testing.expectEqual(@as(usize, 0), doc.query_accel_tag_nodes.items.len);
@@ -1830,7 +1834,15 @@ test "query accel state is invalidated by parse and clear" {
     try std.testing.expect(doc.queryAccelLookupId("x", &used_id) == null);
     try std.testing.expect(used_id);
 
+    const text_before_clear = (doc.queryOne("#z") orelse return error.TestUnexpectedResult)
+        .innerTextWithOptions(alloc, .{ .normalize_whitespace = false }) catch return error.TestUnexpectedResult;
+    try std.testing.expect(doc.isOwned(text_before_clear));
+
     doc.clear();
+    try std.testing.expectEqual(@as(usize, 0), doc.nodes.items.len);
+    try std.testing.expectEqual(@as(usize, 0), doc.source.len);
+    try std.testing.expect(!doc.isOwned(text_before_clear));
+    try std.testing.expect(doc.queryOne("main") == null);
     try std.testing.expect(!doc.query_accel_id_built);
     try std.testing.expectEqual(@as(usize, 0), doc.query_accel_tag_nodes.items.len);
     try std.testing.expectEqual(@as(usize, 0), doc.query_accel_tag_entries.items.len);
