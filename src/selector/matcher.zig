@@ -298,7 +298,7 @@ fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selecto
     const comp_abs: usize = @intCast(group.compound_start + rightmost);
     const comp = selector.compounds[comp_abs];
 
-    if (EnableQueryAccel and @hasDecl(Doc, "queryAccelLookupId") and comp.has_id != 0) {
+    if (EnableQueryAccel and @hasDecl(Doc, "queryAccelLookupId") and comp.hasId()) {
         const id = comp.id.slice(selector.source);
         var used = false;
         if (doc.queryAccelLookupId(id, &used)) |idx| {
@@ -312,10 +312,11 @@ fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selecto
         }
     }
 
-    if (EnableQueryAccel and @hasDecl(Doc, "queryAccelLookupTag") and comp.has_tag != 0 and comp.tag_key != 0) {
+    if (EnableQueryAccel and @hasDecl(Doc, "queryAccelLookupTag") and comp.hasTag()) {
         var used = false;
         const tag = comp.tag.slice(selector.source);
-        if (doc.queryAccelLookupTag(tag, comp.tag_key, &used)) |candidates| {
+        const tag_key = if (comp.tag_key != 0) comp.tag_key else tags.first8Key(tag);
+        if (doc.queryAccelLookupTag(tag, tag_key, &used)) |candidates| {
             if (scope_root != InvalidIndex) {
                 const scope_end = doc.nodes.items[scope_root].subtree_end;
                 for (candidates) |idx| {
@@ -360,12 +361,12 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
     const use_collected = EnableMultiAttrCollect and prepareCollectedAttrs(selector, comp, &collected_attrs);
     const collected_ptr: ?*CollectedAttrs = if (use_collected) &collected_attrs else null;
 
-    if (comp.has_tag != 0) {
+    if (comp.hasTag()) {
         const node_name = node.name_or_text.slice(doc.source);
         if (!tagMatches(selector.source, comp, node_name)) return false;
     }
 
-    if (comp.has_id != 0) {
+    if (comp.hasId()) {
         const id = comp.id.slice(selector.source);
         const value = attrValueByHashFrom(
             doc,
@@ -588,7 +589,7 @@ const CollectedAttrs = struct {
 fn prepareCollectedAttrs(selector: ast.Selector, comp: ast.Compound, out: *CollectedAttrs) bool {
     out.* = .{};
 
-    if (comp.has_id != 0 and !pushCollectedName(out, "id", HashId)) return false;
+    if (comp.hasId() and !pushCollectedName(out, "id", HashId)) return false;
     if (comp.class_len != 0 and !pushCollectedName(out, "class", HashClass)) return false;
 
     var attr_i: u32 = 0;

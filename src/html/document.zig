@@ -1865,8 +1865,6 @@ test "runtime attr-heavy selector stress uses in-node parents" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const compiled = try ast.Selector.compileRuntime(arena.allocator(), selector);
-    try std.testing.expect(!compiled.requires_parent);
-
     var loops: usize = 0;
     while (loops < 256) : (loops += 1) {
         const a = try doc.queryOneRuntime(selector);
@@ -1890,8 +1888,6 @@ test "bench fixture attr-heavy runtime and cached query smoke" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const compiled = try ast.Selector.compileRuntime(arena.allocator(), selector);
-    try std.testing.expect(!compiled.requires_parent);
-
     {
         const html = try alloc.dupe(u8, fixture);
         defer alloc.free(html);

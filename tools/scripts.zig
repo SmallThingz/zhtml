@@ -309,7 +309,6 @@ const ParseResult = struct {
 
 const QueryResult = struct {
     parser: []const u8,
-    mode: []const u8,
     case: []const u8,
     selector: []const u8,
     fixture: ?[]const u8 = null,
@@ -512,7 +511,6 @@ fn benchQueryParseOne(io: std.Io, alloc: std.mem.Allocator, parser_name: []const
     const ns_per_op = @as(f64, @floatFromInt(median_ns)) / @as(f64, @floatFromInt(iterations));
     return .{
         .parser = parser_name,
-        .mode = "runtime",
         .case = case_name,
         .selector = selector,
         .iterations = iterations,
@@ -546,7 +544,6 @@ fn benchQueryExecOne(io: std.Io, alloc: std.mem.Allocator, parser_name: []const 
     const ns_per_op = @as(f64, @floatFromInt(median_ns)) / @as(f64, @floatFromInt(iterations));
     return .{
         .parser = parser_name,
-        .mode = mode,
         .case = case_name,
         .selector = selector,
         .fixture = fixture_name,
@@ -2780,7 +2777,6 @@ test "bench cleanup frees sample buffers" {
     query_samples[0] = 3;
     var query_rows = [_]QueryResult{.{
         .parser = "ours",
-        .mode = "fastest",
         .case = "case",
         .selector = "div",
         .fixture = null,

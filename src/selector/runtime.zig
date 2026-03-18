@@ -145,11 +145,8 @@ const Parser = struct {
         const not_items = try self.not_items.toOwnedSlice(self.alloc);
         errdefer self.alloc.free(not_items);
 
-        const requires_parent = selectorRequiresParent(compounds, pseudos);
-
         return .{
             .source = self.source,
-            .requires_parent = requires_parent,
             .groups = groups,
             .compounds = compounds,
             .classes = classes,
@@ -174,7 +171,6 @@ const Parser = struct {
                 self.i += 1;
                 consumed = true;
             } else if (isTagIdentStart(c)) {
-                out.has_tag = 1;
                 out.tag = self.parseIdent() orelse return error.InvalidSelector;
                 self.lowerRange(out.tag);
                 out.tag_key = tags.first8Key(out.tag.slice(self.source));
@@ -187,8 +183,7 @@ const Parser = struct {
             switch (c) {
                 '#' => {
                     self.i += 1;
-                    if (out.has_id != 0) return error.InvalidSelector;
-                    out.has_id = 1;
+                    if (!out.id.isEmpty()) return error.InvalidSelector;
                     out.id = self.parseIdent() orelse return error.InvalidSelector;
                     consumed = true;
                 },
@@ -502,22 +497,6 @@ fn parseSignedInt(bytes: []const u8) ?i32 {
     return @intCast(value);
 }
 
-fn selectorRequiresParent(compounds: []const ast.Compound, pseudos: []const ast.Pseudo) bool {
-    for (compounds) |comp| {
-        switch (comp.combinator) {
-            .child, .descendant => return true,
-            else => {},
-        }
-
-        var i: u32 = 0;
-        while (i < comp.pseudo_len) : (i += 1) {
-            const p = pseudos[comp.pseudo_start + i];
-            if (p.kind == .nth_child) return true;
-        }
-    }
-    return false;
-}
-
 test "runtime selector parser covers all attribute operators" {
     const alloc = std.testing.allocator;
     var sel = try compileRuntimeImpl(alloc, "div[a][b=v][c^=x][d$=y][e*=z][f~=m][g|=en]");
@@ -540,7 +519,7 @@ test "runtime selector parser supports leading combinator and pseudo-only compou
     try std.testing.expectEqual(@as(usize, 1), sel.groups.len);
     try std.testing.expectEqual(@as(usize, 1), sel.compounds.len);
     try std.testing.expect(sel.compounds[0].combinator == .child);
-    try std.testing.expect(sel.compounds[0].has_id == 1);
+    try std.testing.expect(!sel.compounds[0].id.isEmpty());
 
     var sel2 = try compileRuntimeImpl(alloc, "#pseudos :nth-child(odd)");
     defer sel2.deinit(alloc);

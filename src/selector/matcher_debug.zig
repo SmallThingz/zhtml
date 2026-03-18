@@ -107,7 +107,7 @@ fn classifyCompoundFailure(
     const g: u16 = @intCast(@min(group_index, std.math.maxInt(u16)));
     const c: u16 = @intCast(@min(compound_index, std.math.maxInt(u16)));
 
-    if (comp.has_tag != 0) {
+    if (comp.hasTag()) {
         const node_name = node.name_or_text.slice(doc.source);
         if (!matcher.tagMatches(selector.source, comp, node_name)) {
             return .{ .kind = .tag, .group_index = g, .compound_index = c, .predicate_index = predicate_index };
@@ -115,7 +115,7 @@ fn classifyCompoundFailure(
         predicate_index += 1;
     }
 
-    if (comp.has_id != 0) {
+    if (comp.hasId()) {
         const id = comp.id.slice(selector.source);
         const value = attr_inline.getAttrValue(doc, node, "id") orelse return .{
             .kind = .id,

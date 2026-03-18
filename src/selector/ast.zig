@@ -163,11 +163,8 @@ pub const NotSimple = extern struct {
 pub const Compound = extern struct {
     combinator: Combinator = .none,
 
-    has_tag: u8 = 0,
     tag: Range = .{},
     tag_key: u64 = 0,
-
-    has_id: u8 = 0,
     id: Range = .{},
 
     class_start: u32 = 0,
@@ -182,11 +179,19 @@ pub const Compound = extern struct {
     not_start: u32 = 0,
     not_len: u32 = 0,
 
+    pub fn hasTag(self: @This()) bool {
+        return !self.tag.isEmpty();
+    }
+
+    pub fn hasId(self: @This()) bool {
+        return !self.id.isEmpty();
+    }
+
     /// Formats this compound selector for human-readable output.
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("Compound{{combinator={s}, has_tag={}, tag=", .{ @tagName(self.combinator), self.has_tag });
+        try writer.print("Compound{{combinator={s}, tag=", .{@tagName(self.combinator)});
         try self.tag.format(writer);
-        try writer.print(", tag_key={}, has_id={}, id=", .{ self.tag_key, self.has_id });
+        try writer.print(", tag_key={}, id=", .{self.tag_key});
         try self.id.format(writer);
         try writer.print(
             ", class_start={}, class_len={}, attr_start={}, attr_len={}, pseudo_start={}, pseudo_len={}, not_start={}, not_len={}}}",
@@ -218,7 +223,6 @@ pub const Group = extern struct {
 /// Compiled selector used by matcher/query APIs.
 pub const Selector = struct {
     source: []const u8,
-    requires_parent: bool = false,
     groups: []const Group,
     compounds: []const Compound,
     classes: []const Range,
@@ -251,10 +255,9 @@ pub const Selector = struct {
     /// Formats this selector summary for human-readable output.
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print(
-            "Selector{{source=\"{s}\", requires_parent={}, groups={}, compounds={}, classes={}, attrs={}, pseudos={}, not_items={}}}",
+            "Selector{{source=\"{s}\", groups={}, compounds={}, classes={}, attrs={}, pseudos={}, not_items={}}}",
             .{
                 self.source,
-                self.requires_parent,
                 self.groups.len,
                 self.compounds.len,
                 self.classes.len,
@@ -328,10 +331,8 @@ test "format selector AST types" {
 
     const compound: Compound = .{
         .combinator = .child,
-        .has_tag = 1,
         .tag = Range.from(0, 3),
         .tag_key = 0xabc,
-        .has_id = 1,
         .id = Range.from(4, 6),
         .class_start = 1,
         .class_len = 2,
@@ -345,7 +346,7 @@ test "format selector AST types" {
     const compound_out = try std.fmt.allocPrint(alloc, "{f}", .{compound});
     defer alloc.free(compound_out);
     try std.testing.expectEqualStrings(
-        "Compound{combinator=child, has_tag=1, tag=Range{start=0, len=3}, tag_key=2748, has_id=1, id=Range{start=4, len=2}, class_start=1, class_len=2, attr_start=3, attr_len=4, pseudo_start=5, pseudo_len=6, not_start=7, not_len=8}",
+        "Compound{combinator=child, tag=Range{start=0, len=3}, tag_key=2748, id=Range{start=4, len=2}, class_start=1, class_len=2, attr_start=3, attr_len=4, pseudo_start=5, pseudo_len=6, not_start=7, not_len=8}",
         compound_out,
     );
 
@@ -362,7 +363,6 @@ test "format selector AST types" {
     const not_items = [_]NotSimple{not_simple};
     const selector: Selector = .{
         .source = "div.cls",
-        .requires_parent = true,
         .groups = groups[0..],
         .compounds = compounds[0..],
         .classes = classes[0..],
@@ -373,7 +373,7 @@ test "format selector AST types" {
     const selector_out = try std.fmt.allocPrint(alloc, "{f}", .{selector});
     defer alloc.free(selector_out);
     try std.testing.expectEqualStrings(
-        "Selector{source=\"div.cls\", requires_parent=true, groups=1, compounds=1, classes=1, attrs=1, pseudos=1, not_items=1}",
+        "Selector{source=\"div.cls\", groups=1, compounds=1, classes=1, attrs=1, pseudos=1, not_items=1}",
         selector_out,
     );
 }
