@@ -6,6 +6,7 @@ const common = @import("../common.zig");
 
 const InvalidIndex: u32 = common.InvalidIndex;
 const SvgTagKey: u64 = tags.first8Key("svg");
+const InitialParseStackCapacity: usize = 1024;
 
 // SAFETY: Parser builds in-place spans into `input`; indices are stored as `u32`.
 // We reject inputs larger than `u32::max` to prevent truncation.
@@ -91,18 +92,14 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
             const input_len = self.input.len;
 
             var estimated_nodes: usize = undefined;
-            var estimated_stack: usize = undefined;
-
             if (opts.drop_whitespace_text_nodes) {
                 estimated_nodes = @max(@as(usize, 32), (input_len / 32) + 32);
-                estimated_stack = @max(@as(usize, 16), (input_len / 512) + 16);
             } else {
                 estimated_nodes = @max(@as(usize, 16), (input_len / 16) + 8);
-                estimated_stack = @max(@as(usize, 8), (input_len / 256) + 8);
             }
 
             try self.doc.nodes.ensureTotalCapacity(alloc, estimated_nodes);
-            try self.doc.parse_stack.ensureTotalCapacity(alloc, estimated_stack);
+            try self.doc.parse_stack.ensureTotalCapacity(alloc, InitialParseStackCapacity);
         }
 
         inline fn parseTextKeepWhitespace(noalias self: *Self) !void {
