@@ -435,6 +435,16 @@ fn deinitOwnedStringSet(alloc: std.mem.Allocator, set: *std.StringHashMap(void))
     set.deinit();
 }
 
+fn appendOwnedString(alloc: std.mem.Allocator, list: *std.ArrayList([]const u8), item: []const u8) !void {
+    errdefer alloc.free(item);
+    try list.append(alloc, item);
+}
+
+fn putOwnedString(alloc: std.mem.Allocator, set: *std.StringHashMap(void), key: []const u8) !void {
+    errdefer alloc.free(key);
+    try set.put(key, {});
+}
+
 fn runIntCmd(io: std.Io, alloc: std.mem.Allocator, argv: []const []const u8) !u64 {
     const taskset_path: ?[]const u8 = blk: {
         if (common.fileExists(io, "/usr/bin/taskset")) break :blk "/usr/bin/taskset";
@@ -1889,18 +1899,41 @@ const ParserCase = struct {
     expected: []const []const u8,
 };
 
+fn freeOwnedStringSlice(alloc: std.mem.Allocator, items: []const []const u8) void {
+    for (items) |item| alloc.free(item);
+    alloc.free(items);
+}
+
+fn freeParserCase(alloc: std.mem.Allocator, c: ParserCase) void {
+    alloc.free(c.html);
+    freeOwnedStringSlice(alloc, c.expected);
+}
+
+fn freeParserCases(alloc: std.mem.Allocator, cases: []const ParserCase) void {
+    for (cases) |c| freeParserCase(alloc, c);
+    alloc.free(cases);
+}
+
+fn deinitParserCaseList(alloc: std.mem.Allocator, list: *std.ArrayList(ParserCase)) void {
+    for (list.items) |c| freeParserCase(alloc, c);
+    list.deinit(alloc);
+}
+
+fn transferOwnedParserCases(alloc: std.mem.Allocator, dst: *std.ArrayList(ParserCase), cases: []ParserCase) !void {
+    errdefer freeParserCases(alloc, cases);
+    try dst.appendSlice(alloc, cases);
+    alloc.free(cases);
+}
+
 fn parseHtml5libDat(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![]ParserCase {
     const text = try common.readFileAlloc(io, alloc, path);
     defer alloc.free(text);
+    return parseHtml5libDatText(alloc, text);
+}
+
+fn parseHtml5libDatText(alloc: std.mem.Allocator, text: []const u8) ![]ParserCase {
     var out = std.ArrayList(ParserCase).empty;
-    errdefer {
-        for (out.items) |c| {
-            alloc.free(c.html);
-            for (c.expected) |tag| alloc.free(tag);
-            alloc.free(c.expected);
-        }
-        out.deinit(alloc);
-    }
+    errdefer deinitParserCaseList(alloc, &out);
     var blocks = std.mem.splitSequence(u8, text, "\n#data\n");
     while (blocks.next()) |raw_blk| {
         var blk = raw_blk;
@@ -1916,9 +1949,10 @@ fn parseHtml5libDat(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![]P
             html_in = html_in[0..err_idx];
         }
         const html_copy = try alloc.dupe(u8, html_in);
+        errdefer alloc.free(html_copy);
 
         var expected = std.ArrayList([]const u8).empty;
-        errdefer expected.deinit(alloc);
+        errdefer deinitOwnedStringList(alloc, &expected);
         var lines = std.mem.splitScalar(u8, rest, '\n');
         while (lines.next()) |line| {
             if (line.len < 3 or line[0] != '|') continue;
@@ -1934,11 +1968,13 @@ fn parseHtml5libDat(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![]P
                 alloc.free(lower);
                 continue;
             }
-            try expected.append(alloc, lower);
+            try appendOwnedString(alloc, &expected, lower);
         }
+        const expected_slice = try expected.toOwnedSlice(alloc);
+        errdefer freeOwnedStringSlice(alloc, expected_slice);
         try out.append(alloc, .{
             .html = html_copy,
-            .expected = try expected.toOwnedSlice(alloc),
+            .expected = expected_slice,
         });
     }
     return out.toOwnedSlice(alloc);
@@ -1982,7 +2018,7 @@ fn quoteEnd(text: []const u8, start: usize) ?usize {
 
 fn parseWptTreeExpected(alloc: std.mem.Allocator, decoded_tree: []const u8) ![]const []const u8 {
     var expected = std.ArrayList([]const u8).empty;
-    errdefer expected.deinit(alloc);
+    errdefer deinitOwnedStringList(alloc, &expected);
 
     var lines = std.mem.splitScalar(u8, decoded_tree, '\n');
     while (lines.next()) |line| {
@@ -1999,7 +2035,7 @@ fn parseWptTreeExpected(alloc: std.mem.Allocator, decoded_tree: []const u8) ![]c
             alloc.free(lower);
             continue;
         }
-        try expected.append(alloc, lower);
+        try appendOwnedString(alloc, &expected, lower);
     }
     return expected.toOwnedSlice(alloc);
 }
@@ -2007,19 +2043,15 @@ fn parseWptTreeExpected(alloc: std.mem.Allocator, decoded_tree: []const u8) ![]c
 fn parseWptHtmlSuiteFile(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![]ParserCase {
     const text = try common.readFileAlloc(io, alloc, path);
     defer alloc.free(text);
+    return parseWptHtmlSuiteText(alloc, text);
+}
 
-    if (std.mem.indexOf(u8, text, "var tests = {") == null) return &.{};
-    if (std.mem.indexOf(u8, text, "init_tests(") == null) return &.{};
+fn parseWptHtmlSuiteText(alloc: std.mem.Allocator, text: []const u8) ![]ParserCase {
+    if (std.mem.indexOf(u8, text, "var tests = {") == null) return try alloc.alloc(ParserCase, 0);
+    if (std.mem.indexOf(u8, text, "init_tests(") == null) return try alloc.alloc(ParserCase, 0);
 
     var out = std.ArrayList(ParserCase).empty;
-    errdefer {
-        for (out.items) |c| {
-            alloc.free(c.html);
-            for (c.expected) |tag| alloc.free(tag);
-            alloc.free(c.expected);
-        }
-        out.deinit(alloc);
-    }
+    errdefer deinitParserCaseList(alloc, &out);
 
     var pos: usize = 0;
     while (std.mem.indexOfPos(u8, text, pos, "[async_test(")) |mark| {
@@ -2067,7 +2099,7 @@ fn parseTagJsonArray(alloc: std.mem.Allocator, text: []const u8) ![]const []cons
     defer parsed.deinit();
     if (parsed.value != .array) return error.InvalidJson;
     var tags = std.ArrayList([]const u8).empty;
-    errdefer tags.deinit(alloc);
+    errdefer deinitOwnedStringList(alloc, &tags);
     for (parsed.value.array.items) |it| {
         if (it != .string) continue;
         const lower = try std.ascii.allocLowerString(alloc, it.string);
@@ -2075,7 +2107,7 @@ fn parseTagJsonArray(alloc: std.mem.Allocator, text: []const u8) ![]const []cons
             alloc.free(lower);
             continue;
         }
-        try tags.append(alloc, lower);
+        try appendOwnedString(alloc, &tags, lower);
     }
     return tags.toOwnedSlice(alloc);
 }
@@ -2163,12 +2195,13 @@ fn runHtml5libParserSuite(io: std.Io, alloc: std.mem.Allocator, mode: []const u8
     defer dir.close(io);
 
     var dat_names = std.ArrayList([]const u8).empty;
-    defer dat_names.deinit(alloc);
+    defer deinitOwnedStringList(alloc, &dat_names);
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".dat")) continue;
-        try dat_names.append(alloc, try alloc.dupe(u8, entry.name));
+        const name = try alloc.dupe(u8, entry.name);
+        try appendOwnedString(alloc, &dat_names, name);
     }
     std.mem.sort([]const u8, dat_names.items, {}, struct {
         fn lt(_: void, a: []const u8, b: []const u8) bool {
@@ -2177,20 +2210,12 @@ fn runHtml5libParserSuite(io: std.Io, alloc: std.mem.Allocator, mode: []const u8
     }.lt);
 
     var cases = std.ArrayList(ParserCase).empty;
-    defer {
-        for (cases.items) |c| {
-            alloc.free(c.html);
-            for (c.expected) |tag| alloc.free(tag);
-            alloc.free(c.expected);
-        }
-        cases.deinit(alloc);
-    }
+    defer deinitParserCaseList(alloc, &cases);
     for (dat_names.items) |name| {
         const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ tc_dir, name });
         defer alloc.free(path);
         const parsed_cases = try parseHtml5libDat(io, alloc, path);
-        defer alloc.free(parsed_cases);
-        try cases.appendSlice(alloc, parsed_cases);
+        try transferOwnedParserCases(alloc, &cases, parsed_cases);
     }
 
     return runParserCases(io, alloc, mode, cases.items, max_cases);
@@ -2202,7 +2227,7 @@ fn runWptParserSuite(io: std.Io, alloc: std.mem.Allocator, mode: []const u8, max
     defer dir.close(io);
 
     var html_names = std.ArrayList([]const u8).empty;
-    defer html_names.deinit(alloc);
+    defer deinitOwnedStringList(alloc, &html_names);
     var walker = try dir.walk(alloc);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
@@ -2210,7 +2235,8 @@ fn runWptParserSuite(io: std.Io, alloc: std.mem.Allocator, mode: []const u8, max
         if (!std.mem.endsWith(u8, entry.path, ".html")) continue;
         const base = std.fs.path.basename(entry.path);
         if (!std.mem.startsWith(u8, base, "html5lib_")) continue;
-        try html_names.append(alloc, try alloc.dupe(u8, entry.path));
+        const path_copy = try alloc.dupe(u8, entry.path);
+        try appendOwnedString(alloc, &html_names, path_copy);
     }
     std.mem.sort([]const u8, html_names.items, {}, struct {
         fn lt(_: void, a: []const u8, b: []const u8) bool {
@@ -2219,21 +2245,13 @@ fn runWptParserSuite(io: std.Io, alloc: std.mem.Allocator, mode: []const u8, max
     }.lt);
 
     var cases = std.ArrayList(ParserCase).empty;
-    defer {
-        for (cases.items) |c| {
-            alloc.free(c.html);
-            for (c.expected) |tag| alloc.free(tag);
-            alloc.free(c.expected);
-        }
-        cases.deinit(alloc);
-    }
+    defer deinitParserCaseList(alloc, &cases);
 
     for (html_names.items) |name| {
         const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ wpt_dir, name });
         defer alloc.free(path);
         const parsed_cases = try parseWptHtmlSuiteFile(io, alloc, path);
-        defer alloc.free(parsed_cases);
-        try cases.appendSlice(alloc, parsed_cases);
+        try transferOwnedParserCases(alloc, &cases, parsed_cases);
     }
 
     if (cases.items.len == 0 and html_names.items.len != 0) {
@@ -2429,7 +2447,7 @@ fn cmpStringSlice(_: void, a: []const u8, b: []const u8) bool {
 
 fn collectMarkdownFiles(io: std.Io, alloc: std.mem.Allocator) ![][]const u8 {
     var files = std.ArrayList([]const u8).empty;
-    errdefer files.deinit(alloc);
+    errdefer deinitOwnedStringList(alloc, &files);
 
     const root_docs = [_][]const u8{
         "README.md",
@@ -2441,7 +2459,8 @@ fn collectMarkdownFiles(io: std.Io, alloc: std.mem.Allocator) ![][]const u8 {
     };
     for (root_docs) |p| {
         if (common.fileExists(io, p)) {
-            try files.append(alloc, try alloc.dupe(u8, p));
+            const path_copy = try alloc.dupe(u8, p);
+            try appendOwnedString(alloc, &files, path_copy);
         }
     }
 
@@ -2454,7 +2473,7 @@ fn collectMarkdownFiles(io: std.Io, alloc: std.mem.Allocator) ![][]const u8 {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.path, ".md")) continue;
             const joined = try std.fs.path.join(alloc, &[_][]const u8{ "docs", entry.path });
-            try files.append(alloc, joined);
+            try appendOwnedString(alloc, &files, joined);
         }
     }
 
@@ -2464,7 +2483,7 @@ fn collectMarkdownFiles(io: std.Io, alloc: std.mem.Allocator) ![][]const u8 {
 
 fn collectExampleFiles(io: std.Io, alloc: std.mem.Allocator) ![][]const u8 {
     var files = std.ArrayList([]const u8).empty;
-    errdefer files.deinit(alloc);
+    errdefer deinitOwnedStringList(alloc, &files);
 
     var examples_dir = try std.Io.Dir.cwd().openDir(io, "examples", .{ .iterate = true });
     defer examples_dir.close(io);
@@ -2474,7 +2493,7 @@ fn collectExampleFiles(io: std.Io, alloc: std.mem.Allocator) ![][]const u8 {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
         const joined = try std.fs.path.join(alloc, &[_][]const u8{ "examples", entry.path });
-        try files.append(alloc, joined);
+        try appendOwnedString(alloc, &files, joined);
     }
 
     std.mem.sort([]const u8, files.items, {}, cmpStringSlice);
@@ -2486,6 +2505,7 @@ fn loadBuildStepSet(io: std.Io, alloc: std.mem.Allocator) !std.StringHashMap(voi
     defer alloc.free(out);
 
     var set = std.StringHashMap(void).init(alloc);
+    errdefer deinitOwnedStringSet(alloc, &set);
     var lines = std.mem.splitScalar(u8, out, '\n');
     while (lines.next()) |line_raw| {
         const line = std.mem.trim(u8, line_raw, " \t\r");
@@ -2493,7 +2513,8 @@ fn loadBuildStepSet(io: std.Io, alloc: std.mem.Allocator) !std.StringHashMap(voi
         const first_ws = std.mem.indexOfAny(u8, line, " \t") orelse line.len;
         const step = line[0..first_ws];
         if (step.len == 0) continue;
-        try set.put(try alloc.dupe(u8, step), {});
+        const step_copy = try alloc.dupe(u8, step);
+        try putOwnedString(alloc, &set, step_copy);
     }
     return set;
 }
@@ -2827,8 +2848,10 @@ test "owned string list cleanup frees entries" {
     var empty = std.ArrayList([]const u8).empty;
     deinitOwnedStringList(alloc, &empty);
     var list = std.ArrayList([]const u8).empty;
-    try list.append(alloc, try alloc.dupe(u8, "one"));
-    try list.append(alloc, try alloc.dupe(u8, "two"));
+    const one = try alloc.dupe(u8, "one");
+    try appendOwnedString(alloc, &list, one);
+    const two = try alloc.dupe(u8, "two");
+    try appendOwnedString(alloc, &list, two);
     deinitOwnedStringList(alloc, &list);
 }
 
@@ -2838,7 +2861,74 @@ test "owned string set cleanup frees keys" {
     deinitOwnedStringSet(alloc, &empty);
 
     var set = std.StringHashMap(void).init(alloc);
-    try set.put(try alloc.dupe(u8, "docs-check"), {});
-    try set.put(try alloc.dupe(u8, "examples-check"), {});
+    const docs_check = try alloc.dupe(u8, "docs-check");
+    try putOwnedString(alloc, &set, docs_check);
+    const examples_check = try alloc.dupe(u8, "examples-check");
+    try putOwnedString(alloc, &set, examples_check);
     deinitOwnedStringSet(alloc, &set);
+}
+
+test "parser case transfer frees nested ownership on append failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn makeOneCase(alloc: std.mem.Allocator) ![]ParserCase {
+            const html = try alloc.dupe(u8, "<div></div>");
+            errdefer alloc.free(html);
+
+            var expected = std.ArrayList([]const u8).empty;
+            errdefer deinitOwnedStringList(alloc, &expected);
+            const div = try alloc.dupe(u8, "div");
+            try appendOwnedString(alloc, &expected, div);
+
+            const expected_slice = try expected.toOwnedSlice(alloc);
+            errdefer freeOwnedStringSlice(alloc, expected_slice);
+
+            const cases = try alloc.alloc(ParserCase, 1);
+            errdefer alloc.free(cases);
+            cases[0] = .{
+                .html = html,
+                .expected = expected_slice,
+            };
+            return cases;
+        }
+
+        fn run(alloc: std.mem.Allocator) !void {
+            var dst = std.ArrayList(ParserCase).empty;
+            defer deinitParserCaseList(alloc, &dst);
+
+            const cases = try makeOneCase(alloc);
+            try transferOwnedParserCases(alloc, &dst, cases);
+        }
+    }.run, .{});
+}
+
+test "html5lib dat parser frees nested allocations on allocator failure" {
+    const sample =
+        "#data\n" ++
+        "<div></div>\n" ++
+        "#document\n" ++
+        "| <html>\n" ++
+        "|   <head>\n" ++
+        "|   <body>\n" ++
+        "|     <div>\n";
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator, text: []const u8) !void {
+            const cases = try parseHtml5libDatText(alloc, text);
+            defer freeParserCases(alloc, cases);
+        }
+    }.run, .{sample});
+}
+
+test "wpt html suite parser frees nested allocations on allocator failure" {
+    const sample =
+        "var tests = {};\n" ++
+        "init_tests();\n" ++
+        "[async_test('case'), \"%3Cdiv%3E%3C/div%3E\", \"| <html>\\n|   <head>\\n|   <body>\\n|     <div>\"]\n";
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator, text: []const u8) !void {
+            const cases = try parseWptHtmlSuiteText(alloc, text);
+            defer freeParserCases(alloc, cases);
+        }
+    }.run, .{sample});
 }

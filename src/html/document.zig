@@ -1034,6 +1034,19 @@ test "runtime queryAll iterator is invalidated by clear and reparsing" {
     try std.testing.expect(new_it.next() == null);
 }
 
+test "matcher queryOneIndex rejects invalid scope roots safely" {
+    const alloc = std.testing.allocator;
+    var doc = Document.init(alloc);
+    defer doc.deinit();
+
+    var html = "<div id='x'></div>".*;
+    try doc.parse(&html, .{});
+
+    const sel = comptime ast.Selector.compile("div");
+    const idx = matcher.queryOneIndex(Document, &doc, sel, @as(u32, @intCast(doc.nodes.items.len + 10)));
+    try std.testing.expect(idx == null);
+}
+
 test "raw text element metadata remains valid after child append growth" {
     const alloc = std.testing.allocator;
     var doc = Document.init(alloc);
@@ -1566,6 +1579,20 @@ test "mismatched close with identical first8 prefix does not close long tag" {
     const outer = doc.queryOne("abcdefgh1#outer") orelse return error.TestUnexpectedResult;
     const after = doc.queryOne("p#after") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(outer.index, after.parentNode().?.index);
+}
+
+test "processing-instruction-like nodes end at the next >" {
+    const alloc = std.testing.allocator;
+    var doc = Document.init(alloc);
+    defer doc.deinit();
+
+    var html = "<?xml version='1.0'><div id='x'></div><p id='y'></p>".*;
+    try doc.parse(&html, .{});
+
+    const x = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
+    const y = doc.queryOne("p#y") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("div", x.tagName());
+    try std.testing.expectEqualStrings("p", y.tagName());
 }
 
 test "attr fast-path names are equivalent to generic lookup semantics" {

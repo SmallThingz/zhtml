@@ -16,6 +16,9 @@ const LocalMatchFrameCap: usize = 48;
 const HashId: u32 = tables.hashIgnoreCaseAscii("id");
 const HashClass: u32 = tables.hashIgnoreCaseAscii("class");
 const EnableQueryAccel = true;
+// Tag-index accel has shown unstable behavior under optimized bench builds.
+// Keep id accel enabled and fall back to scan for tag-only pruning for now.
+const EnableTagQueryAccel = false;
 const EnableMultiAttrCollect = true;
 const isElementLike = common.isElementLike;
 const matchesScopeAnchor = common.matchesScopeAnchor;
@@ -29,7 +32,9 @@ pub const TraversalBounds = struct {
 };
 
 pub fn traversalBounds(comptime Doc: type, doc: *const Doc, scope_root: u32) TraversalBounds {
-    std.debug.assert(scope_root == InvalidIndex or scope_root < doc.nodes.items.len);
+    if (scope_root != InvalidIndex and scope_root >= doc.nodes.items.len) {
+        return .{ .start = 1, .end_excl = 1 };
+    }
     const start: u32 = if (scope_root == InvalidIndex) 1 else scope_root + 1;
     const end_excl: u32 = if (scope_root == InvalidIndex)
         @as(u32, @intCast(doc.nodes.items.len))
@@ -136,6 +141,7 @@ pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
 
 /// Returns first matching node index for `selector` within optional `scope_root`.
 pub fn queryOneIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: u32) ?u32 {
+    if (scope_root != InvalidIndex and scope_root >= doc.nodes.items.len) return null;
     var best: ?u32 = null;
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
@@ -147,6 +153,7 @@ pub fn queryOneIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.
 
 /// Returns whether `node_index` matches any selector group within scope.
 pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: u32, scope_root: u32) bool {
+    if (scope_root != InvalidIndex and scope_root >= doc.nodes.items.len) return false;
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
         const rightmost = group.compound_len - 1;
@@ -313,12 +320,13 @@ fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selecto
         }
     }
 
-    if (EnableQueryAccel and @hasDecl(Doc, "queryAccelLookupTag") and comp.hasTag()) {
+    if (EnableTagQueryAccel and EnableQueryAccel and @hasDecl(Doc, "queryAccelLookupTag") and comp.hasTag()) {
         const tag = comp.tag.slice(selector.source);
         const tag_key = if (comp.tag_key != 0) comp.tag_key else tags.first8Key(tag);
         switch (doc.queryAccelLookupTag(tag, tag_key)) {
             .hit => |candidates| {
                 if (scope_root != InvalidIndex) {
+                    if (scope_root >= doc.nodes.items.len) return null;
                     const scope_end = doc.nodes.items[scope_root].subtree_end;
                     for (candidates) |idx| {
                         if (idx <= scope_root) continue;

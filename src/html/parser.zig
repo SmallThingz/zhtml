@@ -462,20 +462,8 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
 
         fn skipPi(noalias self: *Self) void {
             self.i += 2;
-            var j = self.i;
-            while (j + 1 < self.input.len) {
-                const q = scanner.findByte(self.input, j, '?') orelse {
-                    @branchHint(.cold);
-                    self.i = self.input.len;
-                    return;
-                };
-                if (q + 1 < self.input.len and self.input[q + 1] == '>') {
-                    self.i = q + 2;
-                    return;
-                }
-                j = q + 1;
-            }
-            self.i = self.input.len;
+            self.i = scanner.findByte(self.input, self.i, '>') orelse self.input.len;
+            if (self.i < self.input.len) self.i += 1;
         }
 
         inline fn skipWs(noalias self: *Self) void {
@@ -537,6 +525,5 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
             }
             return null;
         }
-
     };
 }
