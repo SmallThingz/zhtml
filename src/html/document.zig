@@ -90,8 +90,8 @@ pub const ParseOptions = struct {
     /// Returns the parser's open-element stack entry type.
     pub fn GetOpenElem(_: @This()) type {
         return struct {
-            idx: u32,
             tag_key: u64 = 0,
+            idx: u32,
             tag_len: u16 = 0,
         };
     }
