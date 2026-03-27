@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Zig `0.15.2`
+- Zig `0.16.0-dev.2984+cb7d2b056`
 - Git
 
 ## Local Development Workflow

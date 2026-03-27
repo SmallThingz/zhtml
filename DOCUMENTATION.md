@@ -17,7 +17,7 @@ This is the canonical manual for usage, API, selector behavior, performance work
 
 ## Requirements
 
-- Zig `0.15.2`
+- Zig `0.16.0-dev.2984+cb7d2b056`
 - Mutable input buffers (`[]u8`) for parsing
 
 ## Quick Start

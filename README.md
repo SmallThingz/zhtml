@@ -2,7 +2,7 @@
 
 High-throughput, destructive HTML parser + CSS selector engine for Zig.
 
-[![zig](https://img.shields.io/badge/zig-0.15.2-orange)](https://ziglang.org/)
+[![zig](https://img.shields.io/badge/zig-0.16.0--dev.2984%2Bcb7d2b056-orange)](https://ziglang.org/)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![mode](https://img.shields.io/badge/parse-mutable%20input%20%28destructive%29-critical)](./DOCUMENTATION.md#mode-guidance)
 
