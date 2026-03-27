@@ -2,7 +2,7 @@
     .name = .htmlparser,
     .version = "0.0.0",
     .fingerprint = 0x157d4f00230d47f3,
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0-dev.2984+cb7d2b056",
     .dependencies = .{},
     .paths = .{
         "build.zig",
