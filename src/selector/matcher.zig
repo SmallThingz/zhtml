@@ -15,9 +15,6 @@ const MaxCollectedAttrs: usize = 24;
 const LocalMatchFrameCap: usize = 48;
 const HashId: u32 = tables.hashIgnoreCaseAscii("id");
 const HashClass: u32 = tables.hashIgnoreCaseAscii("class");
-// Tag-index accel has shown unstable behavior under optimized bench builds.
-// Keep id accel enabled and fall back to scan for tag-only pruning for now.
-const EnableTagQueryAccel = false;
 const isElementLike = common.isElementLike;
 const matchesScopeAnchor = common.matchesScopeAnchor;
 const parentElement = common.parentElement;
@@ -314,30 +311,6 @@ fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selecto
                 // satisfy scope/other predicates, fall back to full scan semantics.
             },
             .miss => return null,
-            .unavailable => {},
-        }
-    }
-
-    if (EnableTagQueryAccel and @hasDecl(Doc, "queryAccelLookupTag") and comp.hasTag()) {
-        const tag = comp.tag.slice(selector.source);
-        const tag_key = if (comp.tag_key != 0) comp.tag_key else tags.first8Key(tag);
-        switch (doc.queryAccelLookupTag(tag, tag_key)) {
-            .hit => |candidates| {
-                if (scope_root != InvalidIndex) {
-                    if (scope_root >= doc.nodes.items.len) return null;
-                    const scope_end = doc.nodes.items[scope_root].subtree_end;
-                    for (candidates) |idx| {
-                        if (idx <= scope_root) continue;
-                        if (idx > scope_end) break;
-                        if (matchGroupFromRight(Doc, doc, selector, group, rightmost, idx, scope_root)) return idx;
-                    }
-                    return null;
-                }
-                for (candidates) |idx| {
-                    if (matchGroupFromRight(Doc, doc, selector, group, rightmost, idx, scope_root)) return idx;
-                }
-                return null;
-            },
             .unavailable => {},
         }
     }
