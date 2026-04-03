@@ -10,20 +10,21 @@ const instrumentation = @import("../debug/instrumentation.zig");
 const parser = @import("parser.zig");
 const node_api = @import("node.zig");
 const common = @import("../common.zig");
+const IndexInt = common.IndexInt;
 
 // SAFETY: Document owns `source` bytes for the life of nodes/iterators.
 // Node spans and indices are validated on parse; helpers guard against
 // InvalidIndex and out-of-range indexes.
 
 /// Sentinel used for missing node indexes and invalid spans.
-pub const InvalidIndex: u32 = common.InvalidIndex;
+pub const InvalidIndex: IndexInt = common.InvalidIndex;
 const QueryAccelMinBudgetBytes: usize = 4096;
 const QueryAccelBudgetDivisor: usize = 20; // 5%
 
 const QueryAccelIdLookup = union(enum) {
     unavailable,
     miss,
-    hit: u32,
+    hit: IndexInt,
 };
 
 /// Stored node kind in the raw DOM backing arrays.
@@ -60,13 +61,13 @@ pub const ParseOptions = struct {
 
             // Attribute bytes begin at `name_or_text.end` for element nodes and
             // end at `attr_end`.
-            attr_end: u32 = 0,
+            attr_end: IndexInt = 0,
 
-            last_child: u32 = InvalidIndex, // first_child can be derived from the index of this node
-            prev_sibling: u32 = InvalidIndex, // next_sibling can be derived form subtree_end
-            parent: u32 = InvalidIndex,
+            last_child: IndexInt = InvalidIndex, // first_child can be derived from the index of this node
+            prev_sibling: IndexInt = InvalidIndex, // next_sibling can be derived form subtree_end
+            parent: IndexInt = InvalidIndex,
 
-            subtree_end: u32 = 0,
+            subtree_end: IndexInt = 0,
         };
     }
 
@@ -74,7 +75,7 @@ pub const ParseOptions = struct {
     pub fn GetOpenElem(_: @This()) type {
         return struct {
             tag_key: u64 = 0,
-            idx: u32,
+            idx: IndexInt,
             tag_len: u16 = 0,
         };
     }
@@ -89,7 +90,7 @@ pub const ParseOptions = struct {
             const QueryIterType = options.QueryIter();
 
             doc: *DocType,
-            index: u32,
+            index: IndexInt,
 
             /// Returns the underlying raw node record.
             pub fn raw(self: @This()) *const options.GetNodeRaw() {
@@ -226,8 +227,8 @@ pub const ParseOptions = struct {
 
             doc: *DocType,
             selector: ast.Selector,
-            scope_root: u32 = InvalidIndex,
-            next_index: u32 = 1,
+            scope_root: IndexInt = InvalidIndex,
+            next_index: IndexInt = 1,
             runtime_generation: u64 = 0,
 
             /// Returns next matching node or `null` when exhausted.
@@ -283,7 +284,7 @@ pub const ParseOptions = struct {
             const NodeTypeWrapper = options.GetNode();
 
             doc: *const DocType,
-            next_idx: u32 = InvalidIndex,
+            next_idx: IndexInt = InvalidIndex,
 
             /// Returns next wrapped child node or `null` when exhausted.
             pub fn next(noalias self: *@This()) ?NodeTypeWrapper {
@@ -346,7 +347,7 @@ pub const ParseOptions = struct {
             query_accel_budget_exhausted: bool = false,
             query_accel_id_built: bool = false,
             query_accel_id_disabled: bool = false,
-            query_accel_id_map: std.AutoHashMapUnmanaged(u64, u32) = .{},
+            query_accel_id_map: std.AutoHashMapUnmanaged(u64, IndexInt) = .{},
 
             /// Initializes an empty document using `allocator` for internal storage.
             pub fn init(allocator: std.mem.Allocator) DocSelf {
@@ -412,7 +413,7 @@ pub const ParseOptions = struct {
                 return self.queryOneRuntimeDebugFrom(selector, InvalidIndex);
             }
 
-            fn queryOneRuntimeFrom(self: *const DocSelf, selector: []const u8, scope_root: u32) runtime_selector.Error!?NodeTypeWrapper {
+            fn queryOneRuntimeFrom(self: *const DocSelf, selector: []const u8, scope_root: IndexInt) runtime_selector.Error!?NodeTypeWrapper {
                 const mut_self: *DocSelf = @constCast(self);
                 const arena = mut_self.ensureQueryOneArena();
                 _ = arena.reset(.retain_capacity);
@@ -420,7 +421,7 @@ pub const ParseOptions = struct {
                 return self.queryOneCachedFrom(sel, scope_root);
             }
 
-            fn queryOneRuntimeDebugFrom(self: *const DocSelf, selector: []const u8, scope_root: u32) DebugQueryResultType {
+            fn queryOneRuntimeDebugFrom(self: *const DocSelf, selector: []const u8, scope_root: IndexInt) DebugQueryResultType {
                 const mut_self: *DocSelf = @constCast(self);
                 var report: selector_debug.QueryDebugReport = .{};
                 report.reset(selector, scope_root, 0);
@@ -436,7 +437,7 @@ pub const ParseOptions = struct {
                 return self.queryOneCachedDebugFrom(sel, scope_root);
             }
 
-            fn queryOneCachedFrom(self: *const DocSelf, sel: ast.Selector, scope_root: u32) ?NodeTypeWrapper {
+            fn queryOneCachedFrom(self: *const DocSelf, sel: ast.Selector, scope_root: IndexInt) ?NodeTypeWrapper {
                 const mut_self: *DocSelf = @constCast(self);
                 mut_self.ensureQueryPrereqs(sel);
                 const idx = matcher.queryOneIndex(DocSelf, self, sel, scope_root) orelse InvalidIndex;
@@ -444,7 +445,7 @@ pub const ParseOptions = struct {
                 return self.nodeAt(idx);
             }
 
-            fn queryOneCachedDebugFrom(self: *const DocSelf, sel: ast.Selector, scope_root: u32) DebugQueryResultType {
+            fn queryOneCachedDebugFrom(self: *const DocSelf, sel: ast.Selector, scope_root: IndexInt) DebugQueryResultType {
                 const mut_self: *DocSelf = @constCast(self);
                 mut_self.ensureQueryPrereqs(sel);
                 var report: selector_debug.QueryDebugReport = .{};
@@ -475,7 +476,7 @@ pub const ParseOptions = struct {
                 return self.queryAllRuntimeFrom(selector, InvalidIndex);
             }
 
-            fn queryAllRuntimeFrom(self: *const DocSelf, selector: []const u8, scope_root: u32) runtime_selector.Error!QueryIterType {
+            fn queryAllRuntimeFrom(self: *const DocSelf, selector: []const u8, scope_root: IndexInt) runtime_selector.Error!QueryIterType {
                 const mut_self: *DocSelf = @constCast(self);
                 // Runtime query-all iterators are invalidated when a newer runtime
                 // query-all is created, to avoid holding selector memory that may be
@@ -505,7 +506,7 @@ pub const ParseOptions = struct {
             }
 
             /// Returns parent index for `idx`.
-            pub fn parentIndex(self: *const DocSelf, idx: u32) u32 {
+            pub fn parentIndex(self: *const DocSelf, idx: IndexInt) IndexInt {
                 if (idx >= self.nodes.items.len) return InvalidIndex;
                 return self.nodes.items[idx].parent;
             }
@@ -547,7 +548,7 @@ pub const ParseOptions = struct {
             }
 
             /// Wraps raw node index as public `Node` wrapper when valid.
-            pub inline fn nodeAt(self: *const DocSelf, idx: u32) ?NodeTypeWrapper {
+            pub inline fn nodeAt(self: *const DocSelf, idx: IndexInt) ?NodeTypeWrapper {
                 if (idx == InvalidIndex or idx >= self.nodes.items.len) return null;
                 return .{
                     .doc = @constCast(self),
@@ -609,7 +610,7 @@ pub const ParseOptions = struct {
 
                 self.query_accel_id_map.clearRetainingCapacity();
 
-                var idx: u32 = 1;
+                var idx: IndexInt = 1;
                 while (idx < self.nodes.items.len) : (idx += 1) {
                     const node = &self.nodes.items[idx];
                     if (!isElementLike(node.kind)) continue;
@@ -638,7 +639,7 @@ pub const ParseOptions = struct {
                         continue;
                     }
 
-                    if (!self.queryAccelReserve(@sizeOf(u64) + @sizeOf(u32) + 16)) {
+                    if (!self.queryAccelReserve(@sizeOf(u64) + @sizeOf(IndexInt) + 16)) {
                         _ = self.query_accel_id_map.remove(id_hash);
                         self.query_accel_id_disabled = true;
                         self.query_accel_id_map.clearRetainingCapacity();
@@ -679,10 +680,10 @@ pub const ParseOptions = struct {
             }
 
             /// Returns first direct element-like child index for `parent_idx`, if any.
-            pub fn firstElementChildIndex(self: *const DocSelf, parent_idx: u32) u32 {
+            pub fn firstElementChildIndex(self: *const DocSelf, parent_idx: IndexInt) IndexInt {
                 if (parent_idx >= self.nodes.items.len) return InvalidIndex;
 
-                const candidate1: u32 = parent_idx + 1;
+                const candidate1: IndexInt = parent_idx + 1;
                 if (candidate1 >= self.nodes.items.len) return InvalidIndex;
 
                 const node1 = &self.nodes.items[candidate1];
@@ -691,13 +692,13 @@ pub const ParseOptions = struct {
                     return InvalidIndex;
                 }
 
-                const candidate2: u32 = candidate1 + 1;
+                const candidate2: IndexInt = candidate1 + 1;
                 if (candidate2 >= self.nodes.items.len) return InvalidIndex;
 
                 const node2 = &self.nodes.items[candidate2];
                 if (node2.kind == .text) {
                     @branchHint(.cold);
-                    var scan: u32 = candidate2;
+                    var scan: IndexInt = candidate2;
                     while (scan < self.nodes.items.len and self.nodes.items[scan].kind == .text) : (scan += 1) {}
                     if (scan >= self.nodes.items.len) return InvalidIndex;
                     const scanned = &self.nodes.items[scan];
@@ -709,14 +710,14 @@ pub const ParseOptions = struct {
             }
 
             /// Returns next direct element-like sibling index for `node_idx`, if any.
-            pub fn nextElementSiblingIndex(self: *const DocSelf, node_idx: u32) u32 {
+            pub fn nextElementSiblingIndex(self: *const DocSelf, node_idx: IndexInt) IndexInt {
                 if (node_idx >= self.nodes.items.len) return InvalidIndex;
                 const node = &self.nodes.items[node_idx];
                 if (!isElementLike(node.kind)) return InvalidIndex;
                 const parent_idx = node.parent;
                 if (parent_idx == InvalidIndex) return InvalidIndex;
 
-                var candidate: u32 = node.subtree_end + 1;
+                var candidate: IndexInt = node.subtree_end + 1;
                 while (candidate < self.nodes.items.len) : (candidate += 1) {
                     const cand = &self.nodes.items[candidate];
                     if (cand.parent != parent_idx) return InvalidIndex;
@@ -727,7 +728,7 @@ pub const ParseOptions = struct {
             }
 
             /// Returns direct-child node iterator for `parent_idx`.
-            pub fn childrenIter(self: *const DocSelf, parent_idx: u32) ChildrenIterType {
+            pub fn childrenIter(self: *const DocSelf, parent_idx: IndexInt) ChildrenIterType {
                 return .{
                     .doc = self,
                     .next_idx = self.firstElementChildIndex(parent_idx),
@@ -742,11 +743,11 @@ pub const TextOptions = node_api.TextOptions;
 
 /// Inclusive-exclusive byte span into the document source buffer.
 pub const Span = struct {
-    start: u32 = 0,
-    end: u32 = 0,
+    start: IndexInt = 0,
+    end: IndexInt = 0,
 
     /// Returns the span length in bytes.
-    pub fn len(self: @This()) u32 {
+    pub fn len(self: @This()) IndexInt {
         return self.end - self.start;
     }
 
@@ -952,7 +953,7 @@ test "matcher queryOneIndex rejects invalid scope roots safely" {
     try doc.parse(&html, .{});
 
     const sel = comptime ast.Selector.compile("div");
-    const idx = matcher.queryOneIndex(Document, &doc, sel, @as(u32, @intCast(doc.nodes.items.len + 10)));
+    const idx = matcher.queryOneIndex(Document, &doc, sel, @as(IndexInt, @intCast(doc.nodes.items.len + 10)));
     try std.testing.expect(idx == null);
 }
 
@@ -1397,7 +1398,7 @@ test "raw-text unterminated tail keeps element open to end of input" {
     try doc.parse(&html, .{});
 
     const script = doc.queryOne("script") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u32, @intCast(doc.nodes.items.len - 1)), script.raw().subtree_end);
+    try std.testing.expectEqual(@as(IndexInt, @intCast(doc.nodes.items.len - 1)), script.raw().subtree_end);
     try std.testing.expect((doc.queryOne("div")) == null);
 }
 
@@ -1861,7 +1862,7 @@ test "moved document keeps node-scoped queries and navigation valid" {
     const a = doc.queryOne("#a") orelse return error.TestUnexpectedResult;
     const b = a.queryOne("span#b") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("span", b.tagName());
-    try std.testing.expectEqual(@as(u32, a.index), b.parentNode().?.index);
+    try std.testing.expectEqual(@as(IndexInt, a.index), b.parentNode().?.index);
 }
 
 test "query accel id index matches selector results" {

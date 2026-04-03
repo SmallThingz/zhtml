@@ -6,6 +6,7 @@ const tags = @import("../html/tags.zig");
 const attr_inline = @import("../html/attr_inline.zig");
 const selector_debug = @import("../debug/selector_debug.zig");
 const common = @import("../common.zig");
+const IndexInt = common.IndexInt;
 
 // SAFETY: Debug matcher uses the same traversal bounds as the fast matcher
 // and only indexes validated node ranges.
@@ -15,9 +16,9 @@ pub fn explainFirstMatch(
     comptime Doc: type,
     noalias doc: *const Doc,
     selector: ast.Selector,
-    scope_root: u32,
+    scope_root: IndexInt,
     noalias report: *selector_debug.QueryDebugReport,
-) ?u32 {
+) ?IndexInt {
     report.reset(selector.source, scope_root, selector.groups.len);
 
     const bounds = matcher.traversalBounds(Doc, doc, scope_root);
@@ -65,8 +66,8 @@ fn classifyGroupFailure(
     doc: anytype,
     selector: ast.Selector,
     group: ast.Group,
-    node_index: u32,
-    scope_root: u32,
+    node_index: IndexInt,
+    scope_root: IndexInt,
     group_index: usize,
 ) selector_debug.Failure {
     const rightmost = group.compound_len - 1;
@@ -98,7 +99,7 @@ fn classifyCompoundFailure(
     doc: anytype,
     selector: ast.Selector,
     comp: ast.Compound,
-    node_index: u32,
+    node_index: IndexInt,
     group_index: usize,
     compound_index: usize,
 ) selector_debug.Failure {
@@ -136,7 +137,7 @@ fn classifyCompoundFailure(
             .compound_index = c,
             .predicate_index = predicate_index,
         };
-        var class_i: u32 = 0;
+        var class_i: IndexInt = 0;
         while (class_i < comp.class_len) : (class_i += 1) {
             const cls = selector.classes[comp.class_start + class_i].slice(selector.source);
             if (!tables.tokenIncludesAsciiWhitespace(class_attr, cls)) {
@@ -146,7 +147,7 @@ fn classifyCompoundFailure(
         }
     }
 
-    var attr_i: u32 = 0;
+    var attr_i: IndexInt = 0;
     while (attr_i < comp.attr_len) : (attr_i += 1) {
         const attr_sel = selector.attrs[comp.attr_start + attr_i];
         if (!matcher.matchesAttrSelectorDebug(doc, node, selector.source, attr_sel)) {
@@ -155,7 +156,7 @@ fn classifyCompoundFailure(
         predicate_index += 1;
     }
 
-    var pseudo_i: u32 = 0;
+    var pseudo_i: IndexInt = 0;
     while (pseudo_i < comp.pseudo_len) : (pseudo_i += 1) {
         const pseudo = selector.pseudos[comp.pseudo_start + pseudo_i];
         if (!matcher.matchesPseudo(doc, node_index, pseudo)) {
@@ -164,7 +165,7 @@ fn classifyCompoundFailure(
         predicate_index += 1;
     }
 
-    var not_i: u32 = 0;
+    var not_i: IndexInt = 0;
     while (not_i < comp.not_len) : (not_i += 1) {
         const item = selector.not_items[comp.not_start + not_i];
         if (matchesNotSimple(doc, node, selector.source, item)) {

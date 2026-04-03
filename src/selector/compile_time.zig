@@ -105,7 +105,7 @@ test "compile-time parser supports leading combinator and nth-child variants" {
     const nth = comptime compileImpl("#pseudos :nth-child(+3n-2)");
     try std.testing.expectEqual(@as(usize, 2), nth.compounds.len);
     try std.testing.expect(nth.compounds[1].combinator == .descendant);
-    try std.testing.expectEqual(@as(u32, 1), nth.compounds[1].pseudo_len);
+    try std.testing.expectEqual(@as(ast.Int, 1), nth.compounds[1].pseudo_len);
 }
 
 test "format comptime allocator marker" {

@@ -1,11 +1,12 @@
 const std = @import("std");
+const ast = @import("ast.zig");
 
 pub fn expectAllAttributeOps(sel: anytype) !void {
     try std.testing.expectEqual(@as(usize, 1), sel.groups.len);
     try std.testing.expectEqual(@as(usize, 1), sel.compounds.len);
 
     const comp = sel.compounds[0];
-    try std.testing.expectEqual(@as(u32, 7), comp.attr_len);
+    try std.testing.expectEqual(@as(ast.Int, 7), comp.attr_len);
     try std.testing.expect(sel.attrs[comp.attr_start + 0].op == .exists);
     try std.testing.expect(sel.attrs[comp.attr_start + 1].op == .eq);
     try std.testing.expect(sel.attrs[comp.attr_start + 2].op == .prefix);

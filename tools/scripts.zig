@@ -1642,13 +1642,21 @@ fn buildSuiteRunner(io: std.Io, alloc: std.mem.Allocator) !void {
     try common.ensureDir(io, BIN_DIR);
     const root_mod = "-Mroot=tools/suite_runner.zig";
     const html_mod = "-Mhtmlparser=src/root.zig";
+    const config_mod = "-Mconfig=src/config.zig";
+    const build_config_mod = "-Mbuild_config=src/build_config.zig";
     const argv = [_][]const u8{
         "zig",
         "build-exe",
         "--dep",
         "htmlparser",
         root_mod,
+        "--dep",
+        "config",
         html_mod,
+        "--dep",
+        "build_config",
+        config_mod,
+        build_config_mod,
         "-O",
         "ReleaseFast",
         "-femit-bin=" ++ SUITE_RUNNER_BIN,
@@ -2725,13 +2733,21 @@ fn runExamplesCheck(io: std.Io, alloc: std.mem.Allocator) !void {
         const root_mod = try std.fmt.allocPrint(alloc, "-Mroot={s}", .{example_path});
         defer alloc.free(root_mod);
         const html_mod = "-Mhtmlparser=src/root.zig";
+        const config_mod = "-Mconfig=src/config.zig";
+        const build_config_mod = "-Mbuild_config=src/build_config.zig";
         const argv = [_][]const u8{
             "zig",
             "test",
             "--dep",
             "htmlparser",
             root_mod,
+            "--dep",
+            "config",
             html_mod,
+            "--dep",
+            "build_config",
+            config_mod,
+            build_config_mod,
         };
         try common.runInherit(io, alloc, &argv, REPO_ROOT);
     }

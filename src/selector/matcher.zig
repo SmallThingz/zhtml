@@ -9,7 +9,8 @@ const common = @import("../common.zig");
 // (group/compound/predicate ranges). Document node indices are validated
 // before use; debug asserts guard scope bounds in key entry points.
 
-const InvalidIndex: u32 = common.InvalidIndex;
+const IndexInt = common.IndexInt;
+const InvalidIndex: IndexInt = common.InvalidIndex;
 const MaxProbeEntries: usize = 24;
 const MaxCollectedAttrs: usize = 24;
 const LocalMatchFrameCap: usize = 48;
@@ -22,17 +23,17 @@ const prevElementSibling = common.prevElementSibling;
 const nextElementSibling = common.nextElementSibling;
 
 pub const TraversalBounds = struct {
-    start: u32,
-    end_excl: u32,
+    start: IndexInt,
+    end_excl: IndexInt,
 };
 
-pub fn traversalBounds(comptime Doc: type, doc: *const Doc, scope_root: u32) TraversalBounds {
+pub fn traversalBounds(comptime Doc: type, doc: *const Doc, scope_root: IndexInt) TraversalBounds {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.items.len) {
         return .{ .start = 1, .end_excl = 1 };
     }
-    const start: u32 = if (scope_root == InvalidIndex) 1 else scope_root + 1;
-    const end_excl: u32 = if (scope_root == InvalidIndex)
-        @as(u32, @intCast(doc.nodes.items.len))
+    const start: IndexInt = if (scope_root == InvalidIndex) 1 else scope_root + 1;
+    const end_excl: IndexInt = if (scope_root == InvalidIndex)
+        @as(IndexInt, @intCast(doc.nodes.items.len))
     else
         doc.nodes.items[scope_root].subtree_end + 1;
     return .{ .start = start, .end_excl = end_excl };
@@ -135,9 +136,9 @@ pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
 }
 
 /// Returns first matching node index for `selector` within optional `scope_root`.
-pub fn queryOneIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: u32) ?u32 {
+pub fn queryOneIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: IndexInt) ?IndexInt {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.items.len) return null;
-    var best: ?u32 = null;
+    var best: ?IndexInt = null;
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
         const idx = firstMatchForGroup(Doc, doc, selector, group, scope_root) orelse continue;
@@ -147,7 +148,7 @@ pub fn queryOneIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.
 }
 
 /// Returns whether `node_index` matches any selector group within scope.
-pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: u32, scope_root: u32) bool {
+pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt) bool {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.items.len) return false;
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
@@ -164,13 +165,13 @@ const MatchFramePhase = enum(u8) {
 };
 
 const MatchFrame = struct {
-    rel_index: u32,
-    node_index: u32,
+    rel_index: IndexInt,
+    node_index: IndexInt,
     phase: MatchFramePhase = .enter,
-    cursor: u32 = InvalidIndex,
+    cursor: IndexInt = InvalidIndex,
 };
 
-fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, rel_index: u32, node_index: u32, scope_root: u32) bool {
+fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, rel_index: IndexInt, node_index: IndexInt, scope_root: IndexInt) bool {
     if (group.compound_len == 0) {
         @branchHint(.cold);
         return false;
@@ -295,7 +296,7 @@ fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: as
     return false;
 }
 
-fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selector, group: ast.Group, scope_root: u32) ?u32 {
+fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selector, group: ast.Group, scope_root: IndexInt) ?IndexInt {
     const rightmost = group.compound_len - 1;
     const comp_abs: usize = @intCast(group.compound_start + rightmost);
     const comp = selector.compounds[comp_abs];
@@ -325,13 +326,13 @@ fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selecto
     return null;
 }
 
-fn inScope(doc: anytype, idx: u32, scope_root: u32) bool {
+fn inScope(doc: anytype, idx: IndexInt, scope_root: IndexInt) bool {
     if (idx == InvalidIndex or idx >= doc.nodes.items.len) return false;
     if (scope_root == InvalidIndex) return idx > 0;
     return idx > scope_root and idx <= doc.nodes.items[scope_root].subtree_end;
 }
 
-fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: u32) bool {
+fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt) bool {
     const node = &doc.nodes.items[node_index];
     if (!isElementLike(node.kind)) return false;
     // Per-node memo for attribute probes inside one compound match.
@@ -372,19 +373,19 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
         if (!hasAllClassesOnePass(selector, comp, class_attr)) return false;
     }
 
-    var attr_i: u32 = 0;
+    var attr_i: IndexInt = 0;
     while (attr_i < comp.attr_len) : (attr_i += 1) {
         const attr_sel = selector.attrs[comp.attr_start + attr_i];
         if (!matchesAttrSelector(doc, node, &attr_probe, collected_ptr, selector.source, attr_sel)) return false;
     }
 
-    var pseudo_i: u32 = 0;
+    var pseudo_i: IndexInt = 0;
     while (pseudo_i < comp.pseudo_len) : (pseudo_i += 1) {
         const pseudo = selector.pseudos[comp.pseudo_start + pseudo_i];
         if (!matchesPseudo(doc, node_index, pseudo)) return false;
     }
 
-    var not_i: u32 = 0;
+    var not_i: IndexInt = 0;
     while (not_i < comp.not_len) : (not_i += 1) {
         const item = selector.not_items[comp.not_start + not_i];
         if (matchesNotSimple(doc, node, &attr_probe, collected_ptr, selector.source, item)) return false;
@@ -412,7 +413,7 @@ fn matchesNotSimple(
     return matchesNotSimpleCommon(ctx, item);
 }
 
-pub fn matchesPseudo(doc: anytype, node_index: u32, pseudo: ast.Pseudo) bool {
+pub fn matchesPseudo(doc: anytype, node_index: IndexInt, pseudo: ast.Pseudo) bool {
     return switch (pseudo.kind) {
         .first_child => prevElementSibling(doc, node_index) == null,
         .last_child => nextElementSibling(doc, node_index) == null,
@@ -452,7 +453,7 @@ fn hasAllClassesOnePass(selector: ast.Selector, comp: ast.Compound, class_attr: 
     const class_count = comp.class_len;
     if (class_count == 0) return true;
     if (class_count > 63) {
-        var i: u32 = 0;
+        var i: IndexInt = 0;
         while (i < class_count) : (i += 1) {
             const cls = selector.classes[comp.class_start + i].slice(selector.source);
             if (!tables.tokenIncludesAsciiWhitespace(class_attr, cls)) return false;
@@ -470,7 +471,7 @@ fn hasAllClassesOnePass(selector: ast.Selector, comp: ast.Compound, class_attr: 
         while (i < class_attr.len and !tables.WhitespaceTable[class_attr[i]]) : (i += 1) {}
         const tok = class_attr[tok_start..i];
 
-        var j: u32 = 0;
+        var j: IndexInt = 0;
         while (j < class_count) : (j += 1) {
             const bit_shift: u6 = @intCast(j);
             const bit: u64 = @as(u64, 1) << bit_shift;
@@ -573,7 +574,7 @@ fn prepareCollectedAttrs(selector: ast.Selector, comp: ast.Compound, out: *Colle
     if (comp.hasId() and !pushCollectedName(out, "id", HashId)) return false;
     if (comp.class_len != 0 and !pushCollectedName(out, "class", HashClass)) return false;
 
-    var attr_i: u32 = 0;
+    var attr_i: IndexInt = 0;
     while (attr_i < comp.attr_len) : (attr_i += 1) {
         const attr_sel = selector.attrs[comp.attr_start + attr_i];
         const name = attr_sel.name.slice(selector.source);
@@ -581,7 +582,7 @@ fn prepareCollectedAttrs(selector: ast.Selector, comp: ast.Compound, out: *Colle
         if (!pushCollectedName(out, name, hash)) return false;
     }
 
-    var not_i: u32 = 0;
+    var not_i: IndexInt = 0;
     while (not_i < comp.not_len) : (not_i += 1) {
         const item = selector.not_items[comp.not_start + not_i];
         switch (item.kind) {

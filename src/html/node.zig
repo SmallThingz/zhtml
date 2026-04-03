@@ -6,12 +6,13 @@ const attr_inline = @import("attr_inline.zig");
 const scanner = @import("scanner.zig");
 const tags = @import("tags.zig");
 const common = @import("../common.zig");
+const IndexInt = common.IndexInt;
 
 // SAFETY: Node helpers assume `self.index` is in-bounds for `doc.nodes.items`
 // and that `doc.source` outlives returned slices. Attribute parsing relies on
 // `raw.attr_end <= doc.source.len`.
 
-const InvalidIndex: u32 = common.InvalidIndex;
+const InvalidIndex: IndexInt = common.InvalidIndex;
 const isElementLike = common.isElementLike;
 
 /// Controls text extraction behavior for `innerText*` APIs.
@@ -90,7 +91,7 @@ pub fn innerText(self: anytype, arena_alloc: std.mem.Allocator, opts: TextOption
         return normalizeTextNodeInPlace(mut_node, doc);
     }
 
-    var first_idx: u32 = InvalidIndex;
+    var first_idx: IndexInt = InvalidIndex;
     var count: usize = 0;
 
     var idx = self.index + 1;
@@ -178,7 +179,7 @@ pub fn innerTextOwned(self: anytype, alloc: std.mem.Allocator, opts: TextOptions
 /// Writes the HTML serialization of this node (and its subtree) to `writer`.
 pub fn writeHtml(self: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
     const doc = self.doc;
-    const idx: u32 = self.index;
+    const idx: IndexInt = self.index;
     const raw = &doc.nodes.items[@intCast(idx)];
     try writeNodeHtml(doc, idx, raw, writer);
 }
@@ -186,7 +187,7 @@ pub fn writeHtml(self: anytype, writer: anytype) WriterError(@TypeOf(writer))!vo
 /// Writes HTML serialization for this node only, excluding its children.
 pub fn writeHtmlSelf(self: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
     const doc = self.doc;
-    const idx: u32 = self.index;
+    const idx: IndexInt = self.index;
     const raw = &doc.nodes.items[@intCast(idx)];
     try writeNodeHtmlSelf(doc, idx, raw, writer);
 }
@@ -194,14 +195,14 @@ pub fn writeHtmlSelf(self: anytype, writer: anytype) WriterError(@TypeOf(writer)
 fn decodeTextNode(noalias node: anytype, doc: anytype) []const u8 {
     const text_mut = node.name_or_text.sliceMut(doc.source);
     const new_len = entities.decodeInPlaceIfEntity(text_mut);
-    node.name_or_text.end = node.name_or_text.start + @as(u32, @intCast(new_len));
+    node.name_or_text.end = node.name_or_text.start + @as(IndexInt, @intCast(new_len));
     return node.name_or_text.slice(doc.source);
 }
 
 fn normalizeTextNodeInPlace(noalias node: anytype, doc: anytype) []const u8 {
     const text_mut = node.name_or_text.sliceMut(doc.source);
     const new_len = normalizeWhitespaceInPlace(text_mut);
-    node.name_or_text.end = node.name_or_text.start + @as(u32, @intCast(new_len));
+    node.name_or_text.end = node.name_or_text.start + @as(IndexInt, @intCast(new_len));
     return node.name_or_text.slice(doc.source);
 }
 
@@ -264,7 +265,7 @@ fn appendNormalizedSegmentAssumeCapacity(noalias out: *std.ArrayList(u8), seg: [
     }
 }
 
-fn writeNodeHtml(doc: anytype, idx: u32, noalias raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
+fn writeNodeHtml(doc: anytype, idx: IndexInt, noalias raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
     switch (raw.kind) {
         .document => try writeChildrenHtml(doc, idx, raw, writer),
         .text => try writer.writeAll(raw.name_or_text.slice(doc.source)),
@@ -285,7 +286,7 @@ fn writeNodeHtml(doc: anytype, idx: u32, noalias raw: anytype, writer: anytype) 
     }
 }
 
-fn writeNodeHtmlSelf(doc: anytype, idx: u32, noalias raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
+fn writeNodeHtmlSelf(doc: anytype, idx: IndexInt, noalias raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
     switch (raw.kind) {
         .document => try writeChildrenHtml(doc, idx, raw, writer),
         .text => try writer.writeAll(raw.name_or_text.slice(doc.source)),
@@ -299,10 +300,10 @@ fn writeNodeHtmlSelf(doc: anytype, idx: u32, noalias raw: anytype, writer: anyty
     }
 }
 
-fn writeChildrenHtml(doc: anytype, parent_idx: u32, noalias raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
-    const end: u32 = raw.subtree_end;
-    var idx: u32 = parent_idx + 1;
-    const len_u32: u32 = @intCast(doc.nodes.items.len);
+fn writeChildrenHtml(doc: anytype, parent_idx: IndexInt, noalias raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
+    const end: IndexInt = raw.subtree_end;
+    var idx: IndexInt = parent_idx + 1;
+    const len_u32: IndexInt = @intCast(doc.nodes.items.len);
     while (idx <= end and idx < len_u32) {
         const child = &doc.nodes.items[@intCast(idx)];
         if (child.parent != parent_idx) {
@@ -400,16 +401,18 @@ fn writeByte(writer: anytype, b: u8) WriterError(@TypeOf(writer))!void {
 }
 
 const ParsedAttrValue = attr_scan.ParsedValue;
+const ExtendedGapSentinel = 0xff;
+const ExtendedGapHeaderLen = 2 + @sizeOf(IndexInt);
 
 fn skipAttrGap(source: []const u8, span_end: usize, start: usize) usize {
     std.debug.assert(span_end <= source.len);
     std.debug.assert(start < span_end);
     if (start + 1 >= span_end) return span_end;
     const len_byte = source[start + 1];
-    if (len_byte == 0xff) {
-        if (start + 6 > span_end) return span_end;
-        const skip = std.mem.readInt(u32, source[start + 2 .. start + 6][0..4], attr_scan.nativeEndian());
-        const next = start + 6 + @as(usize, @intCast(skip));
+    if (len_byte == ExtendedGapSentinel) {
+        if (start + ExtendedGapHeaderLen > span_end) return span_end;
+        const skip = std.mem.readInt(IndexInt, source[start + 2 .. start + ExtendedGapHeaderLen][0..@sizeOf(IndexInt)], attr_scan.nativeEndian());
+        const next = start + ExtendedGapHeaderLen + @as(usize, @intCast(skip));
         return @min(next, span_end);
     }
     const next = start + 2 + @as(usize, len_byte);

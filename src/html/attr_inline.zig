@@ -3,6 +3,7 @@ const tables = @import("tables.zig");
 const attr_scan = @import("attr_scan.zig");
 const entities = @import("entities.zig");
 const scanner = @import("scanner.zig");
+const common = @import("../common.zig");
 
 // SAFETY: This module mutates `doc.source` in-place for attribute decoding.
 // Invariants:
@@ -11,6 +12,9 @@ const scanner = @import("scanner.zig");
 // - Callers uphold that `source` is the document buffer for the node.
 
 const RawValue = attr_scan.RawValue;
+const IndexInt = common.IndexInt;
+const ExtendedGapSentinel = 0xff;
+const ExtendedGapHeaderLen = 2 + @sizeOf(IndexInt);
 
 const LookupKind = enum(u8) {
     generic,
@@ -322,7 +326,7 @@ fn patchGap(source: []u8, span_end: usize, value_end: usize, raw_next_start: usi
     // Any removed bytes are encoded as:
     // - single-space for tiny gaps
     // - short skip metadata: 0x00, len
-    // - extended skip metadata: 0x00, 0xFF, u32 len
+    // - extended skip metadata: 0x00, 0xFF, IndexInt len
     // This keeps traversal O(n) without reparsing shifted tails.
     std.debug.assert(span_end <= source.len);
     std.debug.assert(value_end <= span_end);
@@ -346,11 +350,11 @@ fn patchGap(source: []u8, span_end: usize, value_end: usize, raw_next_start: usi
         return;
     }
 
-    if (gap_len >= 6) {
+    if (gap_len >= ExtendedGapHeaderLen) {
         source[gap_start] = 0;
-        source[gap_start + 1] = 0xff;
-        const skip: u32 = @intCast(gap_len - 6);
-        std.mem.writeInt(u32, source[gap_start + 2 .. gap_start + 6][0..4], skip, attr_scan.nativeEndian());
+        source[gap_start + 1] = ExtendedGapSentinel;
+        const skip: IndexInt = @intCast(gap_len - ExtendedGapHeaderLen);
+        std.mem.writeInt(IndexInt, source[gap_start + 2 .. gap_start + ExtendedGapHeaderLen][0..@sizeOf(IndexInt)], skip, attr_scan.nativeEndian());
         return;
     }
 

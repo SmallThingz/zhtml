@@ -1,7 +1,10 @@
 const std = @import("std");
+const config = @import("config");
+
+pub const IndexInt = config.Int;
 
 /// Sentinel for invalid node indexes in DOM/query paths.
-pub const InvalidIndex: u32 = std.math.maxInt(u32);
+pub const InvalidIndex: IndexInt = std.math.maxInt(IndexInt);
 /// Sentinel for unset small integer fields in debug reports.
 pub const InvalidSmall: u16 = std.math.maxInt(u16);
 
@@ -54,7 +57,7 @@ pub const Failure = struct {
 
 /// Single non-matching node with its first failure reason.
 pub const NearMiss = struct {
-    node_index: u32 = InvalidIndex,
+    node_index: IndexInt = InvalidIndex,
     reason: Failure = .{},
 
     /// Formats this near-miss record for human-readable output.
@@ -68,21 +71,21 @@ pub const NearMiss = struct {
 /// Fixed-capacity diagnostic report filled by debug query APIs.
 pub const QueryDebugReport = struct {
     selector_source: []const u8 = "",
-    scope_root: u32 = InvalidIndex,
-    visited_elements: u32 = 0,
-    matched_index: u32 = InvalidIndex,
+    scope_root: IndexInt = InvalidIndex,
+    visited_elements: IndexInt = 0,
+    matched_index: IndexInt = InvalidIndex,
     matched_group: u16 = InvalidSmall,
     runtime_parse_error: bool = false,
 
     group_count: u8 = 0,
-    group_eval_counts: [MaxSelectorGroups]u32 = [_]u32{0} ** MaxSelectorGroups,
-    group_match_counts: [MaxSelectorGroups]u32 = [_]u32{0} ** MaxSelectorGroups,
+    group_eval_counts: [MaxSelectorGroups]IndexInt = [_]IndexInt{0} ** MaxSelectorGroups,
+    group_match_counts: [MaxSelectorGroups]IndexInt = [_]IndexInt{0} ** MaxSelectorGroups,
 
     near_miss_len: u8 = 0,
     near_misses: [MaxNearMisses]NearMiss = [_]NearMiss{.{}} ** MaxNearMisses,
 
     /// Resets report state before a debug query run.
-    pub fn reset(self: *@This(), selector_source: []const u8, scope_root: u32, group_count: usize) void {
+    pub fn reset(self: *@This(), selector_source: []const u8, scope_root: IndexInt, group_count: usize) void {
         self.* = .{
             .selector_source = selector_source,
             .scope_root = scope_root,
@@ -96,7 +99,7 @@ pub const QueryDebugReport = struct {
     }
 
     /// Adds one near-miss entry if report capacity allows.
-    pub fn pushNearMiss(self: *@This(), node_index: u32, reason: Failure) void {
+    pub fn pushNearMiss(self: *@This(), node_index: IndexInt, reason: Failure) void {
         if (self.near_miss_len >= MaxNearMisses) return;
         const idx: usize = @intCast(self.near_miss_len);
         self.near_misses[idx] = .{
@@ -130,14 +133,14 @@ pub inline fn isElementLike(kind: anytype) bool {
 }
 
 /// Parent element index for `node_index`, excluding root-document index 0.
-pub fn parentElement(doc: anytype, node_index: u32) ?u32 {
+pub fn parentElement(doc: anytype, node_index: IndexInt) ?IndexInt {
     const p = doc.parentIndex(node_index);
     if (p == InvalidIndex or p == 0) return null;
     return p;
 }
 
 /// Previous element sibling index for `node_index`.
-pub fn prevElementSibling(doc: anytype, node_index: u32) ?u32 {
+pub fn prevElementSibling(doc: anytype, node_index: IndexInt) ?IndexInt {
     var prev = doc.nodes.items[node_index].prev_sibling;
     while (prev != InvalidIndex) : (prev = doc.nodes.items[prev].prev_sibling) {
         if (isElementLike(doc.nodes.items[prev].kind)) return prev;
@@ -146,17 +149,17 @@ pub fn prevElementSibling(doc: anytype, node_index: u32) ?u32 {
 }
 
 /// Next element sibling index for `node_index`.
-pub fn nextElementSibling(doc: anytype, node_index: u32) ?u32 {
+pub fn nextElementSibling(doc: anytype, node_index: IndexInt) ?IndexInt {
     const next = doc.nextElementSiblingIndex(node_index);
     if (next == InvalidIndex) return null;
     return next;
 }
 
 /// Scope-anchor predicate shared by selector matcher and debug matcher.
-pub fn matchesScopeAnchor(doc: anytype, combinator: anytype, node_index: u32, scope_root: u32) bool {
+pub fn matchesScopeAnchor(doc: anytype, combinator: anytype, node_index: IndexInt, scope_root: IndexInt) bool {
     if (combinator == .none) return true;
 
-    const anchor: u32 = if (scope_root == InvalidIndex) 0 else scope_root;
+    const anchor: IndexInt = if (scope_root == InvalidIndex) 0 else scope_root;
     switch (combinator) {
         .child => {
             const p = doc.parentIndex(node_index);

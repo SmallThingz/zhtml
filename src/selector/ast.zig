@@ -1,4 +1,7 @@
 const std = @import("std");
+const common = @import("../common.zig");
+
+pub const Int = common.IndexInt;
 
 /// Relationship between a compound and the compound to its left.
 pub const Combinator = enum(u8) {
@@ -32,8 +35,8 @@ pub const AttrOp = enum(u8) {
 
 /// Source byte range pointing into selector text.
 pub const Range = extern struct {
-    start: u32 = 0,
-    len: u32 = 0,
+    start: Int = 0,
+    len: Int = 0,
 
     /// Returns empty range.
     pub fn empty() @This() {
@@ -167,17 +170,17 @@ pub const Compound = extern struct {
     tag_key: u64 = 0,
     id: Range = .{},
 
-    class_start: u32 = 0,
-    class_len: u32 = 0,
+    class_start: Int = 0,
+    class_len: Int = 0,
 
-    attr_start: u32 = 0,
-    attr_len: u32 = 0,
+    attr_start: Int = 0,
+    attr_len: Int = 0,
 
-    pseudo_start: u32 = 0,
-    pseudo_len: u32 = 0,
+    pseudo_start: Int = 0,
+    pseudo_len: Int = 0,
 
-    not_start: u32 = 0,
-    not_len: u32 = 0,
+    not_start: Int = 0,
+    not_len: Int = 0,
 
     pub fn hasTag(self: @This()) bool {
         return !self.tag.isEmpty();
@@ -211,8 +214,8 @@ pub const Compound = extern struct {
 
 /// One comma-separated selector group.
 pub const Group = extern struct {
-    compound_start: u32,
-    compound_len: u32,
+    compound_start: Int,
+    compound_len: Int,
 
     /// Formats this selector group for human-readable output.
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {

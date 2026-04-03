@@ -3,17 +3,20 @@ const tables = @import("tables.zig");
 const tags = @import("tags.zig");
 const scanner = @import("scanner.zig");
 const common = @import("../common.zig");
+const config = @import("config");
 
-const InvalidIndex: u32 = common.InvalidIndex;
+const InvalidIndex: IndexInt = common.InvalidIndex;
+const IndexInt = common.IndexInt;
 const SvgTagKey: u64 = tags.first8Key("svg");
 const InitialParseStackCapacity: usize = 1024;
+const MaxInitialNodeReserve: usize = 1 << 20;
 
-// SAFETY: Parser builds in-place spans into `input`; indices are stored as `u32`.
-// We reject inputs larger than `u32::max` to prevent truncation.
+// SAFETY: Parser builds in-place spans into `input`; indices are stored as `IndexInt`.
+// We reject inputs larger than `IndexInt::max` to prevent truncation.
 
 /// Parses mutable HTML bytes into `doc` using permissive, in-place tree construction.
 pub fn parseInto(comptime Doc: type, noalias doc: *Doc, input: []u8, comptime opts: anytype) !void {
-    if (input.len > std.math.maxInt(u32)) return error.InputTooLarge;
+    if (!config.lenFits(input.len)) return error.InputTooLarge;
     var p = Parser(Doc, opts){
         .doc = doc,
         .input = input,
@@ -97,6 +100,10 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
             } else {
                 estimated_nodes = @max(@as(usize, 16), (input_len / 16) + 8);
             }
+
+            // Keep startup reserves bounded so giant sparse/plaintext inputs do
+            // not try to preallocate nodes proportional to total byte length.
+            estimated_nodes = @min(estimated_nodes, MaxInitialNodeReserve);
 
             try self.doc.nodes.ensureTotalCapacity(alloc, estimated_nodes);
             try self.doc.parse_stack.ensureTotalCapacity(alloc, InitialParseStackCapacity);
@@ -366,8 +373,8 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
             }
         }
 
-        fn appendTextNode(noalias self: *Self, parent_idx: u32) !u32 {
-            const idx: u32 = @intCast(self.doc.nodes.items.len);
+        fn appendTextNode(noalias self: *Self, parent_idx: IndexInt) !IndexInt {
+            const idx: IndexInt = @intCast(self.doc.nodes.items.len);
             const node: @TypeOf(self.doc.nodes.items[0]) = .{
                 .kind = .text,
                 .parent = parent_idx,
@@ -377,8 +384,8 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
             return idx;
         }
 
-        fn appendElementNode(noalias self: *Self, parent_idx: u32) !u32 {
-            const idx: u32 = @intCast(self.doc.nodes.items.len);
+        fn appendElementNode(noalias self: *Self, parent_idx: IndexInt) !IndexInt {
+            const idx: IndexInt = @intCast(self.doc.nodes.items.len);
             const node: @TypeOf(self.doc.nodes.items[0]) = .{
                 .kind = .element,
                 .parent = parent_idx,
@@ -402,13 +409,13 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
         }
 
         const appendAlloc = common.appendAlloc;
-        fn pushNode(noalias self: *Self, node: @TypeOf(self.doc.nodes.items[0])) !u32 {
+        fn pushNode(noalias self: *Self, node: @TypeOf(self.doc.nodes.items[0])) !IndexInt {
             const len = self.doc.nodes.items.len;
             try appendAlloc(@TypeOf(node), &self.doc.nodes, self.doc.allocator, node);
             return @intCast(len);
         }
 
-        fn pushStack(noalias self: *Self, idx: u32, tag_key: u64, tag_len: u16) !void {
+        fn pushStack(noalias self: *Self, idx: IndexInt, tag_key: u64, tag_len: u16) !void {
             try appendAlloc(OpenElem, &self.doc.parse_stack, self.doc.allocator, .{
                 .idx = idx,
                 .tag_key = tag_key,
@@ -416,7 +423,7 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
             });
         }
 
-        inline fn currentParent(noalias self: *Self) u32 {
+        inline fn currentParent(noalias self: *Self) IndexInt {
             if (self.doc.parse_stack.items.len == 0) return InvalidIndex;
             return self.doc.parse_stack.items[self.doc.parse_stack.items.len - 1].idx;
         }

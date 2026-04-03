@@ -1,14 +1,27 @@
 const std = @import("std");
+const IntLen = @import("src/build_config.zig").IntLen;
 
 /// Configures build artifacts, helper steps, and test/check pipelines.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const intlen = b.option(IntLen, "intlen", "Integer width used for document spans and node indexes") orelse .u32;
+
+    const build_config = b.addOptions();
+    build_config.addOption(IntLen, "intlen", intlen);
+
+    const config_mod = b.createModule(.{
+        .root_source_file = b.path("src/config.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    config_mod.addOptions("build_config", build_config);
 
     const mod = b.addModule("htmlparser", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+    mod.addImport("config", config_mod);
 
     const exe = b.addExecutable(.{
         .name = "htmlparser",
@@ -18,6 +31,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "htmlparser", .module = mod },
+                .{ .name = "config", .module = config_mod },
             },
         }),
     });

@@ -1,4 +1,6 @@
 const std = @import("std");
+const config = @import("config");
+pub const ParseInt = @import("config").Int;
 
 /// Parse-time configuration and type factory for `Document`, `Node`, and iterators.
 pub const ParseOptions = @import("html/document.zig").ParseOptions;
@@ -233,4 +235,73 @@ test "writeHtmlSelf excludes children" {
     defer out.deinit();
     try div.writeHtmlSelf(&out.writer);
     try std.testing.expectEqualStrings("<div id='a'>", out.written());
+}
+
+test "u16 parse rejects oversized input" {
+    if (ParseInt != u16) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const opts: ParseOptions = .{};
+    const Document = opts.GetDocument();
+
+    var doc = Document.init(alloc);
+    defer doc.deinit();
+
+    const src = try alloc.alloc(u8, config.max_len + 1);
+    defer alloc.free(src);
+    @memset(src, 'a');
+    src[0] = '<';
+    src[1] = 'p';
+    src[2] = '>';
+
+    try std.testing.expectError(error.InputTooLarge, doc.parse(src, .{}));
+}
+
+test "u64 parse accepts sparse 8 GiB plaintext input" {
+    if (ParseInt != u64) return error.SkipZigTest;
+    if (@sizeOf(usize) < @sizeOf(u64)) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    const opts: ParseOptions = .{};
+    const Document = opts.GetDocument();
+    var rand_src: std.Random.IoSource = .{ .io = io };
+    const path = try std.fmt.allocPrint(alloc, "/tmp/htmlparser-u64-8g-{x}.html", .{rand_src.interface().int(u64)});
+    defer alloc.free(path);
+
+    const file = try std.Io.Dir.createFileAbsolute(io, path, .{
+        .read = true,
+        .truncate = true,
+        .exclusive = true,
+    });
+    defer {
+        file.close(io);
+        std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+    }
+
+    const len = 8 * 1024 * 1024 * 1024;
+    try file.setLength(io, len);
+
+    var mapped = try std.Io.File.MemoryMap.create(io, file, .{
+        .len = len,
+        .populate = false,
+        .undefined_contents = false,
+        .protection = .{ .read = true, .write = true },
+    });
+    defer mapped.destroy(io);
+
+    const tag = "<plaintext>";
+    @memcpy(mapped.memory[0..tag.len], tag);
+
+    var doc = Document.init(alloc);
+    defer doc.deinit();
+    try doc.parse(mapped.memory, .{});
+
+    try std.testing.expectEqual(@as(usize, 3), doc.nodes.items.len);
+    const plaintext = doc.nodeAt(1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("plaintext", plaintext.tagName());
+
+    const text = doc.nodeAt(2) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ParseInt, @intCast(tag.len)), text.raw().name_or_text.start);
+    try std.testing.expectEqual(@as(ParseInt, @intCast(len)), text.raw().name_or_text.end);
 }

@@ -1,6 +1,11 @@
 const std = @import("std");
 const tables = @import("tables.zig");
 const scanner = @import("scanner.zig");
+const common = @import("../common.zig");
+
+const IndexInt = common.IndexInt;
+const ExtendedGapSentinel = 0xff;
+const ExtendedGapHeaderLen = 2 + @sizeOf(IndexInt);
 
 // SAFETY: Callers provide slice bounds and indices. Invariants asserted in debug:
 // - `span_end <= source.len`
@@ -117,10 +122,10 @@ pub fn nextAfterValue(source: []const u8, value_end: usize, span_end: usize) usi
         if (i + 1 >= span_end) return span_end;
 
         const len_byte = source[i + 1];
-        if (len_byte == 0xff) {
-            if (i + 6 > span_end) return span_end;
-            const skip = std.mem.readInt(u32, source[i + 2 .. i + 6][0..4], nativeEndian());
-            const next = i + 6 + @as(usize, @intCast(skip));
+        if (len_byte == ExtendedGapSentinel) {
+            if (i + ExtendedGapHeaderLen > span_end) return span_end;
+            const skip = std.mem.readInt(IndexInt, source[i + 2 .. i + ExtendedGapHeaderLen][0..@sizeOf(IndexInt)], nativeEndian());
+            const next = i + ExtendedGapHeaderLen + @as(usize, @intCast(skip));
             return @min(next, span_end);
         }
 
@@ -250,14 +255,20 @@ test "parseParsedValue honors gap markers and truncation" {
         try testing.expectEqual(@as(usize, 10), parsed.next_start);
     }
     {
-        var buf = [_]u8{
-            'a', 0,    0, 'v', 'a', 'l', 0,
-            0,   0xff, 2, 0,   0,   0,   'x',
-            'y', 'b',
-        };
+        const skip: IndexInt = 2;
+        var buf: [7 + ExtendedGapHeaderLen + skip + 1]u8 = undefined;
+        @memset(&buf, 0);
+        buf[0] = 'a';
+        buf[3] = 'v';
+        buf[4] = 'a';
+        buf[5] = 'l';
+        buf[7] = 0;
+        buf[8] = ExtendedGapSentinel;
+        std.mem.writeInt(IndexInt, buf[9 .. 9 + @sizeOf(IndexInt)], skip, nativeEndian());
+        buf[7 + ExtendedGapHeaderLen + skip] = 'b';
         const parsed = parseParsedValue(buf[0..], buf.len, 1);
         try testing.expectEqualStrings("val", parsed.value);
-        try testing.expectEqual(@as(usize, 15), parsed.next_start);
+        try testing.expectEqual(7 + ExtendedGapHeaderLen + @as(usize, skip), parsed.next_start);
     }
     {
         var buf = [_]u8{ 'a', 0, 0, 'v', 0, 0, 0xff, 1 };

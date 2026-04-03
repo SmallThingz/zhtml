@@ -3,6 +3,7 @@ const ast = @import("ast.zig");
 const tables = @import("../html/tables.zig");
 const tags = @import("../html/tags.zig");
 const test_helpers = @import("test_helpers.zig");
+const IndexInt = ast.Int;
 
 // SAFETY: Runtime parser owns `source` bytes via allocator and builds AST
 // slices that refer to those owned bytes.
@@ -60,7 +61,7 @@ const Parser = struct {
         if (self.i >= self.source.len) return error.InvalidSelector;
 
         while (true) {
-            const group_start: u32 = @intCast(self.compounds.items.len);
+            const group_start: IndexInt = @intCast(self.compounds.items.len);
             var first_combinator: ast.Combinator = .none;
             if (self.i < self.source.len) {
                 first_combinator = switch (self.peek()) {
@@ -112,7 +113,7 @@ const Parser = struct {
                 try self.parseCompound(combinator);
             }
 
-            const group_end: u32 = @intCast(self.compounds.items.len);
+            const group_end: IndexInt = @intCast(self.compounds.items.len);
             if (group_end == group_start) return error.InvalidSelector;
             try self.pushGroup(.{
                 .compound_start = group_start,
@@ -210,10 +211,10 @@ const Parser = struct {
 
         if (!consumed) return error.InvalidSelector;
 
-        out.class_len = @as(u32, @intCast(self.classes.items.len)) - out.class_start;
-        out.attr_len = @as(u32, @intCast(self.attrs.items.len)) - out.attr_start;
-        out.pseudo_len = @as(u32, @intCast(self.pseudos.items.len)) - out.pseudo_start;
-        out.not_len = @as(u32, @intCast(self.not_items.items.len)) - out.not_start;
+        out.class_len = @as(IndexInt, @intCast(self.classes.items.len)) - out.class_start;
+        out.attr_len = @as(IndexInt, @intCast(self.attrs.items.len)) - out.attr_start;
+        out.pseudo_len = @as(IndexInt, @intCast(self.pseudos.items.len)) - out.pseudo_start;
+        out.not_len = @as(IndexInt, @intCast(self.not_items.items.len)) - out.not_start;
 
         try self.pushCompound(out);
     }
@@ -525,7 +526,7 @@ test "runtime selector parser supports leading combinator and pseudo-only compou
     defer sel2.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), sel2.compounds.len);
     try std.testing.expect(sel2.compounds[1].combinator == .descendant);
-    try std.testing.expectEqual(@as(u32, 1), sel2.compounds[1].pseudo_len);
+    try std.testing.expectEqual(@as(IndexInt, 1), sel2.compounds[1].pseudo_len);
     try std.testing.expect(sel2.pseudos[sel2.compounds[1].pseudo_start].kind == .nth_child);
 }
 
