@@ -1,6 +1,5 @@
 const std = @import("std");
-const config = @import("config");
-pub const ParseInt = @import("config").Int;
+pub const ParseInt = @import("common.zig").IndexInt;
 
 /// Parse-time configuration and type factory for `Document`, `Node`, and iterators.
 pub const ParseOptions = @import("html/document.zig").ParseOptions;
@@ -247,7 +246,11 @@ test "u16 parse rejects oversized input" {
     var doc = Document.init(alloc);
     defer doc.deinit();
 
-    const src = try alloc.alloc(u8, config.max_len + 1);
+    const max_len: usize = if (@sizeOf(ParseInt) >= @sizeOf(usize))
+        std.math.maxInt(usize)
+    else
+        @as(usize, std.math.maxInt(ParseInt));
+    const src = try alloc.alloc(u8, max_len + 1);
     defer alloc.free(src);
     @memset(src, 'a');
     src[0] = '<';

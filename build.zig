@@ -1,5 +1,11 @@
 const std = @import("std");
-const IntLen = @import("src/build_config.zig").IntLen;
+
+const IntLen = enum {
+    u16,
+    u32,
+    u64,
+    usize,
+};
 
 /// Configures build artifacts, helper steps, and test/check pipelines.
 pub fn build(b: *std.Build) void {
@@ -7,21 +13,14 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const intlen = b.option(IntLen, "intlen", "Integer width used for document spans and node indexes") orelse .u32;
 
-    const build_config = b.addOptions();
-    build_config.addOption(IntLen, "intlen", intlen);
-
-    const config_mod = b.createModule(.{
-        .root_source_file = b.path("src/config.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    config_mod.addOptions("build_config", build_config);
+    const config_options = b.addOptions();
+    config_options.addOption(IntLen, "intlen", intlen);
 
     const mod = b.addModule("htmlparser", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
-    mod.addImport("config", config_mod);
+    mod.addOptions("config", config_options);
 
     const exe = b.addExecutable(.{
         .name = "htmlparser",
@@ -31,10 +30,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "htmlparser", .module = mod },
-                .{ .name = "config", .module = config_mod },
             },
         }),
     });
+    exe.root_module.addOptions("config", config_options);
 
     const parse_mode_mod = b.createModule(.{
         .root_source_file = b.path("tools/parse_mode.zig"),

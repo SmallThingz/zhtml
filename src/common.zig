@@ -1,7 +1,22 @@
 const std = @import("std");
 const config = @import("config");
 
-pub const IndexInt = config.Int;
+pub const IndexInt = switch (config.intlen) {
+    .u16 => u16,
+    .u32 => u32,
+    .u64 => u64,
+    .usize => usize,
+};
+
+/// Maximum input length representable by the configured index width.
+pub const MaxLen: usize = if (@sizeOf(IndexInt) >= @sizeOf(usize))
+    std.math.maxInt(usize)
+else
+    @as(usize, std.math.maxInt(IndexInt));
+
+pub inline fn lenFits(len: usize) bool {
+    return len <= MaxLen;
+}
 
 /// Sentinel for invalid node indexes in DOM/query paths.
 pub const InvalidIndex: IndexInt = std.math.maxInt(IndexInt);

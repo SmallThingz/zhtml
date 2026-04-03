@@ -3,7 +3,6 @@ const tables = @import("tables.zig");
 const tags = @import("tags.zig");
 const scanner = @import("scanner.zig");
 const common = @import("../common.zig");
-const config = @import("config");
 
 const InvalidIndex: IndexInt = common.InvalidIndex;
 const IndexInt = common.IndexInt;
@@ -16,7 +15,7 @@ const MaxInitialNodeReserve: usize = 1 << 20;
 
 /// Parses mutable HTML bytes into `doc` using permissive, in-place tree construction.
 pub fn parseInto(comptime Doc: type, noalias doc: *Doc, input: []u8, comptime opts: anytype) !void {
-    if (!config.lenFits(input.len)) return error.InputTooLarge;
+    if (!common.lenFits(input.len)) return error.InputTooLarge;
     var p = Parser(Doc, opts){
         .doc = doc,
         .input = input,

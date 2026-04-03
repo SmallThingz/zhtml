@@ -1642,8 +1642,13 @@ fn buildSuiteRunner(io: std.Io, alloc: std.mem.Allocator) !void {
     try common.ensureDir(io, BIN_DIR);
     const root_mod = "-Mroot=tools/suite_runner.zig";
     const html_mod = "-Mhtmlparser=src/root.zig";
-    const config_mod = "-Mconfig=src/config.zig";
-    const build_config_mod = "-Mbuild_config=src/build_config.zig";
+    const config_path = try tempConfigModule(io, alloc);
+    defer {
+        std.Io.Dir.deleteFileAbsolute(io, config_path) catch {};
+        alloc.free(config_path);
+    }
+    const config_mod = try std.fmt.allocPrint(alloc, "-Mconfig={s}", .{config_path});
+    defer alloc.free(config_mod);
     const argv = [_][]const u8{
         "zig",
         "build-exe",
@@ -1653,15 +1658,36 @@ fn buildSuiteRunner(io: std.Io, alloc: std.mem.Allocator) !void {
         "--dep",
         "config",
         html_mod,
-        "--dep",
-        "build_config",
         config_mod,
-        build_config_mod,
         "-O",
         "ReleaseFast",
         "-femit-bin=" ++ SUITE_RUNNER_BIN,
     };
     try common.runInherit(io, alloc, &argv, REPO_ROOT);
+}
+
+fn tempConfigModule(io: std.Io, alloc: std.mem.Allocator) ![]u8 {
+    var src: std.Random.IoSource = .{ .io = io };
+    const path = try std.fmt.allocPrint(alloc, "/tmp/htmlparser-config-{x}.zig", .{src.interface().int(u64)});
+    errdefer alloc.free(path);
+
+    const file = try std.Io.Dir.createFileAbsolute(io, path, .{
+        .truncate = true,
+        .exclusive = true,
+    });
+    defer file.close(io);
+    try file.writeStreamingAll(io,
+        \\pub const IntLen = enum {
+        \\    u16,
+        \\    u32,
+        \\    u64,
+        \\    usize,
+        \\};
+        \\
+        \\pub const intlen: IntLen = .u32;
+        \\
+    );
+    return path;
 }
 
 fn runSelectorCount(io: std.Io, alloc: std.mem.Allocator, mode: []const u8, fixture: []const u8, selector: []const u8) !usize {
@@ -2728,13 +2754,19 @@ fn runExamplesCheck(io: std.Io, alloc: std.mem.Allocator) !void {
     }
     if (example_files.len == 0) return error.NoExamplesFound;
 
+    const config_path = try tempConfigModule(io, alloc);
+    defer {
+        std.Io.Dir.deleteFileAbsolute(io, config_path) catch {};
+        alloc.free(config_path);
+    }
+    const config_mod = try std.fmt.allocPrint(alloc, "-Mconfig={s}", .{config_path});
+    defer alloc.free(config_mod);
+
     for (example_files) |example_path| {
         std.debug.print("examples-check: zig test {s}\n", .{example_path});
         const root_mod = try std.fmt.allocPrint(alloc, "-Mroot={s}", .{example_path});
         defer alloc.free(root_mod);
         const html_mod = "-Mhtmlparser=src/root.zig";
-        const config_mod = "-Mconfig=src/config.zig";
-        const build_config_mod = "-Mbuild_config=src/build_config.zig";
         const argv = [_][]const u8{
             "zig",
             "test",
@@ -2744,10 +2776,7 @@ fn runExamplesCheck(io: std.Io, alloc: std.mem.Allocator) !void {
             "--dep",
             "config",
             html_mod,
-            "--dep",
-            "build_config",
             config_mod,
-            build_config_mod,
         };
         try common.runInherit(io, alloc, &argv, REPO_ROOT);
     }
