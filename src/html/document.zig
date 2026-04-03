@@ -1743,6 +1743,25 @@ test "whitespace-only text nodes drop only in fastest mode" {
     try std.testing.expectEqualStrings(" hi ", text);
 }
 
+test "fastest mode drops indentation-only runs between child elements" {
+    const alloc = std.testing.allocator;
+    var doc = Document.init(alloc);
+    defer doc.deinit();
+
+    var html = "<div>\n  <a></a>\n  <b></b>\n</div>".*;
+    try doc.parse(&html, .{ .drop_whitespace_text_nodes = true });
+
+    try std.testing.expectEqual(@as(usize, 4), doc.nodes.items.len);
+
+    const div = doc.nodeAt(1) orelse return error.TestUnexpectedResult;
+    const a = div.firstChild() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a", doc.nodes.items[a.index].name_or_text.slice(doc.source));
+
+    const b = a.nextSibling() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("b", doc.nodes.items[b.index].name_or_text.slice(doc.source));
+    try std.testing.expect(b.nextSibling() == null);
+}
+
 test "attribute scanner handles quoted > and self-closing tails" {
     const alloc = std.testing.allocator;
     var doc = Document.init(alloc);

@@ -286,6 +286,7 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
                 return;
             }
 
+            self.skipDroppedWhitespaceAfterStartTag();
             try self.pushStack(node_idx, tag_name_key, @intCast(tag_name.len));
         }
 
@@ -468,6 +469,17 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
 
         inline fn skipWs(noalias self: *Self) void {
             while (self.i < self.input.len and tables.WhitespaceTable[self.input[self.i]]) : (self.i += 1) {}
+        }
+
+        inline fn skipDroppedWhitespaceAfterStartTag(noalias self: *Self) void {
+            if (!opts.drop_whitespace_text_nodes) return;
+            if (self.i >= self.input.len or !tables.WhitespaceTable[self.input[self.i]]) return;
+
+            var j = self.i + 1;
+            while (j < self.input.len and tables.WhitespaceTable[self.input[j]]) : (j += 1) {}
+            if (j < self.input.len and self.input[j] == '<') {
+                self.i = j;
+            }
         }
 
         inline fn isSvgTag(tag_name: []const u8, tag_key: u64) bool {
