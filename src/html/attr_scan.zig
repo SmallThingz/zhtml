@@ -1,6 +1,5 @@
 const std = @import("std");
 const tables = @import("tables.zig");
-const scanner = @import("scanner.zig");
 const common = @import("../common.zig");
 
 const IndexInt = common.IndexInt;
@@ -79,7 +78,7 @@ pub fn parseRawValue(source: []const u8, span_end: usize, eq_index: usize) RawVa
     }
 
     if (c == 0x27 or c == '"') {
-        const j = scanner.findByte(source, i + 1, c) orelse span_end;
+        const j = std.mem.indexOfScalarPos(u8, source, i + 1, c) orelse span_end;
         const next_start = if (j < span_end) j + 1 else span_end;
         return .{ .kind = .quoted, .start = i + 1, .end = j, .next_start = next_start };
     }

@@ -110,7 +110,7 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
 
         inline fn parseTextKeepWhitespace(noalias self: *Self) !void {
             const start = self.i;
-            self.i = scanner.findByte(self.input, self.i, '<') orelse self.input.len;
+            self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '<') orelse self.input.len;
             if (self.i == start) return;
 
             const parent_idx = self.currentParent();
@@ -320,7 +320,7 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
             if (self.i < self.input.len and self.input[self.i] == '>') {
                 self.i += 1;
             } else {
-                self.i = scanner.findByte(self.input, self.i, '>') orelse self.input.len;
+                self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '>') orelse self.input.len;
                 if (self.i < self.input.len) self.i += 1;
             }
 
@@ -443,7 +443,7 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
 
             var j = self.i;
             while (j + 2 < self.input.len) {
-                const dash = scanner.findByte(self.input, j, '-') orelse {
+                const dash = std.mem.indexOfScalarPos(u8, self.input, j, '-') orelse {
                     @branchHint(.cold);
                     self.i = self.input.len;
                     return;
@@ -468,7 +468,7 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
 
         fn skipPi(noalias self: *Self) void {
             self.i += 2;
-            self.i = scanner.findByte(self.input, self.i, '>') orelse self.input.len;
+            self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '>') orelse self.input.len;
             if (self.i < self.input.len) self.i += 1;
         }
 
@@ -492,18 +492,18 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
         }
 
         inline fn findRawTextClose(noalias self: *Self, tag_name: []const u8, start: usize) ?struct { content_end: usize, close_end: usize } {
-            var j = scanner.findByte(self.input, start, '<') orelse return null;
+            var j = std.mem.indexOfScalarPos(u8, self.input, start, '<') orelse return null;
             const tag_len = tag_name.len;
             if (tag_len == 0) return null;
             const tag_key = tags.first8Key(tag_name);
             const first = tables.lower(tag_name[0]);
             while (j + 3 < self.input.len) {
                 if (self.input[j + 1] != '/') {
-                    j = scanner.findByte(self.input, j + 1, '<') orelse return null;
+                    j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
                     continue;
                 }
                 if (j + 2 >= self.input.len or tables.lower(self.input[j + 2]) != first) {
-                    j = scanner.findByte(self.input, j + 1, '<') orelse return null;
+                    j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
                     continue;
                 }
 
@@ -520,18 +520,18 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
                     }
                 }
                 if (k == name_start) {
-                    j = scanner.findByte(self.input, j + 1, '<') orelse return null;
+                    j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
                     continue;
                 }
 
                 if (k - name_start != tag_len or close_key != tag_key) {
-                    j = scanner.findByte(self.input, j + 1, '<') orelse return null;
+                    j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
                     continue;
                 }
 
                 while (k < self.input.len and tables.WhitespaceTable[self.input[k]]) : (k += 1) {}
                 if (k >= self.input.len or self.input[k] != '>') {
-                    j = scanner.findByte(self.input, j + 1, '<') orelse return null;
+                    j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
                     continue;
                 }
 

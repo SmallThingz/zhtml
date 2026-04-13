@@ -1,6 +1,4 @@
 const std = @import("std");
-const scanner = @import("scanner.zig");
-
 /// Result of decoding one HTML entity prefix.
 pub const Decoded = struct {
     /// Number of source bytes consumed from the entity prefix.
@@ -27,7 +25,7 @@ pub fn decodeInPlace(slice: []u8) usize {
 /// Fast-path entity decode that skips work when no `&` is present.
 pub fn decodeInPlaceIfEntity(slice: []u8) usize {
     // Fast reject to keep the no-entity path single-pass and branch-light.
-    const first = scanner.findByte(slice, 0, '&') orelse return slice.len;
+    const first = std.mem.indexOfScalarPos(u8, slice, 0, '&') orelse return slice.len;
     return decodeInPlaceFrom(slice, first);
 }
 
@@ -41,7 +39,7 @@ fn decodeInPlaceFrom(slice: []u8, start_index: usize) usize {
     var w: usize = start_index;
 
     while (r < slice.len) {
-        const amp_rel = scanner.findByte(slice, r, '&') orelse {
+        const amp_rel = std.mem.indexOfScalarPos(u8, slice, r, '&') orelse {
             if (w != r) {
                 std.mem.copyForwards(u8, slice[w .. w + (slice.len - r)], slice[r..slice.len]);
             }

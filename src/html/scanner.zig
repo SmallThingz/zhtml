@@ -26,11 +26,6 @@ pub const TextRun = struct {
     has_non_whitespace: bool,
 };
 
-/// Finds `needle` byte in `hay` from `start`, using SIMD where available.
-pub fn findByte(hay: []const u8, start: usize, needle: u8) ?usize {
-    return std.mem.indexOfScalarPos(u8, hay, start, needle);
-}
-
 /// Scans from `start` to the next `<`, tracking whether the run contains any non-whitespace bytes.
 pub fn scanTextRun(hay: []const u8, start: usize) TextRun {
     if (start >= hay.len) return .{ .lt_index = hay.len, .has_non_whitespace = false };
@@ -82,7 +77,7 @@ pub fn scanTextRun(hay: []const u8, start: usize) TextRun {
 pub fn findTagEndRespectQuotes(hay: []const u8, _start: usize) ?TagEnd {
     std.debug.assert(_start <= hay.len);
     var start = _start;
-    var end = findAny3Dispatch(hay, start) orelse {
+    var end = @call(.always_inline, std.mem.indexOfAnyPos, .{ u8, hay, start, ">'\"" }) orelse {
         @branchHint(.cold);
         return null;
     };
@@ -93,11 +88,11 @@ pub fn findTagEndRespectQuotes(hay: []const u8, _start: usize) ?TagEnd {
         },
         '\'', '"' => |q| {
             start = 1 + end;
-            start = 1 + (findByte(hay, start, q) orelse {
+            start = 1 + (std.mem.indexOfScalarPos(u8, hay, start, q) orelse {
                 @branchHint(.cold);
                 return null;
             });
-            end = findAny3Dispatch(hay, start) orelse {
+            end = @call(.always_inline, std.mem.indexOfAnyPos, .{ u8, hay, start, ">'\"" }) orelse {
                 @branchHint(.cold);
                 return null;
             };
@@ -123,7 +118,7 @@ pub fn findSvgSubtreeEnd(hay: []const u8, start: usize) ?usize {
     var depth: usize = 1;
     var i = start;
     while (i < hay.len) {
-        const lt = findByte(hay, i, '<') orelse return null;
+        const lt = std.mem.indexOfScalarPos(u8, hay, i, '<') orelse return null;
         if (lt + 1 >= hay.len) return null;
 
         var k = lt + 1;
@@ -135,7 +130,7 @@ pub fn findSvgSubtreeEnd(hay: []const u8, start: usize) ?usize {
                 if (k + 2 < hay.len and hay[k + 1] == '-' and hay[k + 2] == '-') {
                     var j = k + 3;
                     while (j + 2 < hay.len) {
-                        const dash = findByte(hay, j, '-') orelse return null;
+                        const dash = std.mem.indexOfScalarPos(u8, hay, j, '-') orelse return null;
                         if (dash + 2 < hay.len and hay[dash + 1] == '-' and hay[dash + 2] == '>') {
                             i = dash + 3;
                             break;
@@ -143,12 +138,12 @@ pub fn findSvgSubtreeEnd(hay: []const u8, start: usize) ?usize {
                         j = dash + 1;
                     } else return null;
                 } else {
-                    const gt = findByte(hay, k + 1, '>') orelse return null;
+                    const gt = std.mem.indexOfScalarPos(u8, hay, k + 1, '>') orelse return null;
                     i = gt + 1;
                 }
             },
             '?' => {
-                const gt = findByte(hay, k + 1, '>') orelse return null;
+                const gt = std.mem.indexOfScalarPos(u8, hay, k + 1, '>') orelse return null;
                 i = gt + 1;
             },
             '/' => {
@@ -156,7 +151,7 @@ pub fn findSvgSubtreeEnd(hay: []const u8, start: usize) ?usize {
                 while (j < hay.len and tables.WhitespaceTable[hay[j]]) : (j += 1) {}
                 const name_start = j;
                 while (j < hay.len and tables.TagNameCharTable[hay[j]]) : (j += 1) {}
-                const gt = findByte(hay, j, '>') orelse return null;
+                const gt = std.mem.indexOfScalarPos(u8, hay, j, '>') orelse return null;
                 if (isSvgTagName(hay[name_start..j])) {
                     depth -= 1;
                     if (depth == 0) return gt + 1;
@@ -189,15 +184,6 @@ inline fn isSvgTagName(name: []const u8) bool {
         tables.lower(name[2]) == 'g';
 }
 
-inline fn findAny3Dispatch(hay: []const u8, start: usize) ?usize {
-    return @call(.always_inline, std.mem.indexOfAnyPos, .{ u8, hay, start, ">'\"" });
-}
-
-test "findByte helper matches scalar behavior" {
-    const s = "abc<?d<!--x--><q";
-    try std.testing.expectEqual(@as(?usize, 3), findByte(s, 0, '<'));
-}
-
 test "scanTextRun tracks next tag and whitespace-only runs" {
     const a = scanTextRun(" \n\t<em>", 0);
     try std.testing.expectEqual(@as(usize, 3), a.lt_index);
@@ -221,35 +207,35 @@ test "findTagEndRespectQuotes handles quoted >" {
 
 test "isExplicitSelfClosingTag detects slash before > with optional whitespace" {
     const a = " x='1' />";
-    const a_gt = findByte(a, 0, '>') orelse return error.TestUnexpectedResult;
+    const a_gt = std.mem.indexOfScalarPos(u8, a, 0, '>') orelse return error.TestUnexpectedResult;
     try std.testing.expect(isExplicitSelfClosingTag(a, 0, a_gt));
 
     const b = " x='1'/   >";
-    const b_gt = findByte(b, 0, '>') orelse return error.TestUnexpectedResult;
+    const b_gt = std.mem.indexOfScalarPos(u8, b, 0, '>') orelse return error.TestUnexpectedResult;
     try std.testing.expect(isExplicitSelfClosingTag(b, 0, b_gt));
 
     const c = " x='1' >";
-    const c_gt = findByte(c, 0, '>') orelse return error.TestUnexpectedResult;
+    const c_gt = std.mem.indexOfScalarPos(u8, c, 0, '>') orelse return error.TestUnexpectedResult;
     try std.testing.expect(!isExplicitSelfClosingTag(c, 0, c_gt));
 }
 
 test "findSvgSubtreeEnd handles nested svg and quoted attribute bait" {
     const s = "<svg id='outer'><g data-k=\"x<svg y='z'>q\"><svg id='inner'><rect/></svg></g></svg><p id='after'></p>";
-    const open_gt = findByte(s, 0, '>') orelse return error.TestUnexpectedResult;
+    const open_gt = std.mem.indexOfScalarPos(u8, s, 0, '>') orelse return error.TestUnexpectedResult;
     const out = findSvgSubtreeEnd(s, open_gt + 1) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("<p id='after'></p>", s[out..]);
 }
 
 test "findSvgSubtreeEnd does not count nested self-closing svg as depth increase" {
     const s = "<svg id='outer'><svg id='inner' /><g/></svg><p id='after'></p>";
-    const open_gt = findByte(s, 0, '>') orelse return error.TestUnexpectedResult;
+    const open_gt = std.mem.indexOfScalarPos(u8, s, 0, '>') orelse return error.TestUnexpectedResult;
     const out = findSvgSubtreeEnd(s, open_gt + 1) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("<p id='after'></p>", s[out..]);
 }
 
 test "findSvgSubtreeEnd returns null when subtree is unterminated" {
     const s = "<svg><g><path></g>";
-    const open_gt = findByte(s, 0, '>') orelse return error.TestUnexpectedResult;
+    const open_gt = std.mem.indexOfScalarPos(u8, s, 0, '>') orelse return error.TestUnexpectedResult;
     try std.testing.expect(findSvgSubtreeEnd(s, open_gt + 1) == null);
 }
 
