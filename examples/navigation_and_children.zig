@@ -8,7 +8,7 @@ pub fn run() !void {
     defer doc.deinit();
 
     var input = "<main id='m'><h1 id='title'></h1><p id='intro'></p><p id='body'></p></main>".*;
-    try doc.parse(&input, .{});
+    try doc.parse(&input);
 
     const main = doc.queryOne("main#m") orelse return error.TestUnexpectedResult;
     const first = main.firstChild() orelse return error.TestUnexpectedResult;

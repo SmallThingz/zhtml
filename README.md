@@ -45,7 +45,7 @@ Source: `bench/results/external_suite_report.json`
 - 💤 Lazy decode/normalize path: attribute/entity decode and text normalization happen on query-time APIs.
 - 🧪 Debug tooling: selector mismatch diagnostics and instrumentation wrappers.
 - 🧰 Parse profiles: `strictest` and `fastest` option bundles for benchmarks/workloads.
-- 🧵 Destructive parsing by default for throughput, with an opt-in non-destructive shadow-buffer mode.
+- 🧵 Destructive parsing by default for throughput, with an opt-in non-destructive read-only mode.
 
 ## 🚀 Quick Start
 
@@ -60,14 +60,14 @@ test "basic parse + query" {
     defer doc.deinit();
 
     var input = "<div id='app'><a class='nav' href='/docs'>Docs</a></div>".*;
-    try doc.parse(&input, .{});
+    try doc.parse(&input);
 
     const a = doc.queryOne("div#app > a.nav") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("/docs", a.getAttributeValue("href").?);
 }
 ```
 
-`doc.parse` is destructive by default and mutates the input buffer for speed. Use `.non_destructive = true` when the caller bytes must remain unchanged, including file-backed memory maps.
+`doc.parse` only takes the input buffer. Parse behavior is part of the `Document` type you derive from `ParseOptions`. Use `const Document = html.ParseOptions{ .non_destructive = true }.GetDocument();` when the caller bytes must remain unchanged, including file-backed memory maps. This mode reads the original source directly and does not make a full-source copy.
 
 ## ⚙️ Build Configuration
 

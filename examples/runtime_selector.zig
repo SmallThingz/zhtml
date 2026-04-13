@@ -8,7 +8,7 @@ pub fn run() !void {
     defer doc.deinit();
 
     var input = "<div><a class='primary' href='/x'></a><a class='secondary' href='/y'></a></div>".*;
-    try doc.parse(&input, .{});
+    try doc.parse(&input);
 
     const one = try doc.queryOneRuntime("a.primary");
     try std.testing.expect(one != null);

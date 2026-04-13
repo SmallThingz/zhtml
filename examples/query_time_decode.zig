@@ -8,7 +8,7 @@ pub fn run() !void {
     defer doc.deinit();
 
     var input = "<a id='x' href='https://example.test/?a=1&amp;b=2' data-k='a&amp;b'>link</a>".*;
-    try doc.parse(&input, .{});
+    try doc.parse(&input);
 
     const a = doc.queryOne("a#x[data-k='a&b']") orelse return error.TestUnexpectedResult;
     const href = a.getAttributeValue("href") orelse return error.TestUnexpectedResult;

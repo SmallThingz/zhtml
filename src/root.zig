@@ -60,7 +60,7 @@ test "smoke parse/query" {
     defer doc.deinit();
 
     var src = "<div id='a'><span class='k'>v</span></div>".*;
-    try doc.parse(&src, .{});
+    try doc.parse(&src);
 
     try std.testing.expect(doc.queryOne("div#a") != null);
     try std.testing.expect((try doc.queryOneRuntime("span")) != null);
@@ -79,7 +79,7 @@ test "tag-name state keeps < inside malformed start tag name" {
     defer doc.deinit();
 
     var src = "<div<div>".*;
-    try doc.parse(&src, .{});
+    try doc.parse(&src);
 
     const first = doc.nodeAt(1) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("div<div", first.tagName());
@@ -94,7 +94,7 @@ test "writeHtml serializes node subtree" {
     defer doc.deinit();
 
     var src = "<div id='a'><span>v</span></div>".*;
-    try doc.parse(&src, .{});
+    try doc.parse(&src);
 
     const div = doc.queryOne("div") orelse return error.TestUnexpectedResult;
 
@@ -113,7 +113,7 @@ test "writeHtml respects in-place attr parsing and void tags" {
     defer doc.deinit();
 
     var src = "<img id='i' class='x' data-q='1>2'/>".*;
-    try doc.parse(&src, .{});
+    try doc.parse(&src);
 
     const img = doc.queryOne("img#i") orelse return error.TestUnexpectedResult;
     _ = img.getAttributeValue("class") orelse return error.TestUnexpectedResult;
@@ -134,7 +134,7 @@ test "writeHtml reflects in-place text decoding" {
     defer doc.deinit();
 
     var src = "<p>&amp; &lt;</p>".*;
-    try doc.parse(&src, .{});
+    try doc.parse(&src);
 
     const p = doc.queryOne("p") orelse return error.TestUnexpectedResult;
     _ = try p.innerText(alloc);
@@ -154,7 +154,7 @@ test "writeHtml drops whitespace-only text nodes when configured" {
     defer doc.deinit();
 
     var src = "<div> a <span> b </span> c </div>".*;
-    try doc.parse(&src, .{ .drop_whitespace_text_nodes = true });
+    try doc.parse(&src);
 
     const div = doc.queryOne("div") orelse return error.TestUnexpectedResult;
 
@@ -166,7 +166,7 @@ test "writeHtml drops whitespace-only text nodes when configured" {
 
 test "writeHtml parses and prints complex document" {
     const alloc = std.testing.allocator;
-    const opts: ParseOptions = .{};
+    const opts: ParseOptions = .{ .drop_whitespace_text_nodes = false };
     const Document = opts.GetDocument();
 
     var doc = Document.init(alloc);
@@ -187,7 +187,7 @@ test "writeHtml parses and prints complex document" {
     ;
     const src = try alloc.dupe(u8, src_const);
     defer alloc.free(src);
-    try doc.parse(src, .{ .drop_whitespace_text_nodes = false });
+    try doc.parse(src);
 
     const html = doc.html() orelse return error.TestUnexpectedResult;
 
@@ -226,7 +226,7 @@ test "writeHtmlSelf excludes children" {
     defer doc.deinit();
 
     var src = "<div id='a'><span>v</span></div>".*;
-    try doc.parse(&src, .{});
+    try doc.parse(&src);
 
     const div = doc.queryOne("div") orelse return error.TestUnexpectedResult;
 
@@ -257,7 +257,7 @@ test "u16 parse rejects oversized input" {
     src[1] = 'p';
     src[2] = '>';
 
-    try std.testing.expectError(error.InputTooLarge, doc.parse(src, .{}));
+    try std.testing.expectError(error.InputTooLarge, doc.parse(src));
 }
 
 test "u64 parse accepts sparse 8 GiB plaintext input" {
@@ -298,7 +298,7 @@ test "u64 parse accepts sparse 8 GiB plaintext input" {
 
     var doc = Document.init(alloc);
     defer doc.deinit();
-    try doc.parse(mapped.memory, .{});
+    try doc.parse(mapped.memory);
 
     try std.testing.expectEqual(@as(usize, 3), doc.nodes.items.len);
     const plaintext = doc.nodeAt(1) orelse return error.TestUnexpectedResult;
@@ -312,7 +312,7 @@ test "u64 parse accepts sparse 8 GiB plaintext input" {
 test "non-destructive parse supports file-backed memory maps without changing bytes" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
-    const opts: ParseOptions = .{};
+    const opts: ParseOptions = .{ .non_destructive = true };
     const Document = opts.GetDocument();
     var rand_src: std.Random.IoSource = .{ .io = io };
     const path = try std.fmt.allocPrint(alloc, "/tmp/html-nondestructive-mmap-{x}.html", .{rand_src.interface().int(u64)});
@@ -350,7 +350,7 @@ test "non-destructive parse supports file-backed memory maps without changing by
 
     var doc = Document.init(alloc);
     defer doc.deinit();
-    try doc.parse(mapped.memory, .{ .non_destructive = true });
+    try doc.parse(mapped.memory);
 
     const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a&b", node.getAttributeValue("data-v").?);

@@ -3,6 +3,7 @@ const tables = @import("tables.zig");
 const tags = @import("tags.zig");
 const scanner = @import("scanner.zig");
 const common = @import("../common.zig");
+const ParseOptions = @import("document.zig").ParseOptions;
 
 const InvalidIndex: IndexInt = common.InvalidIndex;
 const IndexInt = common.IndexInt;
@@ -10,13 +11,14 @@ const SvgTagKey: u64 = tags.first8Key("svg");
 const InitialParseStackCapacity: usize = 1024;
 const MaxInitialNodeReserve: usize = 1 << 20;
 
-// SAFETY: Parser builds in-place spans into `input`; indices are stored as `IndexInt`.
-// We reject inputs larger than `IndexInt::max` to prevent truncation.
+// SAFETY: Parser builds spans into `input`; indices are stored as `IndexInt`.
+// In destructive mode tag names are normalized in-place. In non-destructive mode
+// parsing is read-only and any lazy decode work happens outside this file.
 
-/// Parses mutable HTML bytes into `doc` using permissive, in-place tree construction.
-pub fn parseInto(comptime Doc: type, noalias doc: *Doc, input: []u8, comptime opts: anytype) !void {
+/// Parses HTML bytes into the document type derived from `opts`.
+pub fn parseInto(comptime opts: ParseOptions, noalias doc: *opts.GetDocument(), input: opts.GetInput()) !void {
     if (!common.lenFits(input.len)) return error.InputTooLarge;
-    var p = Parser(Doc, opts){
+    var p = Parser(opts){
         .doc = doc,
         .input = input,
         .i = 0,
@@ -24,13 +26,14 @@ pub fn parseInto(comptime Doc: type, noalias doc: *Doc, input: []u8, comptime op
     try p.parse();
 }
 
-fn Parser(comptime Doc: type, comptime opts: anytype) type {
+fn Parser(comptime opts: ParseOptions) type {
     return struct {
-        doc: *Doc,
-        input: []u8,
+        doc: *opts.GetDocument(),
+        input: []const u8,
         i: usize,
 
         const Self = @This();
+        const Doc = opts.GetDocument();
         const OpenElem = Doc.OpenElemType;
 
         fn parse(noalias self: *Self) !void {
@@ -146,7 +149,9 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
                     var c = self.input[self.i];
                     if (c >= 'A' and c <= 'Z') {
                         c = tables.lower(c);
-                        self.input[self.i] = c;
+                        if (!comptime opts.non_destructive) {
+                            self.doc.mutable_source.?[self.i] = c;
+                        }
                     }
                     tag_name_key |= @as(u64, c) << @as(u6, @intCast(tag_name_key_len * 8));
                     tag_name_key_len += 1;
@@ -308,7 +313,9 @@ fn Parser(comptime Doc: type, comptime opts: anytype) type {
                     var c = self.input[self.i];
                     if (c >= 'A' and c <= 'Z') {
                         c = tables.lower(c);
-                        self.input[self.i] = c;
+                        if (!comptime opts.non_destructive) {
+                            self.doc.mutable_source.?[self.i] = c;
+                        }
                     }
                     close_key |= @as(u64, c) << @as(u6, @intCast(close_key_len * 8));
                     close_key_len += 1;

@@ -1,7 +1,5 @@
 const std = @import("std");
 const root = @import("html");
-const default_options: root.ParseOptions = .{};
-const Document = default_options.GetDocument();
 const parse_mode = @import("parse_mode");
 const ParseMode = parse_mode.ParseMode;
 
@@ -17,6 +15,8 @@ fn nowNs(io: std.Io) i96 {
 /// Runs a built-in synthetic parse/query workload and prints elapsed ns.
 pub fn runSynthetic(io: std.Io) !void {
     const alloc = std.heap.smp_allocator;
+    const options: root.ParseOptions = .{};
+    const Document = options.GetDocument();
 
     var doc = Document.init(alloc);
     defer doc.deinit();
@@ -26,7 +26,7 @@ pub fn runSynthetic(io: std.Io) !void {
     const parse_start = nowNs(io);
     var i: usize = 0;
     while (i < 10_000) : (i += 1) {
-        try doc.parse(&src, .{});
+        try doc.parse(&src);
     }
     const parse_end = nowNs(io);
 
@@ -62,19 +62,23 @@ pub fn runParseFile(io: std.Io, path: []const u8, iterations: usize, mode: Parse
     while (i < iterations) : (i += 1) {
         const iter_alloc = parse_arena.allocator();
         {
-            var doc = Document.init(iter_alloc);
-            defer doc.deinit();
-            if (working_opt) |working| {
-                @memcpy(working, input);
-                switch (mode) {
-                    .strictest => try doc.parse(working, .{ .drop_whitespace_text_nodes = false }),
-                    .fastest => try doc.parse(working, .{ .drop_whitespace_text_nodes = true }),
-                }
-            } else {
-                switch (mode) {
-                    .strictest => try doc.parse(input, .{ .drop_whitespace_text_nodes = false }),
-                    .fastest => try doc.parse(input, .{ .drop_whitespace_text_nodes = true }),
-                }
+            switch (mode) {
+                .strictest => {
+                    const options: root.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+                    const Document = options.GetDocument();
+                    var doc = Document.init(iter_alloc);
+                    defer doc.deinit();
+                    const working = working_opt.?;
+                    @memcpy(working, input);
+                    try doc.parse(working);
+                },
+                .fastest => {
+                    const options: root.ParseOptions = .{};
+                    const Document = options.GetDocument();
+                    var doc = Document.init(iter_alloc);
+                    defer doc.deinit();
+                    try doc.parse(input);
+                },
             }
         }
         _ = parse_arena.reset(.retain_capacity);
@@ -112,21 +116,36 @@ pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterati
     const working = try alloc.dupe(u8, input);
     defer alloc.free(working);
 
-    var doc = Document.init(alloc);
-    defer doc.deinit();
-    switch (mode) {
-        .strictest => try doc.parse(working, .{ .drop_whitespace_text_nodes = false }),
-        .fastest => try doc.parse(working, .{ .drop_whitespace_text_nodes = true }),
-    }
+    return switch (mode) {
+        .strictest => blk: {
+            const options: root.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+            const Document = options.GetDocument();
+            var doc = Document.init(alloc);
+            defer doc.deinit();
+            try doc.parse(working);
 
-    const start = nowNs(io);
-    var i: usize = 0;
-    while (i < iterations) : (i += 1) {
-        _ = doc.queryOneRuntime(selector) catch null;
-    }
-    const end = nowNs(io);
+            const start = nowNs(io);
+            var i: usize = 0;
+            while (i < iterations) : (i += 1) {
+                _ = doc.queryOneRuntime(selector) catch null;
+            }
+            break :blk elapsedNs(start, nowNs(io));
+        },
+        .fastest => blk: {
+            const options: root.ParseOptions = .{};
+            const Document = options.GetDocument();
+            var doc = Document.init(alloc);
+            defer doc.deinit();
+            try doc.parse(working);
 
-    return elapsedNs(start, end);
+            const start = nowNs(io);
+            var i: usize = 0;
+            while (i < iterations) : (i += 1) {
+                _ = doc.queryOneRuntime(selector) catch null;
+            }
+            break :blk elapsedNs(start, nowNs(io));
+        },
+    };
 }
 
 /// Benchmarks cached-selector query execution over a pre-parsed document.
@@ -144,21 +163,36 @@ pub fn runQueryCached(io: std.Io, path: []const u8, selector: []const u8, iterat
 
     const sel = try root.Selector.compileRuntime(sel_arena.allocator(), selector);
 
-    var doc = Document.init(alloc);
-    defer doc.deinit();
-    switch (mode) {
-        .strictest => try doc.parse(working, .{ .drop_whitespace_text_nodes = false }),
-        .fastest => try doc.parse(working, .{ .drop_whitespace_text_nodes = true }),
-    }
+    return switch (mode) {
+        .strictest => blk: {
+            const options: root.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+            const Document = options.GetDocument();
+            var doc = Document.init(alloc);
+            defer doc.deinit();
+            try doc.parse(working);
 
-    const start = nowNs(io);
-    var i: usize = 0;
-    while (i < iterations) : (i += 1) {
-        _ = doc.queryOneCached(sel);
-    }
-    const end = nowNs(io);
+            const start = nowNs(io);
+            var i: usize = 0;
+            while (i < iterations) : (i += 1) {
+                _ = doc.queryOneCached(sel);
+            }
+            break :blk elapsedNs(start, nowNs(io));
+        },
+        .fastest => blk: {
+            const options: root.ParseOptions = .{};
+            const Document = options.GetDocument();
+            var doc = Document.init(alloc);
+            defer doc.deinit();
+            try doc.parse(working);
 
-    return elapsedNs(start, end);
+            const start = nowNs(io);
+            var i: usize = 0;
+            while (i < iterations) : (i += 1) {
+                _ = doc.queryOneCached(sel);
+            }
+            break :blk elapsedNs(start, nowNs(io));
+        },
+    };
 }
 
 /// CLI entrypoint for parser/query benchmarking utilities.
@@ -231,16 +265,20 @@ pub fn main(init: std.process.Init) !void {
 
 test "bench smoke uses parse_mode module for both parse modes" {
     const alloc = std.testing.allocator;
+    const fastest_options: root.ParseOptions = .{};
+    const FastestDocument = fastest_options.GetDocument();
+    const strictest_options: root.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+    const StrictestDocument = strictest_options.GetDocument();
 
-    var fastest_doc = Document.init(alloc);
+    var fastest_doc = FastestDocument.init(alloc);
     defer fastest_doc.deinit();
     var fastest_html = "<div><span id='x'>ok</span></div>".*;
-    try fastest_doc.parse(&fastest_html, .{ .drop_whitespace_text_nodes = true });
+    try fastest_doc.parse(&fastest_html);
     try std.testing.expect(fastest_doc.queryOne("span#x") != null);
 
-    var strict_doc = Document.init(alloc);
+    var strict_doc = StrictestDocument.init(alloc);
     defer strict_doc.deinit();
     var strict_html = "<div>\n  <span id='y'>ok</span>\n</div>".*;
-    try strict_doc.parse(&strict_html, .{ .drop_whitespace_text_nodes = false });
+    try strict_doc.parse(&strict_html);
     try std.testing.expect(strict_doc.queryOne("span#y") != null);
 }

@@ -14,7 +14,7 @@ pub fn run() !void {
         "</div>";
 
     var buf = input.*;
-    try doc.parse(&buf, .{});
+    try doc.parse(&buf);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

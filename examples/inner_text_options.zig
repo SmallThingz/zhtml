@@ -8,7 +8,7 @@ pub fn run() !void {
     defer doc.deinit();
 
     var input = "<div id='x'> Hello\n  <span>world</span> &amp;\tteam </div>".*;
-    try doc.parse(&input, .{});
+    try doc.parse(&input);
 
     const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
 

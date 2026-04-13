@@ -1,7 +1,5 @@
 const std = @import("std");
 const ast = @import("../selector/ast.zig");
-const ParseOptions = @import("../html/document.zig").ParseOptions;
-
 /// Query operation kind passed to instrumentation hooks.
 pub const QueryInstrumentationKind = enum(u8) {
     one_runtime,
@@ -77,13 +75,13 @@ fn matchedFromValue(value: anytype) ?bool {
 }
 
 /// Parses `input` and invokes optional parse hooks when provided.
-pub fn parseWithHooks(io: std.Io, doc: anytype, input: []u8, comptime opts: ParseOptions, hooks: anytype) !void {
+pub fn parseWithHooks(io: std.Io, doc: anytype, input: anytype, hooks: anytype) !void {
     if (comptime @hasDecl(HookDeclType(@TypeOf(hooks)), "onParseStart")) {
         hooks.onParseStart(input.len);
     }
 
     const start = std.Io.Timestamp.now(io, .awake);
-    try doc.parse(input, opts);
+    try doc.parse(input);
     const stats: ParseInstrumentationStats = .{
         .elapsed_ns = elapsedNs(start, std.Io.Timestamp.now(io, .awake)),
         .input_len = input.len,

@@ -32,7 +32,7 @@ pub fn run() !void {
 
     var hooks: Hooks = .{};
     var input = "<div><span id='x'></span></div>".*;
-    try html.parseWithHooks(std.testing.io, &doc, &input, .{}, &hooks);
+    try html.parseWithHooks(std.testing.io, &doc, &input, &hooks);
     try std.testing.expectEqual(@as(usize, 1), hooks.parse_start_calls);
     try std.testing.expectEqual(@as(usize, 1), hooks.parse_end_calls);
 

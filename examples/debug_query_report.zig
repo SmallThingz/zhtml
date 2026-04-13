@@ -8,7 +8,7 @@ pub fn run() !void {
     defer doc.deinit();
 
     var input = "<div><a id='one' class='nav'></a><a id='two'></a></div>".*;
-    try doc.parse(&input, .{});
+    try doc.parse(&input);
 
     const result = doc.queryOneRuntimeDebug("a[href^=https]");
     try std.testing.expect(result.err == null);

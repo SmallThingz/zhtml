@@ -5,11 +5,9 @@ const entities = @import("entities.zig");
 const scanner = @import("scanner.zig");
 const common = @import("../common.zig");
 
-// SAFETY: This module mutates `doc.source` in-place for attribute decoding.
-// Invariants:
-// - `node.attr_end` and `node.name_or_text.end` are within `doc.source.len`.
-// - Attribute spans passed to helpers are bounded by `span_end`.
-// - Callers uphold that `source` is the document buffer for the node.
+// SAFETY: Destructive mode mutates `doc.mutable_source` in place for attribute
+// decoding. Non-destructive mode scans `doc.source` read-only and allocates only
+// when a decoded value cannot be represented as a direct source slice.
 
 const RawValue = attr_scan.RawValue;
 const IndexInt = common.IndexInt;
@@ -31,7 +29,11 @@ const LookupKind = enum(u8) {
 /// Returns attribute value by name from in-place attribute bytes, decoding lazily.
 pub fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []const u8) ?[]const u8 {
     const mut_doc = @constCast(doc_ptr);
-    const source: []u8 = mut_doc.source;
+    if (mut_doc.mutable_source == null) {
+        return getAttrValueNonDestructive(mut_doc, node, name);
+    }
+
+    const source: []u8 = mut_doc.mutable_source.?;
     const lookup_kind = classifyLookupName(name);
 
     var i: usize = node.name_or_text.end;
@@ -96,7 +98,16 @@ pub fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []const u8) ?
 /// One-pass multi-attribute collector used by matcher hot paths.
 pub fn collectSelectedValues(noalias doc_ptr: anytype, node: anytype, selected_names: []const []const u8, out_values: []?[]const u8) void {
     const mut_doc = @constCast(doc_ptr);
-    const source: []u8 = mut_doc.source;
+    if (mut_doc.mutable_source == null) {
+        var idx: usize = 0;
+        while (idx < selected_names.len) : (idx += 1) {
+            if (out_values[idx] != null) continue;
+            out_values[idx] = getAttrValueNonDestructive(mut_doc, node, selected_names[idx]);
+        }
+        return;
+    }
+
+    const source: []u8 = mut_doc.mutable_source.?;
     if (selected_names.len == 0) return;
     if (selected_names.len != out_values.len) return;
 
@@ -169,6 +180,61 @@ pub fn collectSelectedValues(noalias doc_ptr: anytype, node: anytype, selected_n
 }
 
 const ParsedValue = attr_scan.ParsedValue;
+
+fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8) ?[]const u8 {
+    const source: []const u8 = doc.source;
+    const lookup_kind = classifyLookupName(name);
+
+    var i: usize = node.name_or_text.end;
+    const end: usize = @intCast(node.attr_end);
+    if (i >= end) return null;
+
+    while (i < end) {
+        while (i < end and tables.WhitespaceTable[source[i]]) : (i += 1) {}
+        if (i >= end) return null;
+
+        const c = source[i];
+        if (c == '>' or c == '/') return null;
+
+        const scanned = attr_scan.scanAttrNameOrSkip(source, end, i);
+        const attr_name = scanned.name orelse return null;
+        i = scanned.next_start;
+        if (attr_name.len == 0) continue;
+        const is_target = matchesLookupName(attr_name, name, lookup_kind);
+
+        if (i >= end) {
+            if (is_target) return "";
+            return null;
+        }
+
+        const delim = source[i];
+        if (delim == '=') {
+            const raw = attr_scan.parseRawValue(source, end, i);
+            if (is_target) return materializeRawValueOwned(doc, source, raw);
+            i = raw.next_start;
+            continue;
+        }
+
+        if (is_target) return "";
+        if (delim == '>' or delim == '/') return null;
+        i += 1;
+    }
+
+    return null;
+}
+
+fn materializeRawValueOwned(doc: anytype, source: []const u8, raw: RawValue) []const u8 {
+    if (raw.kind == .empty) return "";
+
+    const slice = source[raw.start..raw.end];
+    if (std.mem.indexOfScalar(u8, slice, '&') == null) return slice;
+
+    const arena = doc.ensureDecodedValueArena();
+    const alloc = arena.allocator();
+    const copied = alloc.dupe(u8, slice) catch return slice;
+    const new_len = entities.decodeInPlaceIfEntity(copied);
+    return copied[0..new_len];
+}
 
 fn materializeRawValue(source: []u8, span_end: usize, eq_index: usize, raw: RawValue) []const u8 {
     std.debug.assert(span_end <= source.len);

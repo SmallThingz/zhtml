@@ -1,17 +1,39 @@
 const std = @import("std");
 const html = @import("html");
-const default_options: html.ParseOptions = .{};
-const Document = default_options.GetDocument();
 const parse_mode = @import("parse_mode.zig");
 const ParseMode = parse_mode.ParseMode;
 
-const ParsedFixture = struct {
-    doc: Document,
-    working: []u8,
+fn strictestDocumentType() type {
+    const options: html.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+    return options.GetDocument();
+}
+
+fn fastestDocumentType() type {
+    const options: html.ParseOptions = .{};
+    return options.GetDocument();
+}
+
+const ParsedFixture = union(ParseMode) {
+    strictest: struct {
+        doc: strictestDocumentType(),
+        working: []u8,
+    },
+    fastest: struct {
+        doc: fastestDocumentType(),
+        working: []u8,
+    },
 
     fn deinit(self: *ParsedFixture, alloc: std.mem.Allocator) void {
-        self.doc.deinit();
-        alloc.free(self.working);
+        switch (self.*) {
+            .strictest => |*parsed| {
+                parsed.doc.deinit();
+                alloc.free(parsed.working);
+            },
+            .fastest => |*parsed| {
+                parsed.doc.deinit();
+                alloc.free(parsed.working);
+            },
+        }
     }
 };
 
@@ -22,14 +44,24 @@ fn parseFixtureDoc(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixtur
     const working = try alloc.dupe(u8, input);
     errdefer alloc.free(working);
 
-    var doc = Document.init(alloc);
-    errdefer doc.deinit();
-
-    switch (mode) {
-        .strictest => try doc.parse(working, .{ .drop_whitespace_text_nodes = false }),
-        .fastest => try doc.parse(working, .{ .drop_whitespace_text_nodes = true }),
-    }
-    return .{ .doc = doc, .working = working };
+    return switch (mode) {
+        .strictest => blk: {
+            const options: html.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+            const Document = options.GetDocument();
+            var doc = Document.init(alloc);
+            errdefer doc.deinit();
+            try doc.parse(working);
+            break :blk .{ .strictest = .{ .doc = doc, .working = working } };
+        },
+        .fastest => blk: {
+            const options: html.ParseOptions = .{};
+            const Document = options.GetDocument();
+            var doc = Document.init(alloc);
+            errdefer doc.deinit();
+            try doc.parse(working);
+            break :blk .{ .fastest = .{ .doc = doc, .working = working } };
+        },
+    };
 }
 
 fn jsonEscape(writer: anytype, s: []const u8) !void {
@@ -69,11 +101,23 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
     var out_ids = std.ArrayList([]const u8).empty;
     defer out_ids.deinit(alloc);
 
-    var it = try parsed.doc.queryAllRuntime(selector);
-    while (it.next()) |node| {
-        if (node.getAttributeValue("id")) |id| {
-            try out_ids.append(alloc, id);
-        }
+    switch (parsed) {
+        .strictest => |*fixture| {
+            var it = try fixture.doc.queryAllRuntime(selector);
+            while (it.next()) |node| {
+                if (node.getAttributeValue("id")) |id| {
+                    try out_ids.append(alloc, id);
+                }
+            }
+        },
+        .fastest => |*fixture| {
+            var it = try fixture.doc.queryAllRuntime(selector);
+            while (it.next()) |node| {
+                if (node.getAttributeValue("id")) |id| {
+                    try out_ids.append(alloc, id);
+                }
+            }
+        },
     }
 
     var out_buf: std.Io.Writer.Allocating = .init(alloc);
@@ -88,9 +132,15 @@ fn runSelectorCount(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixtu
     defer parsed.deinit(alloc);
 
     var count: usize = 0;
-    var it = try parsed.doc.queryAllRuntime(selector);
-    while (it.next()) |_| {
-        count += 1;
+    switch (parsed) {
+        .strictest => |*fixture| {
+            var it = try fixture.doc.queryAllRuntime(selector);
+            while (it.next()) |_| count += 1;
+        },
+        .fastest => |*fixture| {
+            var it = try fixture.doc.queryAllRuntime(selector);
+            while (it.next()) |_| count += 1;
+        },
     }
 
     var out_buf: std.Io.Writer.Allocating = .init(alloc);
@@ -104,11 +154,19 @@ fn runSelectorCountScopeTag(io: std.Io, alloc: std.mem.Allocator, mode: ParseMod
     defer parsed.deinit(alloc);
 
     var count: usize = 0;
-    if (parsed.doc.findFirstTag(scope_tag)) |scope| {
-        var it = try scope.queryAllRuntime(selector);
-        while (it.next()) |_| {
-            count += 1;
-        }
+    switch (parsed) {
+        .strictest => |*fixture| {
+            if (fixture.doc.findFirstTag(scope_tag)) |scope| {
+                var it = try scope.queryAllRuntime(selector);
+                while (it.next()) |_| count += 1;
+            }
+        },
+        .fastest => |*fixture| {
+            if (fixture.doc.findFirstTag(scope_tag)) |scope| {
+                var it = try scope.queryAllRuntime(selector);
+                while (it.next()) |_| count += 1;
+            }
+        },
     }
 
     var out_buf: std.Io.Writer.Allocating = .init(alloc);
@@ -124,9 +182,19 @@ fn runParseTagsFile(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixtu
     var tags = std.ArrayList([]const u8).empty;
     defer tags.deinit(alloc);
 
-    for (parsed.doc.nodes.items) |*n| {
-        if (n.kind != .element) continue;
-        try tags.append(alloc, n.name_or_text.slice(parsed.doc.source));
+    switch (parsed) {
+        .strictest => |*fixture| {
+            for (fixture.doc.nodes.items) |*n| {
+                if (n.kind != .element) continue;
+                try tags.append(alloc, n.name_or_text.slice(fixture.doc.source));
+            }
+        },
+        .fastest => |*fixture| {
+            for (fixture.doc.nodes.items) |*n| {
+                if (n.kind != .element) continue;
+                try tags.append(alloc, n.name_or_text.slice(fixture.doc.source));
+            }
+        },
     }
 
     var out_buf: std.Io.Writer.Allocating = .init(alloc);

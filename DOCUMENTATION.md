@@ -35,7 +35,7 @@ test "basic parse + query" {
     defer doc.deinit();
 
     var input = "<div id='app'><a class='nav' href='/docs'>Docs</a></div>".*;
-    try doc.parse(&input, .{});
+    try doc.parse(&input);
 
     const a = doc.queryOne("div#app > a.nav") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("/docs", a.getAttributeValue("href").?);
@@ -58,9 +58,9 @@ All examples are verified by running `zig build examples-check`
 - `Document.init(allocator)`
 - `doc.deinit()`
 - `doc.clear()`
-- `doc.parse(input, comptime opts: ParseOptions)`
-- destructive mode accepts mutable input and parses it in place
-- non-destructive mode accepts mutable or read-only input and parses a private shadow copy
+- `doc.parse(input)`
+- destructive document types accept mutable input and parse it in place
+- non-destructive document types accept read-only input and parse directly from the original bytes
 - maximum parseable input size is controlled at build time with `-Dintlen`
 
 ### Query APIs
@@ -117,31 +117,36 @@ All examples are verified by running `zig build examples-check`
 - `TextOptions`
   - `normalize_whitespace: bool = true`
 - parse/query work split:
-  - parse keeps raw text and attribute spans in-place
-  - entity decode and whitespace normalization are applied by query-time APIs (`getAttributeValue`, `innerText*`, selector attribute predicates)
+  - parse keeps raw text and attribute spans as source slices
+  - destructive mode may decode attrs/text in place on query-time APIs
+  - non-destructive mode keeps attrs/text read-only and materializes decoded output only when needed
 
 ### Design Notes
 
 - destructive parsing is the default because the parser and lazy decode paths mutate source bytes in place for throughput
-- non-destructive parsing pays for one private writable shadow copy per parse so the in-place parser core does not need a separate slow path
+- non-destructive parsing avoids a full-source copy and instead moves lazy attr/text decoding out of the input buffer
 - nodes are stored in one contiguous array and linked by indexes rather than pointers to keep traversal cache-friendly and make `-Dintlen` effective
 - attribute storage stays span-based instead of building heap objects so parse cost scales with actual queries, not attribute count
 - query-time decoding keeps parse throughput high by avoiding eager entity decode and whitespace normalization for bytes that may never be read
 
 ## Non-Destructive Parsing
 
-Use non-destructive mode when the caller bytes must remain unchanged.
+Use a non-destructive document type when the caller bytes must remain unchanged.
 
 ```zig
+const opts: html.ParseOptions = .{ .non_destructive = true };
+const Document = opts.GetDocument();
 const html_bytes = "<div id='x' data-v='a&amp;b'> hi &amp; bye </div>";
-try doc.parse(html_bytes, .{ .non_destructive = true });
+try doc.parse(html_bytes);
 ```
 
 Behavior:
 
 - the default destructive path is unchanged and still parses caller memory directly
-- non-destructive mode allocates one writable shadow buffer per `parse` call
-- lazy decode and normalization mutate only the shadow buffer, never the caller bytes
+- non-destructive mode does not allocate or rewrite a full source copy
+- lazy attribute reads never rewrite the source buffer
+- lazy text reads never rewrite the source buffer
+- text extraction allocates only when decoding or normalization requires materialized output
 - `Document.writeHtml` and `Document.format` return the exact original source bytes in non-destructive mode
 - node-level formatting still serializes from parsed state rather than replaying original source slices
 
@@ -153,7 +158,7 @@ Use cases:
 
 ### Instrumentation wrappers
 
-- `parseWithHooks(doc, input, opts, hooks)`
+- `parseWithHooks(doc, input, hooks)`
 - `queryOneRuntimeWithHooks(doc, selector, hooks)`
 - `queryOneCachedWithHooks(doc, selector, hooks)`
 - `queryAllRuntimeWithHooks(doc, selector, hooks)`
@@ -188,13 +193,13 @@ Compilation modes:
 
 ## Mode Guidance
 
-`html` is permissive by design. Choose parse options by workload:
+`html` is permissive by design. Choose the document type by workload:
 
 | Mode | Parse Options | Best For | Tradeoffs |
 |---|---|---|---|
-| `strictest` | `.drop_whitespace_text_nodes = false` | traversal predictability and text fidelity | keeps whitespace-only text nodes |
-| `fastest` | `.drop_whitespace_text_nodes = true` | throughput-first scraping | whitespace-only text nodes dropped |
-| `non-destructive` | `.non_destructive = true` plus either profile above | preserving input bytes, memory maps, exact whole-document formatting | one full input copy per parse |
+| `strictest` | `const Document = html.ParseOptions{ .drop_whitespace_text_nodes = false }.GetDocument();` | traversal predictability and text fidelity | keeps whitespace-only text nodes |
+| `fastest` | `const Document = html.ParseOptions{}.GetDocument();` | throughput-first scraping | whitespace-only text nodes dropped |
+| `non-destructive` | `const Document = html.ParseOptions{ .non_destructive = true }.GetDocument();` | preserving input bytes, memory maps, exact whole-document formatting | decoded attrs/text are materialized outside the source buffer |
 
 Fallback playbook:
 
@@ -319,7 +324,7 @@ Core modules:
 
 Data model highlights:
 
-- `Document` always owns node/index storage and may either borrow caller bytes directly or own a shadow parse buffer
+- `Document` always owns node/index storage and may either parse a mutable caller buffer in place or borrow a read-only caller buffer unchanged
 - nodes are contiguous and linked by indexes for traversal
 - attributes are traversed directly from source spans (no heap attribute objects)
 - the build-time `-Dintlen` option widens or shrinks those spans and indexes uniformly
@@ -348,4 +353,4 @@ Data model highlights:
 
 Expected: parse and lazy decode paths mutate source bytes in place.
 
-If the bytes must not change, parse with `.non_destructive = true`.
+If the bytes must not change, instantiate a non-destructive document type.

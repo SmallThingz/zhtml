@@ -9,8 +9,9 @@ const common = @import("../common.zig");
 const IndexInt = common.IndexInt;
 
 // SAFETY: Node helpers assume `self.index` is in-bounds for `doc.nodes.items`
-// and that `doc.source` outlives returned slices. Attribute parsing relies on
-// `raw.attr_end <= doc.source.len`.
+// and that `doc.source` outlives returned slices. Destructive mode may decode
+// text in-place through `doc.mutable_source`; non-destructive mode allocates
+// decoded text on demand instead.
 
 const InvalidIndex: IndexInt = common.InvalidIndex;
 const isElementLike = common.isElementLike;
@@ -84,6 +85,31 @@ pub fn getAttributeValue(self: anytype, name: []const u8) ?[]const u8 {
 pub fn innerText(self: anytype, arena_alloc: std.mem.Allocator, opts: TextOptions) ![]const u8 {
     const doc = self.doc;
     const raw = &doc.nodes.items[self.index];
+
+    if (doc.mutable_source == null) {
+        if (raw.kind == .text) {
+            const text = raw.name_or_text.slice(doc.source);
+            if (!opts.normalize_whitespace and std.mem.indexOfScalar(u8, text, '&') == null) return text;
+            return innerTextOwned(self, arena_alloc, opts);
+        }
+
+        var text_count: usize = 0;
+        var first_text: ?[]const u8 = null;
+        var idx = self.index + 1;
+        while (idx <= raw.subtree_end and idx < doc.nodes.items.len) : (idx += 1) {
+            const node = &doc.nodes.items[idx];
+            if (node.kind != .text) continue;
+            text_count += 1;
+            if (text_count == 1) first_text = node.name_or_text.slice(doc.source);
+            if (text_count > 1) break;
+        }
+
+        if (text_count == 0) return "";
+        if (text_count == 1 and !opts.normalize_whitespace and std.mem.indexOfScalar(u8, first_text.?, '&') == null) {
+            return first_text.?;
+        }
+        return innerTextOwned(self, arena_alloc, opts);
+    }
 
     if (raw.kind == .text) {
         const mut_node = &doc.nodes.items[self.index];
@@ -194,14 +220,14 @@ pub fn writeHtmlSelf(self: anytype, writer: anytype) WriterError(@TypeOf(writer)
 }
 
 fn decodeTextNode(noalias node: anytype, doc: anytype) []const u8 {
-    const text_mut = node.name_or_text.sliceMut(doc.source);
+    const text_mut = node.name_or_text.sliceMut(doc.mutable_source.?);
     const new_len = entities.decodeInPlaceIfEntity(text_mut);
     node.name_or_text.end = node.name_or_text.start + @as(IndexInt, @intCast(new_len));
     return node.name_or_text.slice(doc.source);
 }
 
 fn normalizeTextNodeInPlace(noalias node: anytype, doc: anytype) []const u8 {
-    const text_mut = node.name_or_text.sliceMut(doc.source);
+    const text_mut = node.name_or_text.sliceMut(doc.mutable_source.?);
     const new_len = normalizeWhitespaceInPlace(text_mut);
     node.name_or_text.end = node.name_or_text.start + @as(IndexInt, @intCast(new_len));
     return node.name_or_text.slice(doc.source);
@@ -318,7 +344,7 @@ fn writeChildrenHtml(doc: anytype, parent_idx: IndexInt, noalias raw: anytype, w
 }
 
 fn writeAttrsHtml(doc: anytype, noalias raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
-    const source: []u8 = doc.source;
+    const source: []const u8 = doc.source;
     var i: usize = @intCast(raw.name_or_text.end);
     const end: usize = @intCast(raw.attr_end);
 
@@ -352,7 +378,7 @@ fn writeAttrsHtml(doc: anytype, noalias raw: anytype, writer: anytype) WriterErr
         }
 
         if (delim == 0) {
-            const parsed = attr_scan.parseParsedValue(source, end, i);
+            const parsed = attr_scan.parseParsedValue(doc.mutable_source.?, end, i);
             try writeAttrName(writer, name);
             try writeAttrValue(writer, parsed.value);
             i = parsed.next_start;
