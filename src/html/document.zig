@@ -90,18 +90,6 @@ pub const ParseOptions = struct {
         };
     }
 
-    /// Returns the parser's open-element stack entry type.
-    pub fn GetOpenElem(_: @This()) type {
-        return struct {
-            /// First-8-bytes lowercase key for the open tag name.
-            tag_key: u64 = 0,
-            /// Node index of the open element.
-            idx: IndexInt,
-            /// Original tag-name length for close matching and optional-close logic.
-            tag_len: u16 = 0,
-        };
-    }
-
     /// Returns the lightweight node wrapper type bound to this option set.
     pub fn GetNode(options: @This()) type {
         return struct {
@@ -361,7 +349,6 @@ pub const ParseOptions = struct {
             const DocSelf = @This();
             const DebugQueryResultType = options.QueryDebugResult();
             const RawNodeType = options.GetNodeRaw();
-            pub const OpenElemType = options.GetOpenElem();
             const ChildrenIterType = options.ChildrenIter();
             const NodeTypeWrapper = options.GetNode();
             const QueryIterType = options.QueryIter();
@@ -375,8 +362,6 @@ pub const ParseOptions = struct {
 
             /// Parsed node storage.
             nodes: std.ArrayListUnmanaged(RawNodeType) = .empty,
-            /// Open-element stack used during parse.
-            parse_stack: std.ArrayListUnmanaged(OpenElemType) = .empty,
 
             /// Arena for `queryOneRuntime` selector compilation.
             query_one_arena: ?std.heap.ArenaAllocator = null,
@@ -410,7 +395,6 @@ pub const ParseOptions = struct {
             /// Releases all document-owned memory.
             pub fn deinit(noalias self: *DocSelf) void {
                 self.nodes.deinit(self.allocator);
-                self.parse_stack.deinit(self.allocator);
                 self.query_accel_id_map.deinit(self.allocator);
                 if (self.query_one_arena) |*arena| arena.deinit();
                 if (self.query_all_arena) |*arena| arena.deinit();
@@ -422,7 +406,6 @@ pub const ParseOptions = struct {
                 self.source = &[_]u8{};
                 self.mutable_source = null;
                 self.nodes.clearRetainingCapacity();
-                self.parse_stack.clearRetainingCapacity();
                 if (self.query_one_arena) |*arena| _ = arena.reset(.retain_capacity);
                 if (self.query_all_arena) |*arena| _ = arena.reset(.retain_capacity);
                 if (self.decoded_value_arena) |*arena| _ = arena.reset(.retain_capacity);

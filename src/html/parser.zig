@@ -28,15 +28,28 @@ pub fn parseInto(comptime opts: ParseOptions, noalias doc: *opts.GetDocument(), 
 
 fn Parser(comptime opts: ParseOptions) type {
     return struct {
+        /// Document being populated with completed parse output.
         doc: *opts.GetDocument(),
+        /// Source bytes being tokenized for this parse pass.
         input: []const u8,
+        /// Current byte cursor inside `input`.
         i: usize,
+        /// Open-element stack used only while building the tree.
+        parse_stack: std.ArrayListUnmanaged(OpenElem) = .empty,
 
         const Self = @This();
         const Doc = opts.GetDocument();
-        const OpenElem = Doc.OpenElemType;
+        const OpenElem = struct {
+            /// First-8-bytes lowercase key for the open tag name.
+            tag_key: u64 = 0,
+            /// Node index of the open element.
+            idx: IndexInt,
+            /// Original tag-name length for close matching and optional-close logic.
+            tag_len: u16 = 0,
+        };
 
         fn parse(noalias self: *Self) !void {
+            defer self.parse_stack.deinit(self.doc.allocator);
             try self.reserveCapacities();
 
             _ = try self.pushNode(.{
@@ -83,13 +96,13 @@ fn Parser(comptime opts: ParseOptions) type {
         }
 
         fn finishOpenElements(noalias self: *Self) void {
-            while (self.doc.parse_stack.items.len > 1) {
-                const open = self.doc.parse_stack.pop().?;
+            while (self.parse_stack.items.len > 1) {
+                const open = self.parse_stack.pop().?;
                 var node = &self.doc.nodes.items[open.idx];
                 node.subtree_end = @intCast(self.doc.nodes.items.len - 1);
             }
             self.doc.nodes.items[0].subtree_end = @intCast(self.doc.nodes.items.len - 1);
-            self.doc.parse_stack.clearRetainingCapacity();
+            self.parse_stack.clearRetainingCapacity();
         }
 
         fn reserveCapacities(noalias self: *Self) !void {
@@ -108,7 +121,7 @@ fn Parser(comptime opts: ParseOptions) type {
             estimated_nodes = @min(estimated_nodes, MaxInitialNodeReserve);
 
             try self.doc.nodes.ensureTotalCapacity(alloc, estimated_nodes);
-            try self.doc.parse_stack.ensureTotalCapacity(alloc, InitialParseStackCapacity);
+            try self.parse_stack.ensureTotalCapacity(alloc, InitialParseStackCapacity);
         }
 
         inline fn parseTextKeepWhitespace(noalias self: *Self) !void {
@@ -168,7 +181,7 @@ fn Parser(comptime opts: ParseOptions) type {
             const tag_name = self.input[name_start..self.i];
             const name_end = self.i;
 
-            if (self.doc.parse_stack.items.len > 1 and tags.mayTriggerImplicitCloseWithKey(tag_name, tag_name_key)) {
+            if (self.parse_stack.items.len > 1 and tags.mayTriggerImplicitCloseWithKey(tag_name, tag_name_key)) {
                 self.applyImplicitClosures(tag_name, tag_name_key);
             }
 
@@ -336,10 +349,10 @@ fn Parser(comptime opts: ParseOptions) type {
                 return;
             }
 
-            if (self.doc.parse_stack.items.len > 1) {
-                const top = self.doc.parse_stack.items[self.doc.parse_stack.items.len - 1];
+            if (self.parse_stack.items.len > 1) {
+                const top = self.parse_stack.items[self.parse_stack.items.len - 1];
                 if (self.openElemMatchesClose(top, close_name, close_key)) {
-                    _ = self.doc.parse_stack.pop();
+                    _ = self.parse_stack.pop();
                     var node = &self.doc.nodes.items[top.idx];
                     node.subtree_end = @intCast(self.doc.nodes.items.len - 1);
                     return;
@@ -347,18 +360,18 @@ fn Parser(comptime opts: ParseOptions) type {
             }
 
             var found: ?usize = null;
-            var s = self.doc.parse_stack.items.len;
+            var s = self.parse_stack.items.len;
             while (s > 1) {
                 s -= 1;
-                const open = self.doc.parse_stack.items[s];
+                const open = self.parse_stack.items[s];
                 if (!self.openElemMatchesClose(open, close_name, close_key)) continue;
                 found = s;
                 break;
             }
 
             if (found) |pos| {
-                while (self.doc.parse_stack.items.len > pos) {
-                    const open = self.doc.parse_stack.pop().?;
+                while (self.parse_stack.items.len > pos) {
+                    const open = self.parse_stack.pop().?;
                     var node = &self.doc.nodes.items[open.idx];
                     node.subtree_end = @intCast(self.doc.nodes.items.len - 1);
                 }
@@ -368,12 +381,12 @@ fn Parser(comptime opts: ParseOptions) type {
         }
 
         inline fn applyImplicitClosures(noalias self: *Self, new_tag: []const u8, new_tag_key: u64) void {
-            while (self.doc.parse_stack.items.len > 1) {
-                const top = self.doc.parse_stack.items[self.doc.parse_stack.items.len - 1];
+            while (self.parse_stack.items.len > 1) {
+                const top = self.parse_stack.items[self.parse_stack.items.len - 1];
                 if (!tags.isImplicitCloseSourceWithLenAndKey(top.tag_len, top.tag_key)) break;
                 if (!tags.shouldImplicitlyCloseWithLenAndKey(top.tag_len, top.tag_key, new_tag, new_tag_key)) break;
 
-                _ = self.doc.parse_stack.pop();
+                _ = self.parse_stack.pop();
                 var n = &self.doc.nodes.items[top.idx];
                 n.subtree_end = @intCast(self.doc.nodes.items.len - 1);
             }
@@ -421,7 +434,7 @@ fn Parser(comptime opts: ParseOptions) type {
         }
 
         fn pushStack(noalias self: *Self, idx: IndexInt, tag_key: u64, tag_len: u16) !void {
-            try self.doc.parse_stack.append(self.doc.allocator, .{
+            try self.parse_stack.append(self.doc.allocator, .{
                 .idx = idx,
                 .tag_key = tag_key,
                 .tag_len = tag_len,
@@ -429,8 +442,8 @@ fn Parser(comptime opts: ParseOptions) type {
         }
 
         inline fn currentParent(noalias self: *Self) IndexInt {
-            if (self.doc.parse_stack.items.len == 0) return InvalidIndex;
-            return self.doc.parse_stack.items[self.doc.parse_stack.items.len - 1].idx;
+            if (self.parse_stack.items.len == 0) return InvalidIndex;
+            return self.parse_stack.items[self.parse_stack.items.len - 1].idx;
         }
 
         inline fn openElemMatchesClose(noalias self: *Self, open: OpenElem, close_name: []const u8, close_key: u64) bool {
