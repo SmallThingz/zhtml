@@ -31,46 +31,14 @@ pub fn scanTextRun(hay: []const u8, start: usize) TextRun {
     if (start >= hay.len) return .{ .lt_index = hay.len, .has_non_whitespace = false };
 
     var i = start;
-    var has_non_whitespace = false;
+    while (i < hay.len and tables.WhitespaceTable[hay[i]]) : (i += 1) {}
+    if (i >= hay.len) return .{ .lt_index = hay.len, .has_non_whitespace = false };
+    if (hay[i] == '<') return .{ .lt_index = i, .has_non_whitespace = false };
 
-    if (!@inComptime()) {
-        if (std.simd.suggestVectorLength(u8)) |block_len| {
-            const Block = @Vector(block_len, u8);
-            const lt_mask: Block = @splat('<');
-            const sp_mask: Block = @splat(' ');
-            const nl_mask: Block = @splat('\n');
-            const cr_mask: Block = @splat('\r');
-            const tab_mask: Block = @splat('\t');
-            const ff_mask: Block = @splat('\x0c');
-
-            while (i + block_len <= hay.len) : (i += block_len) {
-                const block: Block = hay[i..][0..block_len].*;
-                const lt_hits = block == lt_mask;
-                if (@reduce(.Or, lt_hits)) {
-                    const first_lt = std.simd.firstTrue(lt_hits).?;
-                    var j: usize = 0;
-                    while (j < first_lt) : (j += 1) {
-                        if (!tables.WhitespaceTable[hay[i + j]]) {
-                            return .{ .lt_index = i + first_lt, .has_non_whitespace = true };
-                        }
-                    }
-                    return .{ .lt_index = i + first_lt, .has_non_whitespace = has_non_whitespace };
-                }
-
-                const ws_hits = (block == sp_mask) |
-                    (block == nl_mask) |
-                    (block == cr_mask) |
-                    (block == tab_mask) |
-                    (block == ff_mask);
-                if (!@reduce(.And, ws_hits)) has_non_whitespace = true;
-            }
-        }
-    }
-
-    while (i < hay.len and hay[i] != '<') : (i += 1) {
-        if (!tables.WhitespaceTable[hay[i]]) has_non_whitespace = true;
-    }
-    return .{ .lt_index = i, .has_non_whitespace = has_non_whitespace };
+    return .{
+        .lt_index = std.mem.indexOfScalarPos(u8, hay, i, '<') orelse hay.len,
+        .has_non_whitespace = true,
+    };
 }
 
 /// Scans from `start` to next `>` while skipping quoted `>` inside attributes.
@@ -196,6 +164,10 @@ test "scanTextRun tracks next tag and whitespace-only runs" {
     const c = scanTextRun("plain text", 0);
     try std.testing.expectEqual(@as(usize, 10), c.lt_index);
     try std.testing.expect(c.has_non_whitespace);
+
+    const d = scanTextRun(" \n\t hi \n\t<em>", 0);
+    try std.testing.expectEqual(@as(usize, 9), d.lt_index);
+    try std.testing.expect(d.has_non_whitespace);
 }
 
 test "findTagEndRespectQuotes handles quoted >" {
