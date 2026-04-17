@@ -317,7 +317,7 @@ Core modules:
 - `src/html/parser.zig`: permissive parse pipeline
 - `src/html/scanner.zig`: byte-scanning hot-path helpers
 - `src/html/tags.zig`: tag metadata and hash dispatch
-- `src/html/attr_inline.zig`: in-place attribute traversal/lazy materialization
+- `src/html/attr.zig`: attribute scanning, lazy materialization, and decode helpers
 - `src/html/entities.zig`: entity decode utilities
 - `src/selector/runtime.zig`, `src/selector/compile_time.zig`: selector parsing
 - `src/selector/matcher.zig`: selector matching/combinator traversal
@@ -325,6 +325,7 @@ Core modules:
 Data model highlights:
 
 - `Document` always owns node/index storage and may either parse a mutable caller buffer in place or borrow a read-only caller buffer unchanged
+- parser-only construction state stays in `src/html/parser.zig`; `Document` retains only post-parse/query state
 - nodes are contiguous and linked by indexes for traversal
 - attributes are traversed directly from source spans (no heap attribute objects)
 - the build-time `-Dintlen` option widens or shrinks those spans and indexes uniformly

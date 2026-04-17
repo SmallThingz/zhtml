@@ -13,9 +13,10 @@ const parser = @import("parser.zig");
 const common = @import("../common.zig");
 const IndexInt = common.IndexInt;
 
-// SAFETY: Document owns `source` bytes for the life of nodes/iterators.
-// Node spans and indices are validated on parse; helpers guard against
-// InvalidIndex and out-of-range indexes.
+// SAFETY: Document retains the parsed source reference for the life of
+// nodes/iterators. In destructive mode `mutable_source` aliases the caller's
+// writable buffer. Node spans and indices are validated on parse; helpers guard
+// against InvalidIndex and out-of-range indexes.
 
 /// Sentinel used for missing node indexes and invalid spans.
 pub const InvalidIndex: IndexInt = common.InvalidIndex;
@@ -88,18 +89,6 @@ pub const ParseOptions = struct {
 
             /// Inclusive subtree tail index for fast descendant skipping.
             subtree_end: IndexInt = 0,
-        };
-    }
-
-    /// Returns the parser's open-element stack entry type.
-    pub fn GetOpenElem(_: @This()) type {
-        return struct {
-            /// First-8-bytes lowercase key for the open tag name.
-            tag_key: u64 = 0,
-            /// Node index of the open element.
-            idx: IndexInt,
-            /// Original tag-name length for close matching and optional-close logic.
-            tag_len: u16 = 0,
         };
     }
 
@@ -789,7 +778,6 @@ pub const ParseOptions = struct {
             const DocSelf = @This();
             const DebugQueryResultType = options.QueryDebugResult();
             const RawNodeType = options.GetNodeRaw();
-            pub const OpenElemType = options.GetOpenElem();
             const ChildrenIterType = options.ChildrenIter();
             const NodeTypeWrapper = options.GetNode();
             const QueryIterType = options.QueryIter();
@@ -798,17 +786,11 @@ pub const ParseOptions = struct {
             allocator: std.mem.Allocator,
             /// Source bytes referenced by node spans.
             source: []const u8 = &[_]u8{},
-            /// Original caller bytes preserved for exact serialization in non-destructive mode.
-            original_source: []const u8 = &[_]u8{},
             /// Mutable source view used only by the destructive specialization.
             mutable_source: ?[]u8 = null,
-            /// Owned shadow buffer used only by the non-destructive specialization.
-            owned_shadow_source: ?[]u8 = null,
 
             /// Parsed node storage.
             nodes: std.ArrayListUnmanaged(RawNodeType) = .empty,
-            /// Open-element stack used during parse.
-            parse_stack: std.ArrayListUnmanaged(OpenElemType) = .empty,
 
             /// Arena for `queryOneRuntime` selector compilation.
             query_one_arena: ?std.heap.ArenaAllocator = null,
@@ -841,9 +823,7 @@ pub const ParseOptions = struct {
 
             /// Releases all document-owned memory.
             pub fn deinit(noalias self: *DocSelf) void {
-                self.releaseOwnedShadowSource();
                 self.nodes.deinit(self.allocator);
-                self.parse_stack.deinit(self.allocator);
                 self.query_accel_id_map.deinit(self.allocator);
                 if (self.query_one_arena) |*arena| arena.deinit();
                 if (self.query_all_arena) |*arena| arena.deinit();
@@ -852,12 +832,9 @@ pub const ParseOptions = struct {
 
             /// Clears parsed state while retaining reusable capacities.
             pub fn clear(noalias self: *DocSelf) void {
-                self.releaseOwnedShadowSource();
                 self.source = &[_]u8{};
-                self.original_source = &[_]u8{};
                 self.mutable_source = null;
                 self.nodes.clearRetainingCapacity();
-                self.parse_stack.clearRetainingCapacity();
                 if (self.query_one_arena) |*arena| _ = arena.reset(.retain_capacity);
                 if (self.query_all_arena) |*arena| _ = arena.reset(.retain_capacity);
                 if (self.decoded_value_arena) |*arena| _ = arena.reset(.retain_capacity);
@@ -872,25 +849,16 @@ pub const ParseOptions = struct {
             /// Non-destructive documents accept `[]const u8` and keep lazy decode out of `source`.
             pub fn parse(noalias self: *DocSelf, input: options.GetInput()) !void {
                 self.clear();
-                self.original_source = input;
+                self.source = input;
                 self.query_accel_budget_bytes = @max(input.len / QueryAccelBudgetDivisor, QueryAccelMinBudgetBytes);
 
                 if (comptime options.non_destructive) {
-                    self.source = input;
                     try parser.parseInto(options, self, input);
                     return;
                 }
 
-                self.source = input;
                 self.mutable_source = input;
                 try parser.parseInto(options, self, input);
-            }
-
-            fn releaseOwnedShadowSource(self: *DocSelf) void {
-                if (self.owned_shadow_source) |buf| {
-                    self.allocator.free(buf);
-                    self.owned_shadow_source = null;
-                }
             }
 
             /// Returns first matching element for comptime selector.
@@ -1066,7 +1034,7 @@ pub const ParseOptions = struct {
             /// Writes HTML serialization of this node and its subtree to `writer`.
             pub fn writeHtml(self: @This(), writer: anytype) NodeTypeWrapper.WriterError(@TypeOf(writer))!void {
                 if (comptime options.non_destructive) {
-                    try writer.writeAll(self.original_source);
+                    try writer.writeAll(self.source);
                     return;
                 }
                 return self.nodeAt(0).?.writeHtml(writer);
@@ -1075,7 +1043,7 @@ pub const ParseOptions = struct {
             /// Writes HTML serialization of this document root only, excluding its children.
             pub fn writeHtmlSelf(self: @This(), writer: anytype) NodeTypeWrapper.WriterError(@TypeOf(writer))!void {
                 if (comptime options.non_destructive) {
-                    try writer.writeAll(self.original_source);
+                    try writer.writeAll(self.source);
                     return;
                 }
                 return self.nodeAt(0).?.writeHtmlSelf(writer);
@@ -1307,6 +1275,13 @@ fn hashIdValue(id: []const u8) u64 {
 fn assertNodeTypeLayouts() void {
     _ = @sizeOf(NodeRaw);
     _ = @sizeOf(Node);
+}
+
+test "document type excludes parser-only and shadow-source state" {
+    try std.testing.expect(!@hasField(Document, "parse_stack"));
+    try std.testing.expect(!@hasField(Document, "original_source"));
+    try std.testing.expect(!@hasField(Document, "owned_shadow_source"));
+    try std.testing.expect(!@hasDecl(ParseOptions, "GetOpenElem"));
 }
 
 fn expectIterIds(iter: QueryIter, expected_ids: []const []const u8) !void {
