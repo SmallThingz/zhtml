@@ -15,12 +15,11 @@ fn runBufferCase() !void {
     var input = "<div id='x' data-v='a&amp;b'> hi &amp; bye </div>".*;
     const original = input;
     try doc.parse(&input);
-
-    const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("a&b", node.getAttributeValue("data-v").?);
-
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
+
+    const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a&b", node.getAttributeValueAlloc(arena.allocator(), "data-v").?);
     try std.testing.expectEqualStrings("hi & bye", try node.innerText(arena.allocator()));
 
     try std.testing.expectEqualSlices(u8, original[0..], input[0..]);

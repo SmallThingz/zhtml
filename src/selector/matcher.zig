@@ -61,11 +61,12 @@ pub fn evalAttrOp(raw: []const u8, value: []const u8, op: ast.AttrOp) bool {
 pub fn matchesAttrSelectorDebug(
     doc: anytype,
     node: anytype,
+    allocator: std.mem.Allocator,
     selector_source: []const u8,
     sel: ast.AttrSelector,
 ) bool {
     const name = sel.name.slice(selector_source);
-    const raw = attr.getAttrValue(doc, node, name) orelse return false;
+    const raw = attr.getAttrValue(doc, node, name, allocator) orelse return false;
     const value = sel.value.slice(selector_source);
     return evalAttrOp(raw, value, sel.op);
 }
@@ -87,6 +88,7 @@ pub fn NotSimpleCtxFast(comptime Doc: type, comptime Node: type) type {
     return struct {
         doc: Doc,
         node: Node,
+        allocator: std.mem.Allocator,
         probe: *AttrProbe,
         collected: ?*CollectedAttrs,
         selector_source: []const u8,
@@ -96,15 +98,15 @@ pub fn NotSimpleCtxFast(comptime Doc: type, comptime Node: type) type {
         }
 
         fn getAttrValue(self: @This(), name: []const u8) ?[]const u8 {
-            return attrValueByNameFrom(self.doc, self.node, self.probe, self.collected, name);
+            return attrValueByNameFrom(self.doc, self.node, self.allocator, self.probe, self.collected, name);
         }
 
         fn classMatches(self: @This(), class_name: []const u8) bool {
-            return hasClass(self.doc, self.node, self.probe, self.collected, class_name);
+            return hasClass(self.doc, self.node, self.allocator, self.probe, self.collected, class_name);
         }
 
         fn attrMatches(self: @This(), sel: ast.AttrSelector) bool {
-            return matchesAttrSelector(self.doc, self.node, self.probe, self.collected, self.selector_source, sel);
+            return matchesAttrSelector(self.doc, self.node, self.allocator, self.probe, self.collected, self.selector_source, sel);
         }
     };
 }
@@ -113,6 +115,7 @@ pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
     return struct {
         doc: Doc,
         node: Node,
+        allocator: std.mem.Allocator,
         selector_source: []const u8,
 
         fn nodeName(self: @This()) []const u8 {
@@ -120,16 +123,16 @@ pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
         }
 
         fn getAttrValue(self: @This(), name: []const u8) ?[]const u8 {
-            return attr.getAttrValue(self.doc, self.node, name);
+            return attr.getAttrValue(self.doc, self.node, name, self.allocator);
         }
 
         fn classMatches(self: @This(), class_name: []const u8) bool {
-            const class_attr = attr.getAttrValue(self.doc, self.node, "class") orelse return false;
+            const class_attr = attr.getAttrValue(self.doc, self.node, "class", self.allocator) orelse return false;
             return tables.tokenIncludesAsciiWhitespace(class_attr, class_name);
         }
 
         fn attrMatches(self: @This(), sel: ast.AttrSelector) bool {
-            return matchesAttrSelectorDebug(self.doc, self.node, self.selector_source, sel);
+            return matchesAttrSelectorDebug(self.doc, self.node, self.allocator, self.selector_source, sel);
         }
     };
 }
@@ -311,6 +314,9 @@ fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selecto
 fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt) bool {
     const node = &doc.nodes.items[node_index];
     if (!isElementLike(node.kind)) return false;
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch.deinit();
+    const scratch_alloc = scratch.allocator();
     // Per-node memo for attribute probes inside one compound match.
     // This preserves selector-order short-circuiting while avoiding repeated
     // full attribute traversals for the same name.
@@ -329,6 +335,7 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
         const value = attrValueByNameFrom(
             doc,
             node,
+            scratch_alloc,
             &attr_probe,
             collected_ptr,
             "id",
@@ -340,6 +347,7 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
         const class_attr = attrValueByNameFrom(
             doc,
             node,
+            scratch_alloc,
             &attr_probe,
             collected_ptr,
             "class",
@@ -350,7 +358,7 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
     var attr_i: IndexInt = 0;
     while (attr_i < comp.attr_len) : (attr_i += 1) {
         const attr_sel = selector.attrs[comp.attr_start + attr_i];
-        if (!matchesAttrSelector(doc, node, &attr_probe, collected_ptr, selector.source, attr_sel)) return false;
+        if (!matchesAttrSelector(doc, node, scratch_alloc, &attr_probe, collected_ptr, selector.source, attr_sel)) return false;
     }
 
     var pseudo_i: IndexInt = 0;
@@ -362,7 +370,7 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
     var not_i: IndexInt = 0;
     while (not_i < comp.not_len) : (not_i += 1) {
         const item = selector.not_items[comp.not_start + not_i];
-        if (matchesNotSimple(doc, node, &attr_probe, collected_ptr, selector.source, item)) return false;
+        if (matchesNotSimple(doc, node, scratch_alloc, &attr_probe, collected_ptr, selector.source, item)) return false;
     }
 
     return true;
@@ -371,6 +379,7 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
 fn matchesNotSimple(
     doc: anytype,
     node: anytype,
+    allocator: std.mem.Allocator,
     noalias probe: *AttrProbe,
     collected: ?*CollectedAttrs,
     selector_source: []const u8,
@@ -380,6 +389,7 @@ fn matchesNotSimple(
     const ctx = Ctx{
         .doc = doc,
         .node = node,
+        .allocator = allocator,
         .probe = probe,
         .collected = collected,
         .selector_source = selector_source,
@@ -406,19 +416,27 @@ pub fn matchesPseudo(doc: anytype, node_index: IndexInt, pseudo: ast.Pseudo) boo
 fn matchesAttrSelector(
     doc: anytype,
     node: anytype,
+    allocator: std.mem.Allocator,
     noalias probe: *AttrProbe,
     collected: ?*CollectedAttrs,
     selector_source: []const u8,
     sel: ast.AttrSelector,
 ) bool {
     const name = sel.name.slice(selector_source);
-    const raw = attrValueByNameFrom(doc, node, probe, collected, name) orelse return false;
+    const raw = attrValueByNameFrom(doc, node, allocator, probe, collected, name) orelse return false;
     const value = sel.value.slice(selector_source);
     return evalAttrOp(raw, value, sel.op);
 }
 
-fn hasClass(doc: anytype, node: anytype, noalias probe: *AttrProbe, collected: ?*CollectedAttrs, class_name: []const u8) bool {
-    const class_attr = attrValueByNameFrom(doc, node, probe, collected, "class") orelse return false;
+fn hasClass(
+    doc: anytype,
+    node: anytype,
+    allocator: std.mem.Allocator,
+    noalias probe: *AttrProbe,
+    collected: ?*CollectedAttrs,
+    class_name: []const u8,
+) bool {
+    const class_attr = attrValueByNameFrom(doc, node, allocator, probe, collected, "class") orelse return false;
     return tables.tokenIncludesAsciiWhitespace(class_attr, class_name);
 }
 
@@ -463,6 +481,7 @@ fn hasAllClassesOnePass(selector: ast.Selector, comp: ast.Compound, class_attr: 
 fn attrValueByNameFrom(
     doc: anytype,
     node: anytype,
+    allocator: std.mem.Allocator,
     noalias probe: *AttrProbe,
     collected: ?*CollectedAttrs,
     name: []const u8,
@@ -472,7 +491,7 @@ fn attrValueByNameFrom(
             if (c.materialized or c.looked[idx]) return c.values[idx];
 
             if (c.request_count == 0) {
-                const value = attrValueByName(doc, node, probe, name);
+                const value = attrValueByName(doc, node, allocator, probe, name);
                 c.values[idx] = value;
                 c.looked[idx] = true;
                 c.request_count = 1;
@@ -484,6 +503,7 @@ fn attrValueByNameFrom(
                 node,
                 c.names[0..c.count],
                 c.values[0..c.count],
+                allocator,
             );
             c.materialized = true;
             var i: usize = 0;
@@ -491,16 +511,16 @@ fn attrValueByNameFrom(
             return c.values[idx];
         }
     }
-    return attrValueByName(doc, node, probe, name);
+    return attrValueByName(doc, node, allocator, probe, name);
 }
 
-fn attrValueByName(doc: anytype, node: anytype, noalias probe: *AttrProbe, name: []const u8) ?[]const u8 {
+fn attrValueByName(doc: anytype, node: anytype, allocator: std.mem.Allocator, noalias probe: *AttrProbe, name: []const u8) ?[]const u8 {
     if (findProbeEntry(probe, name)) |idx| {
         return probe.entries[idx].value;
     }
 
     if (!probe.overflow and probe.count < MaxProbeEntries) {
-        const value = attr.getAttrValue(doc, node, name);
+        const value = attr.getAttrValue(doc, node, name, allocator);
         const idx = probe.count;
         probe.entries[idx] = .{
             .name = name,
@@ -513,7 +533,7 @@ fn attrValueByName(doc: anytype, node: anytype, noalias probe: *AttrProbe, name:
     probe.overflow = true;
     // Fallback for very large compounds still stays allocation-free; we simply
     // bypass memoization once the fixed probe budget is exhausted.
-    return attr.getAttrValue(doc, node, name);
+    return attr.getAttrValue(doc, node, name, allocator);
 }
 
 const AttrProbeEntry = struct {

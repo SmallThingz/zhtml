@@ -58,8 +58,8 @@ test "smoke parse/query" {
     try doc.parse(&src);
 
     try std.testing.expect(doc.queryOne("div#a") != null);
-    try std.testing.expect((try doc.queryOneRuntime("span")) != null);
-    const span = (try doc.queryOneRuntime("span.k")) orelse return error.TestUnexpectedResult;
+    try std.testing.expect((try doc.queryOneRuntime(alloc, "span")) != null);
+    const span = (try doc.queryOneRuntime(alloc, "span.k")) orelse return error.TestUnexpectedResult;
     const parent = span.parentNode() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("div", parent.tagName());
     try std.testing.expect(doc.queryOne("div > span.k") != null);
@@ -83,9 +83,11 @@ test "top-level parse helper (non-destructive)" {
     const src = "<div id='a' data-v='x&amp;y'>x</div>";
     var doc = try parse(opts, alloc, src);
     defer doc.deinit();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
 
     const div = doc.queryOne("div#a") orelse return error.TestUnexpectedResult;
-    const v = div.getAttributeValue("data-v") orelse return error.TestUnexpectedResult;
+    const v = div.getAttributeValueAlloc(arena.allocator(), "data-v") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("x&y", v);
 }
 

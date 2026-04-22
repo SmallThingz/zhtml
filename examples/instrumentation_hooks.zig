@@ -36,7 +36,7 @@ pub fn run() !void {
     try std.testing.expectEqual(@as(usize, 1), hooks.parse_start_calls);
     try std.testing.expectEqual(@as(usize, 1), hooks.parse_end_calls);
 
-    _ = try html.queryOneRuntimeWithHooks(std.testing.io, &doc, "span#x", &hooks);
+    _ = try html.queryOneRuntimeWithHooks(std.testing.io, &doc, std.testing.allocator, "span#x", &hooks);
     try std.testing.expectEqual(@as(usize, 1), hooks.query_start_calls);
     try std.testing.expectEqual(@as(usize, 1), hooks.query_end_calls);
 }

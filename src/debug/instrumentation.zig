@@ -94,13 +94,19 @@ pub fn parseWithHooks(io: std.Io, doc: anytype, input: anytype, hooks: anytype) 
 }
 
 /// Executes `queryOneRuntime` and emits query timing hooks.
-pub fn queryOneRuntimeWithHooks(io: std.Io, doc: anytype, selector: []const u8, hooks: anytype) @TypeOf(doc.queryOneRuntime(selector)) {
+pub fn queryOneRuntimeWithHooks(
+    io: std.Io,
+    doc: anytype,
+    allocator: std.mem.Allocator,
+    selector: []const u8,
+    hooks: anytype,
+) @TypeOf(doc.queryOneRuntime(allocator, selector)) {
     if (comptime @hasDecl(HookDeclType(@TypeOf(hooks)), "onQueryStart")) {
         hooks.onQueryStart(.one_runtime, selector.len);
     }
 
     const start = std.Io.Timestamp.now(io, .awake);
-    const out = doc.queryOneRuntime(selector);
+    const out = doc.queryOneRuntime(allocator, selector);
     if (out) |value| {
         if (comptime @hasDecl(HookDeclType(@TypeOf(hooks)), "onQueryEnd")) {
             hooks.onQueryEnd(QueryInstrumentationStats{
@@ -144,13 +150,19 @@ pub fn queryOneCachedWithHooks(io: std.Io, doc: anytype, sel: ast.Selector, hook
 }
 
 /// Executes `queryAllRuntime` and emits query timing hooks.
-pub fn queryAllRuntimeWithHooks(io: std.Io, doc: anytype, selector: []const u8, hooks: anytype) @TypeOf(doc.queryAllRuntime(selector)) {
+pub fn queryAllRuntimeWithHooks(
+    io: std.Io,
+    doc: anytype,
+    allocator: std.mem.Allocator,
+    selector: []const u8,
+    hooks: anytype,
+) @TypeOf(doc.queryAllRuntime(allocator, selector)) {
     if (comptime @hasDecl(HookDeclType(@TypeOf(hooks)), "onQueryStart")) {
         hooks.onQueryStart(.all_runtime, selector.len);
     }
 
     const start = std.Io.Timestamp.now(io, .awake);
-    const out = doc.queryAllRuntime(selector);
+    const out = doc.queryAllRuntime(allocator, selector);
     if (out) |iter| {
         if (comptime @hasDecl(HookDeclType(@TypeOf(hooks)), "onQueryEnd")) {
             hooks.onQueryEnd(QueryInstrumentationStats{

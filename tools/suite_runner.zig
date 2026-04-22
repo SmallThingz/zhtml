@@ -97,13 +97,15 @@ fn printJsonStringArray(writer: anytype, items: []const []const u8) !void {
 fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture_path: []const u8, selector: []const u8) !void {
     var parsed = try parseFixtureDoc(io, alloc, mode, fixture_path);
     defer parsed.deinit(alloc);
+    var runtime_arena = std.heap.ArenaAllocator.init(alloc);
+    defer runtime_arena.deinit();
 
     var out_ids = std.ArrayList([]const u8).empty;
     defer out_ids.deinit(alloc);
 
     switch (parsed) {
         .strictest => |*fixture| {
-            var it = try fixture.doc.queryAllRuntime(selector);
+            var it = try fixture.doc.queryAllRuntime(runtime_arena.allocator(), selector);
             while (it.next()) |node| {
                 if (node.getAttributeValue("id")) |id| {
                     try out_ids.append(alloc, id);
@@ -111,7 +113,7 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
             }
         },
         .fastest => |*fixture| {
-            var it = try fixture.doc.queryAllRuntime(selector);
+            var it = try fixture.doc.queryAllRuntime(runtime_arena.allocator(), selector);
             while (it.next()) |node| {
                 if (node.getAttributeValue("id")) |id| {
                     try out_ids.append(alloc, id);
@@ -130,15 +132,17 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
 fn runSelectorCount(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture_path: []const u8, selector: []const u8) !void {
     var parsed = try parseFixtureDoc(io, alloc, mode, fixture_path);
     defer parsed.deinit(alloc);
+    var runtime_arena = std.heap.ArenaAllocator.init(alloc);
+    defer runtime_arena.deinit();
 
     var count: usize = 0;
     switch (parsed) {
         .strictest => |*fixture| {
-            var it = try fixture.doc.queryAllRuntime(selector);
+            var it = try fixture.doc.queryAllRuntime(runtime_arena.allocator(), selector);
             while (it.next()) |_| count += 1;
         },
         .fastest => |*fixture| {
-            var it = try fixture.doc.queryAllRuntime(selector);
+            var it = try fixture.doc.queryAllRuntime(runtime_arena.allocator(), selector);
             while (it.next()) |_| count += 1;
         },
     }
@@ -152,18 +156,20 @@ fn runSelectorCount(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixtu
 fn runSelectorCountScopeTag(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture_path: []const u8, scope_tag: []const u8, selector: []const u8) !void {
     var parsed = try parseFixtureDoc(io, alloc, mode, fixture_path);
     defer parsed.deinit(alloc);
+    var runtime_arena = std.heap.ArenaAllocator.init(alloc);
+    defer runtime_arena.deinit();
 
     var count: usize = 0;
     switch (parsed) {
         .strictest => |*fixture| {
             if (fixture.doc.findFirstTag(scope_tag)) |scope| {
-                var it = try scope.queryAllRuntime(selector);
+                var it = try scope.queryAllRuntime(runtime_arena.allocator(), selector);
                 while (it.next()) |_| count += 1;
             }
         },
         .fastest => |*fixture| {
             if (fixture.doc.findFirstTag(scope_tag)) |scope| {
-                var it = try scope.queryAllRuntime(selector);
+                var it = try scope.queryAllRuntime(runtime_arena.allocator(), selector);
                 while (it.next()) |_| count += 1;
             }
         },

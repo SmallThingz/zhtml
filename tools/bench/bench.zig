@@ -127,7 +127,7 @@ pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterati
             const start = nowNs(io);
             var i: usize = 0;
             while (i < iterations) : (i += 1) {
-                _ = doc.queryOneRuntime(selector) catch null;
+                _ = doc.queryOneRuntime(alloc, selector) catch null;
             }
             break :blk elapsedNs(start, nowNs(io));
         },
@@ -141,7 +141,7 @@ pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterati
             const start = nowNs(io);
             var i: usize = 0;
             while (i < iterations) : (i += 1) {
-                _ = doc.queryOneRuntime(selector) catch null;
+                _ = doc.queryOneRuntime(alloc, selector) catch null;
             }
             break :blk elapsedNs(start, nowNs(io));
         },

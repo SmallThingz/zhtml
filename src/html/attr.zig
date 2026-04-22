@@ -164,10 +164,10 @@ inline fn hasConstSource(comptime Doc: type) bool {
 }
 
 /// Returns attribute value by name from in-place attribute bytes, decoding lazily.
-pub fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []const u8) ?[]const u8 {
+pub fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) ?[]const u8 {
     const Doc = @TypeOf(doc_ptr.*);
     if (comptime hasConstSource(Doc)) {
-        return getAttrValueNonDestructive(doc_ptr, node, name);
+        return getAttrValueNonDestructive(doc_ptr, node, name, allocator);
     }
 
     const mut_doc = @constCast(doc_ptr);
@@ -234,13 +234,19 @@ pub fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []const u8) ?
 }
 
 /// One-pass multi-attribute collector used by matcher hot paths.
-pub fn collectSelectedValues(noalias doc_ptr: anytype, node: anytype, selected_names: []const []const u8, out_values: []?[]const u8) void {
+pub fn collectSelectedValues(
+    noalias doc_ptr: anytype,
+    node: anytype,
+    selected_names: []const []const u8,
+    out_values: []?[]const u8,
+    allocator: std.mem.Allocator,
+) void {
     const Doc = @TypeOf(doc_ptr.*);
     if (comptime hasConstSource(Doc)) {
         var idx: usize = 0;
         while (idx < selected_names.len) : (idx += 1) {
             if (out_values[idx] != null) continue;
-            out_values[idx] = getAttrValueNonDestructive(doc_ptr, node, selected_names[idx]);
+            out_values[idx] = getAttrValueNonDestructive(doc_ptr, node, selected_names[idx], allocator);
         }
         return;
     }
@@ -318,7 +324,7 @@ pub fn collectSelectedValues(noalias doc_ptr: anytype, node: anytype, selected_n
     }
 }
 
-fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8) ?[]const u8 {
+fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) ?[]const u8 {
     const source: []const u8 = doc.source;
     const lookup_kind = classifyLookupName(name);
 
@@ -347,7 +353,7 @@ fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8) ?[]
         const delim = source[i];
         if (delim == '=') {
             const raw = parseRawValue(source, end, i);
-            if (is_target) return materializeRawValueOwned(doc, source, raw);
+            if (is_target) return materializeRawValueOwned(allocator, source, raw);
             i = raw.next_start;
             continue;
         }
@@ -360,16 +366,13 @@ fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8) ?[]
     return null;
 }
 
-fn materializeRawValueOwned(doc: anytype, source: []const u8, raw: RawValue) []const u8 {
+fn materializeRawValueOwned(allocator: std.mem.Allocator, source: []const u8, raw: RawValue) []const u8 {
     if (raw.kind == .empty) return "";
 
     const slice = source[raw.start..raw.end];
     if (std.mem.indexOfScalar(u8, slice, '&') == null) return slice;
 
-    const mut_doc = @constCast(doc);
-    const arena = mut_doc.ensureDecodedValueArena();
-    const alloc = arena.allocator();
-    const copied = alloc.dupe(u8, slice) catch return slice;
+    const copied = allocator.dupe(u8, slice) catch return slice;
     const new_len = entities.decodeInPlace(copied);
     return copied[0..new_len];
 }

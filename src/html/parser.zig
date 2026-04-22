@@ -644,8 +644,8 @@ fn expectEquivalentStructures(a: *const TestDocument, b: *const NonDestructiveTe
 
 fn expectRuntimeQueryParity(a: *TestDocument, b: *NonDestructiveTestDocument, selector: []const u8) !void {
     const testing = std.testing;
-    const lhs = try a.queryOneRuntime(selector);
-    const rhs = try b.queryOneRuntime(selector);
+    const lhs = try a.queryOneRuntime(testing.allocator, selector);
+    const rhs = try b.queryOneRuntime(testing.allocator, selector);
     try testing.expect((lhs == null) == (rhs == null));
     if (lhs) |left_node| {
         try testing.expectEqual(left_node.index, rhs.?.index);
@@ -668,22 +668,28 @@ fn exerciseRuntimeApis(doc: anytype, alloc: std.mem.Allocator) !void {
     };
 
     inline for (selectors) |selector| {
-        _ = try doc.queryOneRuntime(selector);
+        _ = try doc.queryOneRuntime(alloc, selector);
     }
 
     var visited: usize = 0;
     var idx: usize = 0;
     while (idx < doc.nodes.items.len and visited < 16) : (idx += 1) {
         const node = doc.nodeAt(@intCast(idx)) orelse continue;
-        if (doc.nodes.items[idx].kind == .element) {
-            _ = node.getAttributeValue("id");
-            _ = node.getAttributeValue("class");
-            _ = node.getAttributeValue("href");
-            _ = node.getAttributeValue("data-v");
-        }
-
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
+        if (doc.nodes.items[idx].kind == .element) {
+            if (comptime @FieldType(@TypeOf(doc.*), "source") == []const u8) {
+                _ = node.getAttributeValueAlloc(arena.allocator(), "id");
+                _ = node.getAttributeValueAlloc(arena.allocator(), "class");
+                _ = node.getAttributeValueAlloc(arena.allocator(), "href");
+                _ = node.getAttributeValueAlloc(arena.allocator(), "data-v");
+            } else {
+                _ = node.getAttributeValue("id");
+                _ = node.getAttributeValue("class");
+                _ = node.getAttributeValue("href");
+                _ = node.getAttributeValue("data-v");
+            }
+        }
         _ = try node.innerText(arena.allocator());
         visited += 1;
     }
@@ -902,12 +908,11 @@ test "non-destructive parse supports file-backed memory maps without changing by
     var doc = NonDestructiveTestDocument.init(alloc);
     defer doc.deinit();
     try doc.parse(mapped.memory);
-
-    const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("a&b", node.getAttributeValue("data-v").?);
-
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
+
+    const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a&b", node.getAttributeValueAlloc(arena.allocator(), "data-v").?);
     try std.testing.expectEqualStrings("hi & bye", try node.innerText(arena.allocator()));
     try std.testing.expectEqualStrings(html, mapped.memory);
 

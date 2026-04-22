@@ -270,8 +270,17 @@ pub const ParseOptions = struct {
 
             /// Returns decoded attribute value for `name`, if present.
             pub fn getAttributeValue(self: @This(), name: []const u8) ?[]const u8 {
+                if (comptime options.non_destructive) {
+                    @compileError("Use getAttributeValueAlloc for non-destructive documents.");
+                }
                 const node_raw = &self.doc.nodes.items[self.index];
-                return attr.getAttrValue(self.doc, node_raw, name);
+                return attr.getAttrValue(self.doc, node_raw, name, self.doc.allocator);
+            }
+
+            /// Returns decoded attribute value for `name`, allocating from `allocator` when needed.
+            pub fn getAttributeValueAlloc(self: @This(), allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
+                const node_raw = &self.doc.nodes.items[self.index];
+                return attr.getAttrValue(self.doc, node_raw, name, allocator);
             }
 
             /// Returns first element child.
@@ -654,13 +663,13 @@ pub const ParseOptions = struct {
             }
 
             /// Parses selector at runtime and returns first descendant match.
-            pub fn queryOneRuntime(self: @This(), selector: []const u8) runtime_selector.Error!?@This() {
-                return self.doc.queryOneRuntimeFrom(selector, self.index);
+            pub fn queryOneRuntime(self: @This(), allocator: std.mem.Allocator, selector: []const u8) runtime_selector.Error!?@This() {
+                return self.doc.queryOneRuntimeFrom(allocator, selector, self.index);
             }
 
             /// Runtime debug query returning first match, diagnostics, and parse error if any.
-            pub fn queryOneRuntimeDebug(self: @This(), selector: []const u8) DebugQueryResultType {
-                return self.doc.queryOneRuntimeDebugFrom(selector, self.index);
+            pub fn queryOneRuntimeDebug(self: @This(), allocator: std.mem.Allocator, selector: []const u8) DebugQueryResultType {
+                return self.doc.queryOneRuntimeDebugFrom(allocator, selector, self.index);
             }
 
             /// Compiles selector at comptime and returns lazy descendant iterator.
@@ -676,8 +685,8 @@ pub const ParseOptions = struct {
             }
 
             /// Parses selector at runtime and returns lazy descendant iterator.
-            pub fn queryAllRuntime(self: @This(), selector: []const u8) runtime_selector.Error!QueryIterType {
-                return self.doc.queryAllRuntimeFrom(selector, self.index);
+            pub fn queryAllRuntime(self: @This(), allocator: std.mem.Allocator, selector: []const u8) runtime_selector.Error!QueryIterType {
+                return self.doc.queryAllRuntimeFrom(allocator, selector, self.index);
             }
         };
     }
@@ -697,15 +706,9 @@ pub const ParseOptions = struct {
             scope_root: IndexInt = InvalidIndex,
             /// Next node index to test.
             next_index: IndexInt = 1,
-            /// Generation token used to invalidate runtime iterators safely.
-            runtime_generation: u64 = 0,
 
             /// Returns next matching node or `null` when exhausted.
             pub fn next(noalias self: *@This()) ?NodeTypeWrapper {
-                if (self.runtime_generation != 0 and self.runtime_generation != self.doc.query_all_generation) {
-                    return null;
-                }
-
                 while (self.next_index < self.doc.nodes.items.len) : (self.next_index += 1) {
                     const idx = self.next_index;
 
@@ -727,10 +730,9 @@ pub const ParseOptions = struct {
 
             /// Formats iterator state for human-readable output.
             pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-                try writer.print("QueryIter{{scope_root={}, next_index={}, runtime_generation={}}}", .{
+                try writer.print("QueryIter{{scope_root={}, next_index={}}}", .{
                     self.scope_root,
                     self.next_index,
-                    self.runtime_generation,
                 });
             }
         };
@@ -805,22 +807,13 @@ pub const ParseOptions = struct {
             const NodeTypeWrapper = options.GetNode();
             const QueryIterType = options.QueryIter();
 
-            /// Allocator used for node storage, selector arenas, and decoded-value scratch.
+            /// Allocator used for node storage and caller-directed temporary work.
             allocator: std.mem.Allocator,
             /// Source bytes referenced by node spans.
             source: options.GetInput(),
 
             /// Parsed node storage.
             nodes: std.ArrayListUnmanaged(RawNodeType) = .empty,
-
-            /// Arena for `queryOneRuntime` selector compilation.
-            query_one_arena: ?std.heap.ArenaAllocator = null,
-            /// Arena for `queryAllRuntime` selector compilation.
-            query_all_arena: ?std.heap.ArenaAllocator = null,
-            /// Arena for decoded attribute values returned by non-destructive reads.
-            decoded_value_arena: ?std.heap.ArenaAllocator = null,
-            /// Monotonic generation counter for runtime iterator invalidation.
-            query_all_generation: u64 = 1,
 
             /// Initializes an empty document using `allocator` for internal storage.
             pub fn init(allocator: std.mem.Allocator) DocSelf {
@@ -833,20 +826,12 @@ pub const ParseOptions = struct {
             /// Releases all document-owned memory.
             pub fn deinit(noalias self: *DocSelf) void {
                 self.nodes.deinit(self.allocator);
-                if (self.query_one_arena) |*arena| arena.deinit();
-                if (self.query_all_arena) |*arena| arena.deinit();
-                if (self.decoded_value_arena) |*arena| arena.deinit();
             }
 
             /// Clears parsed state while retaining reusable capacities.
             pub fn clear(noalias self: *DocSelf) void {
                 self.source = emptySource();
                 self.nodes.clearRetainingCapacity();
-                if (self.query_one_arena) |*arena| _ = arena.reset(.retain_capacity);
-                if (self.query_all_arena) |*arena| _ = arena.reset(.retain_capacity);
-                if (self.decoded_value_arena) |*arena| _ = arena.reset(.retain_capacity);
-                self.query_all_generation +%= 1;
-                if (self.query_all_generation == 0) self.query_all_generation = 1;
             }
 
             /// Parses HTML using the behavior encoded in this document type.
@@ -883,29 +868,37 @@ pub const ParseOptions = struct {
             }
 
             /// Parses selector at runtime and returns first match.
-            pub fn queryOneRuntime(self: *const DocSelf, selector: []const u8) runtime_selector.Error!?NodeTypeWrapper {
-                return self.queryOneRuntimeFrom(selector, InvalidIndex);
+            pub fn queryOneRuntime(self: *const DocSelf, allocator: std.mem.Allocator, selector: []const u8) runtime_selector.Error!?NodeTypeWrapper {
+                return self.queryOneRuntimeFrom(allocator, selector, InvalidIndex);
             }
 
             /// Runtime debug query returning first match, diagnostics report, and parse error if any.
-            pub fn queryOneRuntimeDebug(self: *const DocSelf, selector: []const u8) DebugQueryResultType {
-                return self.queryOneRuntimeDebugFrom(selector, InvalidIndex);
+            pub fn queryOneRuntimeDebug(self: *const DocSelf, allocator: std.mem.Allocator, selector: []const u8) DebugQueryResultType {
+                return self.queryOneRuntimeDebugFrom(allocator, selector, InvalidIndex);
             }
 
-            fn queryOneRuntimeFrom(self: *const DocSelf, selector: []const u8, scope_root: IndexInt) runtime_selector.Error!?NodeTypeWrapper {
-                const mut_self: *DocSelf = @constCast(self);
-                const arena = mut_self.ensureQueryOneArena();
-                _ = arena.reset(.retain_capacity);
+            fn queryOneRuntimeFrom(
+                self: *const DocSelf,
+                allocator: std.mem.Allocator,
+                selector: []const u8,
+                scope_root: IndexInt,
+            ) runtime_selector.Error!?NodeTypeWrapper {
+                var arena = std.heap.ArenaAllocator.init(allocator);
+                defer arena.deinit();
                 const sel = try ast.Selector.compileRuntime(arena.allocator(), selector);
                 return self.queryOneCachedFrom(sel, scope_root);
             }
 
-            fn queryOneRuntimeDebugFrom(self: *const DocSelf, selector: []const u8, scope_root: IndexInt) DebugQueryResultType {
-                const mut_self: *DocSelf = @constCast(self);
+            fn queryOneRuntimeDebugFrom(
+                self: *const DocSelf,
+                allocator: std.mem.Allocator,
+                selector: []const u8,
+                scope_root: IndexInt,
+            ) DebugQueryResultType {
                 var report: selector_debug.QueryDebugReport = .{};
                 report.reset(selector, scope_root, 0);
-                const arena = mut_self.ensureQueryOneArena();
-                _ = arena.reset(.retain_capacity);
+                var arena = std.heap.ArenaAllocator.init(allocator);
+                defer arena.deinit();
                 const sel = ast.Selector.compileRuntime(arena.allocator(), selector) catch |err| {
                     report.setRuntimeParseError();
                     return .{
@@ -928,7 +921,9 @@ pub const ParseOptions = struct {
                 const mut_self: *DocSelf = @constCast(self);
                 mut_self.ensureQueryPrereqs(sel);
                 var report: selector_debug.QueryDebugReport = .{};
-                const idx = matcher_debug.explainFirstMatch(DocSelf, self, sel, scope_root, &report) orelse {
+                var scratch = std.heap.ArenaAllocator.init(self.allocator);
+                defer scratch.deinit();
+                const idx = matcher_debug.explainFirstMatch(DocSelf, self, scratch.allocator(), sel, scope_root, &report) orelse {
                     return .{ .report = report };
                 };
                 return .{
@@ -951,23 +946,20 @@ pub const ParseOptions = struct {
             }
 
             /// Parses selector at runtime and returns lazy iterator.
-            pub fn queryAllRuntime(self: *const DocSelf, selector: []const u8) runtime_selector.Error!QueryIterType {
-                return self.queryAllRuntimeFrom(selector, InvalidIndex);
+            pub fn queryAllRuntime(self: *const DocSelf, allocator: std.mem.Allocator, selector: []const u8) runtime_selector.Error!QueryIterType {
+                return self.queryAllRuntimeFrom(allocator, selector, InvalidIndex);
             }
 
-            fn queryAllRuntimeFrom(self: *const DocSelf, selector: []const u8, scope_root: IndexInt) runtime_selector.Error!QueryIterType {
+            fn queryAllRuntimeFrom(
+                self: *const DocSelf,
+                allocator: std.mem.Allocator,
+                selector: []const u8,
+                scope_root: IndexInt,
+            ) runtime_selector.Error!QueryIterType {
                 const mut_self: *DocSelf = @constCast(self);
-                // Runtime query-all iterators are invalidated when a newer runtime
-                // query-all is created, to avoid holding selector memory that may be
-                // replaced by the next runtime compile in `query_all_arena`.
-                mut_self.query_all_generation +%= 1;
-                if (mut_self.query_all_generation == 0) mut_self.query_all_generation = 1;
-
-                const arena = mut_self.ensureQueryAllArena();
-                _ = arena.reset(.retain_capacity);
-                const sel = try ast.Selector.compileRuntime(arena.allocator(), selector);
+                const sel = try ast.Selector.compileRuntime(allocator, selector);
                 mut_self.ensureQueryPrereqs(sel);
-                var out = if (scope_root == InvalidIndex)
+                return if (scope_root == InvalidIndex)
                     self.queryAllCached(sel)
                 else
                     QueryIterType{
@@ -976,8 +968,6 @@ pub const ParseOptions = struct {
                         .scope_root = scope_root,
                         .next_index = scope_root + 1,
                     };
-                out.runtime_generation = mut_self.query_all_generation;
-                return out;
             }
 
             fn ensureQueryPrereqs(noalias self: *DocSelf, selector: ast.Selector) void {
@@ -1056,27 +1046,6 @@ pub const ParseOptions = struct {
             /// Default formatter uses HTML serialization for this node.
             pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
                 return self.writeHtml(writer);
-            }
-
-            fn ensureQueryOneArena(noalias self: *DocSelf) *std.heap.ArenaAllocator {
-                if (self.query_one_arena == null) {
-                    self.query_one_arena = std.heap.ArenaAllocator.init(self.allocator);
-                }
-                return &self.query_one_arena.?;
-            }
-
-            fn ensureQueryAllArena(noalias self: *DocSelf) *std.heap.ArenaAllocator {
-                if (self.query_all_arena == null) {
-                    self.query_all_arena = std.heap.ArenaAllocator.init(self.allocator);
-                }
-                return &self.query_all_arena.?;
-            }
-
-            pub fn ensureDecodedValueArena(noalias self: *DocSelf) *std.heap.ArenaAllocator {
-                if (self.decoded_value_arena == null) {
-                    self.decoded_value_arena = std.heap.ArenaAllocator.init(self.allocator);
-                }
-                return &self.decoded_value_arena.?;
             }
 
             /// Returns first direct element-like child index for `parent_idx`, if any.
@@ -1223,10 +1192,12 @@ fn expectDocQueryComptime(doc: *const Document, comptime selector: []const u8, e
 }
 
 fn expectDocQueryRuntime(doc: *const Document, selector: []const u8, expected_ids: []const []const u8) !void {
-    const it = try doc.queryAllRuntime(selector);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const it = try doc.queryAllRuntime(arena.allocator(), selector);
     try expectIterIds(it, expected_ids);
 
-    const first = try doc.queryOneRuntime(selector);
+    const first = try doc.queryOneRuntime(arena.allocator(), selector);
     if (expected_ids.len == 0) {
         try std.testing.expect(first == null);
     } else {
@@ -1251,10 +1222,12 @@ fn expectNodeQueryComptime(scope: Node, comptime selector: []const u8, expected_
 }
 
 fn expectNodeQueryRuntime(scope: Node, selector: []const u8, expected_ids: []const []const u8) !void {
-    const it = try scope.queryAllRuntime(selector);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const it = try scope.queryAllRuntime(arena.allocator(), selector);
     try expectIterIds(it, expected_ids);
 
-    const first = try scope.queryOneRuntime(selector);
+    const first = try scope.queryOneRuntime(arena.allocator(), selector);
     if (expected_ids.len == 0) {
         try std.testing.expect(first == null);
     } else {
@@ -1314,7 +1287,7 @@ test "non-destructive parse preserves caller bytes and formats exact original so
     try doc.parse(&html);
 
     const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
-    const attr_value = node.getAttributeValue("data-v") orelse return error.TestUnexpectedResult;
+    const attr_value = node.getAttributeValueAlloc(arena.allocator(), "data-v") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a&b", attr_value);
 
     const text = try node.innerText(arena.allocator());
@@ -1335,9 +1308,11 @@ test "non-destructive attribute reads do not rewrite attribute bytes" {
     var html = "<div id='x' data-v='a&amp;b' data-q='1>2'></div>".*;
     const before = html;
     try doc.parse(&html);
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
 
     const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
-    const value = node.getAttributeValue("data-v") orelse return error.TestUnexpectedResult;
+    const value = node.getAttributeValueAlloc(arena.allocator(), "data-v") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a&b", value);
 
     const attr_start: usize = @intCast(node.raw().name_or_text.end);
@@ -1391,17 +1366,19 @@ test "runtime queryAll iterator is stable across queryOneRuntime calls" {
     var html = "<div><span class='x'></span><span class='x'></span></div>".*;
     try doc.parse(&html);
 
-    var it = try doc.queryAllRuntime("span.x");
+    var runtime_arena = std.heap.ArenaAllocator.init(alloc);
+    defer runtime_arena.deinit();
+    var it = try doc.queryAllRuntime(runtime_arena.allocator(), "span.x");
 
     // This uses a different arena and must not invalidate `it`.
-    _ = try doc.queryOneRuntime("div");
+    _ = try doc.queryOneRuntime(alloc, "div");
 
     try std.testing.expect(it.next() != null);
     try std.testing.expect(it.next() != null);
     try std.testing.expect(it.next() == null);
 }
 
-test "runtime queryAll iterator is invalidated by a newer runtime queryAll call" {
+test "runtime queryAll iterators compiled from runtime selectors remain independent" {
     const alloc = std.testing.allocator;
     var doc = Document.init(alloc);
     defer doc.deinit();
@@ -1409,9 +1386,12 @@ test "runtime queryAll iterator is invalidated by a newer runtime queryAll call"
     var html = "<div><span class='x'></span><span class='y'></span></div>".*;
     try doc.parse(&html);
 
-    var old_it = try doc.queryAllRuntime("span.x");
-    var new_it = try doc.queryAllRuntime("span.y");
+    var runtime_arena = std.heap.ArenaAllocator.init(alloc);
+    defer runtime_arena.deinit();
+    var old_it = try doc.queryAllRuntime(runtime_arena.allocator(), "span.x");
+    var new_it = try doc.queryAllRuntime(runtime_arena.allocator(), "span.y");
 
+    try std.testing.expect(old_it.next() != null);
     try std.testing.expect(old_it.next() == null);
     try std.testing.expect(new_it.next() != null);
     try std.testing.expect(new_it.next() == null);
@@ -1425,7 +1405,9 @@ test "runtime queryAll iterator is invalidated by clear and reparsing" {
     var html_a = "<div><span class='x'></span></div>".*;
     try doc.parse(&html_a);
 
-    var old_it = try doc.queryAllRuntime("span.x");
+    var runtime_arena = std.heap.ArenaAllocator.init(alloc);
+    defer runtime_arena.deinit();
+    var old_it = try doc.queryAllRuntime(runtime_arena.allocator(), "span.x");
     doc.clear();
     try std.testing.expect(old_it.next() == null);
     try std.testing.expect(doc.queryOne("span.x") == null);
@@ -1434,7 +1416,7 @@ test "runtime queryAll iterator is invalidated by clear and reparsing" {
     try doc.parse(&html_b);
     try std.testing.expect(old_it.next() == null);
 
-    var new_it = try doc.queryAllRuntime("span.y");
+    var new_it = try doc.queryAllRuntime(runtime_arena.allocator(), "span.y");
     try std.testing.expect(new_it.next() != null);
     try std.testing.expect(new_it.next() == null);
 }
@@ -1716,7 +1698,7 @@ test "inplace attr lazy parse updates state markers and supports selector-trigge
     var html = "<div id='x' q='&amp;z' n=a&amp;b></div>".*;
     try doc.parse(&html);
 
-    const by_selector = try doc.queryOneRuntime("div[q='&z'][n='a&b']");
+    const by_selector = try doc.queryOneRuntime(alloc, "div[q='&z'][n='a&b']");
     try std.testing.expect(by_selector != null);
 
     const node = by_selector orelse return error.TestUnexpectedResult;
@@ -1750,7 +1732,7 @@ test "attribute matching short-circuits and does not parse later attrs on early 
     defer arena.deinit();
     const sel = try ast.Selector.compileRuntime(arena.allocator(), "div[href^=https][class*=button]");
     try std.testing.expect(doc.queryOneCached(sel) == null);
-    try std.testing.expect((try doc.queryOneRuntime("div[href^=https][class*=button]")) == null);
+    try std.testing.expect((try doc.queryOneRuntime(alloc, "div[href^=https][class*=button]")) == null);
 
     const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
     const attr_start: usize = node.raw().name_or_text.end;
@@ -1839,17 +1821,17 @@ test "runtime query parsing remains correct across parse and clear" {
     var html_a = "<div class='x'></div>".*;
     try doc.parse(&html_a);
 
-    try std.testing.expect((try doc.queryOneRuntime("div.x")) != null);
-    try std.testing.expect((try doc.queryOneRuntime("div.x")) != null);
+    try std.testing.expect((try doc.queryOneRuntime(alloc, "div.x")) != null);
+    try std.testing.expect((try doc.queryOneRuntime(alloc, "div.x")) != null);
 
     var html_b = "<section class='x'></section>".*;
     try doc.parse(&html_b);
-    try std.testing.expect((try doc.queryOneRuntime("div.x")) == null);
+    try std.testing.expect((try doc.queryOneRuntime(alloc, "div.x")) == null);
 
     doc.clear();
     var html_c = "<div class='x'></div>".*;
     try doc.parse(&html_c);
-    try std.testing.expect((try doc.queryOneRuntime("div.x")) != null);
+    try std.testing.expect((try doc.queryOneRuntime(alloc, "div.x")) != null);
 }
 
 test "attr fast-path names are equivalent to generic lookup semantics" {
@@ -1878,7 +1860,7 @@ test "mixed-case tags and attrs are queryable via lowercase selectors" {
     try doc.parse(&html);
 
     try std.testing.expect(doc.queryOne("div#x[data-k=v]") != null);
-    try std.testing.expect((try doc.queryOneRuntime("div > span#y")) != null);
+    try std.testing.expect((try doc.queryOneRuntime(alloc, "div > span#y")) != null);
 
     const div = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("A b", div.getAttributeValue("class").?);
@@ -1910,8 +1892,8 @@ test "class token matching treats all ascii whitespace as separators" {
     try std.testing.expect(doc.queryOne("#t.c") != null);
     try std.testing.expect(doc.queryOne("#t.d") != null);
     try std.testing.expect(doc.queryOne("#t.e") != null);
-    try std.testing.expect((try doc.queryOneRuntime("#t[class~=d]")) != null);
-    try std.testing.expect((try doc.queryOneRuntime("#t[class~=e]")) != null);
+    try std.testing.expect((try doc.queryOneRuntime(alloc, "#t[class~=d]")) != null);
+    try std.testing.expect((try doc.queryOneRuntime(alloc, "#t[class~=e]")) != null);
 }
 
 test "scoped query with duplicate ids respects scope and extra predicates" {
@@ -1924,7 +1906,7 @@ test "scoped query with duplicate ids respects scope and extra predicates" {
 
     const scope = doc.queryOne("#scope") orelse return error.TestUnexpectedResult;
     const found_ct = scope.queryOne("#dup.y") orelse return error.TestUnexpectedResult;
-    const found_rt = (try scope.queryOneRuntime("#dup.y")) orelse return error.TestUnexpectedResult;
+    const found_rt = (try scope.queryOneRuntime(alloc, "#dup.y")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(found_ct.index, found_rt.index);
     const parent = found_ct.parentNode() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("scope", parent.getAttributeValue("id").?);
@@ -1937,52 +1919,56 @@ test "runtime selector rejects multiple ids in one compound" {
     var html = "<div id='a'></div>".*;
     try doc.parse(&html);
 
-    try std.testing.expectError(error.InvalidSelector, doc.queryOneRuntime("#a#a"));
+    try std.testing.expectError(error.InvalidSelector, doc.queryOneRuntime(alloc, "#a#a"));
 }
 
 test "runtime selector supports nth-child shorthand variants" {
     const alloc = std.testing.allocator;
     var doc = Document.init(alloc);
     defer doc.deinit();
+    var runtime_arena = std.heap.ArenaAllocator.init(alloc);
+    defer runtime_arena.deinit();
 
     var html = "<div id='pseudos'><div></div><div></div><div></div><div></div><a></a><div></div><div></div></div>".*;
     try doc.parse(&html);
 
     const comptime_one = doc.queryOne("#pseudos :nth-child(odd)");
-    const runtime_one = try doc.queryOneRuntime("#pseudos :nth-child(odd)");
+    const runtime_one = try doc.queryOneRuntime(alloc, "#pseudos :nth-child(odd)");
     try std.testing.expect((comptime_one == null) == (runtime_one == null));
     if (comptime_one) |a| {
         try std.testing.expectEqual(a.index, runtime_one.?.index);
     }
 
     var c_odd: usize = 0;
-    var it_odd = try doc.queryAllRuntime("#pseudos :nth-child(odd)");
+    var it_odd = try doc.queryAllRuntime(runtime_arena.allocator(), "#pseudos :nth-child(odd)");
     while (it_odd.next()) |_| c_odd += 1;
     try std.testing.expectEqual(@as(usize, 4), c_odd);
 
     var c_plus: usize = 0;
-    var it_plus = try doc.queryAllRuntime("#pseudos :nth-child(3n+1)");
+    var it_plus = try doc.queryAllRuntime(runtime_arena.allocator(), "#pseudos :nth-child(3n+1)");
     while (it_plus.next()) |_| c_plus += 1;
     try std.testing.expectEqual(@as(usize, 3), c_plus);
 
     var c_signed: usize = 0;
-    var it_signed = try doc.queryAllRuntime("#pseudos :nth-child(+3n-2)");
+    var it_signed = try doc.queryAllRuntime(runtime_arena.allocator(), "#pseudos :nth-child(+3n-2)");
     while (it_signed.next()) |_| c_signed += 1;
     try std.testing.expectEqual(@as(usize, 3), c_signed);
 
     var c_neg_a: usize = 0;
-    var it_neg_a = try doc.queryAllRuntime("#pseudos :nth-child(-n+6)");
+    var it_neg_a = try doc.queryAllRuntime(runtime_arena.allocator(), "#pseudos :nth-child(-n+6)");
     while (it_neg_a.next()) |_| c_neg_a += 1;
     try std.testing.expectEqual(@as(usize, 6), c_neg_a);
 
     var c_neg_b: usize = 0;
-    var it_neg_b = try doc.queryAllRuntime("#pseudos :nth-child(-n+5)");
+    var it_neg_b = try doc.queryAllRuntime(runtime_arena.allocator(), "#pseudos :nth-child(-n+5)");
     while (it_neg_b.next()) |_| c_neg_b += 1;
     try std.testing.expectEqual(@as(usize, 5), c_neg_b);
 }
 
 test "leading child combinator works in node-scoped queries" {
     const alloc = std.testing.allocator;
+    var runtime_arena = std.heap.ArenaAllocator.init(alloc);
+    defer runtime_arena.deinit();
 
     var frag_doc = Document.init(alloc);
     defer frag_doc.deinit();
@@ -1991,12 +1977,12 @@ test "leading child combinator works in node-scoped queries" {
     try frag_doc.parse(&frag_html);
     const frag_root = frag_doc.queryOne("root") orelse return error.TestUnexpectedResult;
 
-    var it_em = try frag_root.queryAllRuntime("> div p em");
+    var it_em = try frag_root.queryAllRuntime(runtime_arena.allocator(), "> div p em");
     var em_count: usize = 0;
     while (it_em.next()) |_| em_count += 1;
     try std.testing.expectEqual(@as(usize, 2), em_count);
 
-    var it_oooo = try frag_root.queryAllRuntime("> div #oooo");
+    var it_oooo = try frag_root.queryAllRuntime(runtime_arena.allocator(), "> div #oooo");
     var oooo_count: usize = 0;
     while (it_oooo.next()) |_| oooo_count += 1;
     try std.testing.expectEqual(@as(usize, 1), oooo_count);
@@ -2008,7 +1994,7 @@ test "leading child combinator works in node-scoped queries" {
     try doc_ctx.parse(&doc_html);
     const ctx_root = doc_ctx.queryOne("root") orelse return error.TestUnexpectedResult;
 
-    var it_hsoob = try ctx_root.queryAllRuntime("> #hsoob");
+    var it_hsoob = try ctx_root.queryAllRuntime(runtime_arena.allocator(), "> #hsoob");
     var hsoob_count: usize = 0;
     while (it_hsoob.next()) |_| hsoob_count += 1;
     try std.testing.expectEqual(@as(usize, 1), hsoob_count);
@@ -2043,8 +2029,8 @@ test "parse option bundles preserve selector/query behavior for representative i
     };
 
     for (selectors) |sel| {
-        const a = try strict_doc.queryOneRuntime(sel);
-        const b = try fast_doc.queryOneRuntime(sel);
+        const a = try strict_doc.queryOneRuntime(alloc, sel);
+        const b = try fast_doc.queryOneRuntime(alloc, sel);
         try std.testing.expect((a == null) == (b == null));
     }
 
@@ -2179,7 +2165,7 @@ test "runtime attr-heavy selector stress uses in-node parents" {
     const compiled = try ast.Selector.compileRuntime(arena.allocator(), selector);
     var loops: usize = 0;
     while (loops < 256) : (loops += 1) {
-        const a = try doc.queryOneRuntime(selector);
+        const a = try doc.queryOneRuntime(alloc, selector);
         const b = doc.queryOneCached(compiled);
         try std.testing.expect((a == null) == (b == null));
     }
@@ -2210,7 +2196,7 @@ test "bench fixture attr-heavy runtime and cached query smoke" {
 
         var loops: usize = 0;
         while (loops < 32) : (loops += 1) {
-            const a = try doc.queryOneRuntime(selector);
+            const a = try doc.queryOneRuntime(alloc, selector);
             const b = doc.queryOneCached(compiled);
             try std.testing.expect((a == null) == (b == null));
         }
@@ -2227,7 +2213,7 @@ test "bench fixture attr-heavy runtime and cached query smoke" {
 
         var loops: usize = 0;
         while (loops < 32) : (loops += 1) {
-            const a = try doc.queryOneRuntime(selector);
+            const a = try doc.queryOneRuntime(alloc, selector);
             const b = doc.queryOneCached(compiled);
             try std.testing.expect((a == null) == (b == null));
         }
@@ -2243,7 +2229,7 @@ test "queryOneRuntimeDebug reports runtime selector parse errors" {
     var html = "<div id='x'></div>".*;
     try doc.parse(&html);
 
-    const result = doc.queryOneRuntimeDebug("div[");
+    const result = doc.queryOneRuntimeDebug(alloc, "div[");
     try std.testing.expectEqual(@as(?runtime_selector.Error, error.InvalidSelector), result.err);
     try std.testing.expect(result.report.runtime_parse_error);
     try std.testing.expectEqualStrings("div[", result.report.selector_source);
@@ -2279,7 +2265,7 @@ test "node-scoped runtime debug query reports scope/combinator failures" {
     try doc.parse(&html);
 
     const root = doc.queryOne("root") orelse return error.TestUnexpectedResult;
-    const found = root.queryOneRuntimeDebug("> span#inside");
+    const found = root.queryOneRuntimeDebug(alloc, "> span#inside");
     try std.testing.expect(found.err == null);
     try std.testing.expect(found.node == null);
     try std.testing.expect(found.report.scope_root == root.index);
@@ -2347,7 +2333,7 @@ test "instrumentation wrappers invoke compile-time hooks and preserve results" {
     try std.testing.expectEqual(html.len, hooks.last_input_len);
     try std.testing.expect(hooks.last_parse_stats.node_count >= 2);
 
-    const runtime_one = try instrumentation.queryOneRuntimeWithHooks(std.testing.io, &doc, "a#x", &hooks);
+    const runtime_one = try instrumentation.queryOneRuntimeWithHooks(std.testing.io, &doc, alloc, "a#x", &hooks);
     try std.testing.expect(runtime_one != null);
     try std.testing.expectEqual(instrumentation.QueryInstrumentationKind.one_runtime, hooks.last_query_kind);
     try std.testing.expectEqual(@as(?bool, true), hooks.last_query_stats.matched);
@@ -2361,7 +2347,7 @@ test "instrumentation wrappers invoke compile-time hooks and preserve results" {
     try std.testing.expectEqual(instrumentation.QueryInstrumentationKind.one_cached, hooks.last_query_kind);
     try std.testing.expectEqual(@as(?bool, true), hooks.last_query_stats.matched);
 
-    _ = try instrumentation.queryAllRuntimeWithHooks(std.testing.io, &doc, "a", &hooks);
+    _ = try instrumentation.queryAllRuntimeWithHooks(std.testing.io, &doc, arena.allocator(), "a", &hooks);
     try std.testing.expectEqual(instrumentation.QueryInstrumentationKind.all_runtime, hooks.last_query_kind);
     try std.testing.expectEqual(@as(?bool, null), hooks.last_query_stats.matched);
 
@@ -2399,7 +2385,7 @@ test "format document types" {
     const qit = div.queryAll("span");
     const qit_out = try std.fmt.allocPrint(alloc, "{f}", .{qit});
     defer alloc.free(qit_out);
-    try std.testing.expectEqualStrings("QueryIter{scope_root=1, next_index=2, runtime_generation=0}", qit_out);
+    try std.testing.expectEqualStrings("QueryIter{scope_root=1, next_index=2}", qit_out);
 
     const cit = div.children();
     const cit_out = try std.fmt.allocPrint(alloc, "{f}", .{cit});

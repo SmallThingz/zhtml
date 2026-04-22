@@ -15,6 +15,7 @@ const IndexInt = common.IndexInt;
 pub fn explainFirstMatch(
     comptime Doc: type,
     noalias doc: *const Doc,
+    allocator: std.mem.Allocator,
     selector: ast.Selector,
     scope_root: IndexInt,
     noalias report: *selector_debug.QueryDebugReport,
@@ -50,7 +51,7 @@ pub fn explainFirstMatch(
             }
 
             if (first_failure.isNone()) {
-                first_failure = classifyGroupFailure(doc, selector, group, i, scope_root, g_idx);
+                first_failure = classifyGroupFailure(doc, allocator, selector, group, i, scope_root, g_idx);
             }
         }
 
@@ -64,6 +65,7 @@ pub fn explainFirstMatch(
 
 fn classifyGroupFailure(
     doc: anytype,
+    allocator: std.mem.Allocator,
     selector: ast.Selector,
     group: ast.Group,
     node_index: IndexInt,
@@ -73,7 +75,7 @@ fn classifyGroupFailure(
     const rightmost = group.compound_len - 1;
     const comp_abs: usize = @intCast(group.compound_start + rightmost);
     const comp = selector.compounds[comp_abs];
-    var reason = classifyCompoundFailure(doc, selector, comp, node_index, group_index, comp_abs);
+    var reason = classifyCompoundFailure(doc, allocator, selector, comp, node_index, group_index, comp_abs);
     if (!reason.isNone()) return reason;
 
     if (group.compound_len == 1 and comp.combinator != .none and !common.matchesScopeAnchor(doc, comp.combinator, node_index, scope_root)) {
@@ -97,6 +99,7 @@ fn classifyGroupFailure(
 
 fn classifyCompoundFailure(
     doc: anytype,
+    allocator: std.mem.Allocator,
     selector: ast.Selector,
     comp: ast.Compound,
     node_index: IndexInt,
@@ -118,7 +121,7 @@ fn classifyCompoundFailure(
 
     if (comp.hasId()) {
         const id = comp.id.slice(selector.source);
-        const value = attr.getAttrValue(doc, node, "id") orelse return .{
+        const value = attr.getAttrValue(doc, node, "id", allocator) orelse return .{
             .kind = .id,
             .group_index = g,
             .compound_index = c,
@@ -131,7 +134,7 @@ fn classifyCompoundFailure(
     }
 
     if (comp.class_len != 0) {
-        const class_attr = attr.getAttrValue(doc, node, "class") orelse return .{
+        const class_attr = attr.getAttrValue(doc, node, "class", allocator) orelse return .{
             .kind = .class,
             .group_index = g,
             .compound_index = c,
@@ -150,7 +153,7 @@ fn classifyCompoundFailure(
     var attr_i: IndexInt = 0;
     while (attr_i < comp.attr_len) : (attr_i += 1) {
         const attr_sel = selector.attrs[comp.attr_start + attr_i];
-        if (!matcher.matchesAttrSelectorDebug(doc, node, selector.source, attr_sel)) {
+        if (!matcher.matchesAttrSelectorDebug(doc, node, allocator, selector.source, attr_sel)) {
             return .{ .kind = .attr, .group_index = g, .compound_index = c, .predicate_index = predicate_index };
         }
         predicate_index += 1;
@@ -168,7 +171,7 @@ fn classifyCompoundFailure(
     var not_i: IndexInt = 0;
     while (not_i < comp.not_len) : (not_i += 1) {
         const item = selector.not_items[comp.not_start + not_i];
-        if (matchesNotSimple(doc, node, selector.source, item)) {
+        if (matchesNotSimple(doc, node, allocator, selector.source, item)) {
             return .{ .kind = .not_simple, .group_index = g, .compound_index = c, .predicate_index = predicate_index };
         }
         predicate_index += 1;
@@ -180,6 +183,7 @@ fn classifyCompoundFailure(
 fn matchesNotSimple(
     doc: anytype,
     node: anytype,
+    allocator: std.mem.Allocator,
     selector_source: []const u8,
     item: ast.NotSimple,
 ) bool {
@@ -187,6 +191,7 @@ fn matchesNotSimple(
     const ctx = Ctx{
         .doc = doc,
         .node = node,
+        .allocator = allocator,
         .selector_source = selector_source,
     };
     return matcher.matchesNotSimpleCommon(ctx, item);
