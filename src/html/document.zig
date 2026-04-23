@@ -36,9 +36,9 @@ pub const ParseOptions = struct {
         return if (options.non_destructive) []const u8 else []u8;
     }
 
-    /// Returns the parser type bound to this option set.
-    pub fn Parser(options: @This()) type {
-        return parser.Parser(options);
+    /// Parses `input` and returns a fully-owned document for this option set.
+    pub fn parse(comptime options: @This(), allocator: std.mem.Allocator, input: options.GetInput()) !options.GetDocument() {
+        return parser.parse(options, allocator, input);
     }
 
     /// Formats parse options for human-readable output.
@@ -840,7 +840,7 @@ pub const ParseOptions = struct {
             /// Non-destructive documents accept `[]const u8` and keep lazy decode out of `source`.
             pub fn parse(noalias self: *DocSelf, input: options.GetInput()) !void {
                 self.clear();
-                self.* = try options.Parser().parse(self.allocator, input);
+                self.* = try options.parse(self.allocator, input);
             }
 
             fn emptySource() options.GetInput() {

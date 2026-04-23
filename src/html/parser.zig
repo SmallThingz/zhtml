@@ -15,34 +15,28 @@ const MaxInitialNodeReserve: usize = 1 << 20;
 // In destructive mode tag names are normalized in-place. In non-destructive mode
 // parsing is read-only and any lazy decode work happens outside this file.
 
-/// Parser constructor for the provided parse options.
-pub fn Parser(comptime opts: ParseOptions) type {
-    return struct {
-        const Doc = opts.GetDocument();
+/// Parses `input` and returns a fully owned document for `opts`.
+pub fn parse(comptime opts: ParseOptions, allocator: std.mem.Allocator, input: opts.GetInput()) !opts.GetDocument() {
+    if (!common.lenFits(input.len)) return error.InputTooLarge;
 
-        /// Parses `input` and returns a fully owned document.
-        pub fn parse(allocator: std.mem.Allocator, input: opts.GetInput()) !Doc {
-            if (!common.lenFits(input.len)) return error.InputTooLarge;
+    const Doc = opts.GetDocument();
+    var doc = Doc.init(allocator);
+    errdefer doc.deinit();
+    doc.source = input;
 
-            var doc = Doc.init(allocator);
-            errdefer doc.deinit();
-            doc.source = input;
+    var node_buf: std.ArrayListUnmanaged(opts.GetNodeRaw()) = .empty;
+    errdefer node_buf.deinit(allocator);
 
-            var node_buf: std.ArrayListUnmanaged(opts.GetNodeRaw()) = .empty;
-            errdefer node_buf.deinit(allocator);
-
-            var state = ParseState(opts){
-                .doc = &doc,
-                .input = input,
-                .i = 0,
-                .nodes = &node_buf,
-            };
-            try state.parse();
-
-            doc.nodes.items = try node_buf.toOwnedSlice(allocator);
-            return doc;
-        }
+    var state = ParseState(opts){
+        .doc = &doc,
+        .input = input,
+        .i = 0,
+        .nodes = &node_buf,
     };
+    try state.parse();
+
+    doc.nodes.items = try node_buf.toOwnedSlice(allocator);
+    return doc;
 }
 
 fn ParseState(comptime opts: ParseOptions) type {
@@ -86,8 +80,10 @@ fn ParseState(comptime opts: ParseOptions) type {
             while (self.i < self.input.len) {
                 if (self.input[self.i] != '<') {
                     if (comptime drop_ws_text) {
+                        comptime std.debug.assert(opts.drop_whitespace_text_nodes);
                         try self.parseTextDropWhitespace();
                     } else {
+                        comptime std.debug.assert(!opts.drop_whitespace_text_nodes);
                         try self.parseTextKeepWhitespace();
                     }
                     continue;
@@ -145,6 +141,7 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         inline fn parseTextKeepWhitespace(noalias self: *Self) !void {
+            comptime std.debug.assert(!opts.drop_whitespace_text_nodes);
             const start = self.i;
             self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '<') orelse self.input.len;
             if (self.i == start) return;
@@ -157,6 +154,7 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         inline fn parseTextDropWhitespace(noalias self: *Self) !void {
+            comptime std.debug.assert(opts.drop_whitespace_text_nodes);
             const start = self.i;
             const scanned = scanner.scanTextRun(self.input, self.i);
             self.i = scanned.lt_index;
