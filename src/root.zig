@@ -39,11 +39,7 @@ pub const queryAllCachedWithHooks = instrumentation.queryAllCachedWithHooks;
 /// Parses `input` into a freshly initialized document and returns it.
 /// The returned document borrows `input`, so `input` must outlive the document.
 pub fn parse(comptime options: ParseOptions, allocator: std.mem.Allocator, input: options.GetInput()) !options.GetDocument() {
-    const Document = options.GetDocument();
-    var doc = Document.init(allocator);
-    errdefer doc.deinit();
-    try doc.parse(input);
-    return doc;
+    return options.Parser().parse(allocator, input);
 }
 
 test "smoke parse/query" {

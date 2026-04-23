@@ -28,12 +28,12 @@ pub const TextRun = struct {
 
 /// Scans from `start` to the next `<`, tracking whether the run contains any non-whitespace bytes.
 pub fn scanTextRun(hay: []const u8, start: usize) TextRun {
-    // TODO: Make this faster in the case where we don't discard whitespace only nodes 
+    // TODO: Make this faster in the case where we don't discard whitespace only nodes
     if (start >= hay.len) return .{ .lt_index = hay.len, .has_non_whitespace = false };
 
     var i = start;
     while (i < hay.len and tables.WhitespaceTable[hay[i]]) : (i += 1) {}
-    if (i >= hay.len) return .{ .lt_index = hay.len, .has_non_whitespace = false };
+    if (i == hay.len) return .{ .lt_index = hay.len, .has_non_whitespace = false };
     if (hay[i] == '<') return .{ .lt_index = i, .has_non_whitespace = false };
 
     return .{

@@ -15,24 +15,37 @@ const MaxInitialNodeReserve: usize = 1 << 20;
 // In destructive mode tag names are normalized in-place. In non-destructive mode
 // parsing is read-only and any lazy decode work happens outside this file.
 
-/// Parses HTML bytes into the document type derived from `opts`.
-pub fn parseInto(comptime opts: ParseOptions, noalias doc: *opts.GetDocument(), input: opts.GetInput()) !void {
-    if (!common.lenFits(input.len)) return error.InputTooLarge;
-    var node_buf: std.ArrayListUnmanaged(opts.GetNodeRaw()) = .empty;
-    errdefer node_buf.deinit(doc.allocator);
+/// Parser constructor for the provided parse options.
+pub fn Parser(comptime opts: ParseOptions) type {
+    return struct {
+        const Doc = opts.GetDocument();
 
-    var p = Parser(opts){
-        .doc = doc,
-        .input = input,
-        .i = 0,
-        .nodes = &node_buf,
+        /// Parses `input` and returns a fully owned document.
+        pub fn parse(allocator: std.mem.Allocator, input: opts.GetInput()) !Doc {
+            if (!common.lenFits(input.len)) return error.InputTooLarge;
+
+            var doc = Doc.init(allocator);
+            errdefer doc.deinit();
+            doc.source = input;
+
+            var node_buf: std.ArrayListUnmanaged(opts.GetNodeRaw()) = .empty;
+            errdefer node_buf.deinit(allocator);
+
+            var state = ParseState(opts){
+                .doc = &doc,
+                .input = input,
+                .i = 0,
+                .nodes = &node_buf,
+            };
+            try state.parse();
+
+            doc.nodes.items = try node_buf.toOwnedSlice(allocator);
+            return doc;
+        }
     };
-    try p.parse();
-
-    doc.nodes.items = try node_buf.toOwnedSlice(doc.allocator);
 }
 
-fn Parser(comptime opts: ParseOptions) type {
+fn ParseState(comptime opts: ParseOptions) type {
     return struct {
         /// Document being populated with completed parse output.
         doc: *opts.GetDocument(),
