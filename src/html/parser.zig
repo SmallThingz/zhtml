@@ -18,12 +18,18 @@ const MaxInitialNodeReserve: usize = 1 << 20;
 /// Parses HTML bytes into the document type derived from `opts`.
 pub fn parseInto(comptime opts: ParseOptions, noalias doc: *opts.GetDocument(), input: opts.GetInput()) !void {
     if (!common.lenFits(input.len)) return error.InputTooLarge;
+    var node_buf: std.ArrayListUnmanaged(opts.GetNodeRaw()) = .empty;
+    errdefer node_buf.deinit(doc.allocator);
+
     var p = Parser(opts){
         .doc = doc,
         .input = input,
         .i = 0,
+        .nodes = &node_buf,
     };
     try p.parse();
+
+    doc.nodes.items = try node_buf.toOwnedSlice(doc.allocator);
 }
 
 fn Parser(comptime opts: ParseOptions) type {
@@ -34,6 +40,8 @@ fn Parser(comptime opts: ParseOptions) type {
         input: []const u8,
         /// Current byte cursor inside `input`.
         i: usize,
+        /// Growable node buffer owned by parser during tree construction.
+        nodes: *std.ArrayListUnmanaged(opts.GetNodeRaw()),
         /// Open-element stack used only while building the tree.
         parse_stack: std.ArrayListUnmanaged(OpenElem) = .empty,
 
@@ -97,10 +105,10 @@ fn Parser(comptime opts: ParseOptions) type {
         fn finishOpenElements(noalias self: *Self) void {
             while (self.parse_stack.items.len > 1) {
                 const open = self.parse_stack.pop().?;
-                var node = &self.doc.nodes.items[open.idx];
-                node.subtree_end = @intCast(self.doc.nodes.items.len - 1);
+                var node = &self.nodes.items[open.idx];
+                node.subtree_end = @intCast(self.nodes.items.len - 1);
             }
-            self.doc.nodes.items[0].subtree_end = @intCast(self.doc.nodes.items.len - 1);
+            self.nodes.items[0].subtree_end = @intCast(self.nodes.items.len - 1);
             self.parse_stack.clearRetainingCapacity();
         }
 
@@ -119,7 +127,7 @@ fn Parser(comptime opts: ParseOptions) type {
             // not try to preallocate nodes proportional to total byte length.
             estimated_nodes = @min(estimated_nodes, MaxInitialNodeReserve);
 
-            try self.doc.nodes.ensureTotalCapacity(alloc, estimated_nodes);
+            try self.nodes.ensureTotalCapacity(alloc, estimated_nodes);
             try self.parse_stack.ensureTotalCapacity(alloc, InitialParseStackCapacity);
         }
 
@@ -130,7 +138,7 @@ fn Parser(comptime opts: ParseOptions) type {
 
             const parent_idx = self.currentParent();
             const node_idx = try self.appendTextNode(parent_idx);
-            var node = &self.doc.nodes.items[node_idx];
+            var node = &self.nodes.items[node_idx];
             node.name_or_text = .{ .start = @intCast(start), .end = @intCast(self.i) };
             node.subtree_end = node_idx;
         }
@@ -144,7 +152,7 @@ fn Parser(comptime opts: ParseOptions) type {
 
             const parent_idx = self.currentParent();
             const node_idx = try self.appendTextNode(parent_idx);
-            var node = &self.doc.nodes.items[node_idx];
+            var node = &self.nodes.items[node_idx];
             node.name_or_text = .{ .start = @intCast(start), .end = @intCast(self.i) };
             node.subtree_end = node_idx;
         }
@@ -216,7 +224,7 @@ fn Parser(comptime opts: ParseOptions) type {
                 const svg_self_close = scanner.isExplicitSelfClosingTag(self.input, attr_bytes_start, tag_gt_index);
                 const parent_idx = self.currentParent();
                 const node_idx = try self.appendElementNode(parent_idx);
-                var node = &self.doc.nodes.items[node_idx];
+                var node = &self.nodes.items[node_idx];
                 node.name_or_text = .{ .start = @intCast(name_start), .end = @intCast(name_end) };
                 node.attr_end = @intCast(attr_bytes_end);
                 if (svg_self_close) {
@@ -231,24 +239,24 @@ fn Parser(comptime opts: ParseOptions) type {
 
                     if (content_end > content_start) {
                         const text_idx = try self.appendTextNode(node_idx);
-                        var text_node = &self.doc.nodes.items[text_idx];
+                        var text_node = &self.nodes.items[text_idx];
                         text_node.name_or_text = .{ .start = @intCast(content_start), .end = @intCast(content_end - 1) };
                         text_node.subtree_end = text_idx;
                     }
 
-                    node = &self.doc.nodes.items[node_idx];
-                    node.subtree_end = @intCast(self.doc.nodes.items.len - 1);
+                    node = &self.nodes.items[node_idx];
+                    node.subtree_end = @intCast(self.nodes.items.len - 1);
                     self.i = close_end;
                     return;
                 } else {
                     if (self.input.len > content_start) {
                         const text_idx = try self.appendTextNode(node_idx);
-                        var text_node = &self.doc.nodes.items[text_idx];
+                        var text_node = &self.nodes.items[text_idx];
                         text_node.name_or_text = .{ .start = @intCast(content_start), .end = @intCast(self.input.len) };
                         text_node.subtree_end = text_idx;
                     }
-                    node = &self.doc.nodes.items[node_idx];
-                    node.subtree_end = @intCast(self.doc.nodes.items.len - 1);
+                    node = &self.nodes.items[node_idx];
+                    node.subtree_end = @intCast(self.nodes.items.len - 1);
                     self.i = self.input.len;
                     return;
                 }
@@ -256,7 +264,7 @@ fn Parser(comptime opts: ParseOptions) type {
 
             const parent_idx = self.currentParent();
             const node_idx = try self.appendElementNode(parent_idx);
-            var node = &self.doc.nodes.items[node_idx];
+            var node = &self.nodes.items[node_idx];
             node.name_or_text = .{ .start = @intCast(name_start), .end = @intCast(name_end) };
             node.attr_end = @intCast(attr_bytes_end);
 
@@ -264,13 +272,13 @@ fn Parser(comptime opts: ParseOptions) type {
                 const content_start = self.i;
                 if (self.input.len > content_start) {
                     const text_idx = try self.appendTextNode(node_idx);
-                    var text_node = &self.doc.nodes.items[text_idx];
+                    var text_node = &self.nodes.items[text_idx];
                     text_node.name_or_text = .{ .start = @intCast(content_start), .end = @intCast(self.input.len) };
                     text_node.subtree_end = text_idx;
                 }
 
-                node = &self.doc.nodes.items[node_idx];
-                node.subtree_end = @intCast(self.doc.nodes.items.len - 1);
+                node = &self.nodes.items[node_idx];
+                node.subtree_end = @intCast(self.nodes.items.len - 1);
                 self.i = self.input.len;
                 return;
             }
@@ -280,25 +288,25 @@ fn Parser(comptime opts: ParseOptions) type {
                 if (self.findRawTextClose(tag_name, self.i)) |close| {
                     if (close.content_end > content_start) {
                         const text_idx = try self.appendTextNode(node_idx);
-                        var text_node = &self.doc.nodes.items[text_idx];
+                        var text_node = &self.nodes.items[text_idx];
                         text_node.name_or_text = .{ .start = @intCast(content_start), .end = @intCast(close.content_end) };
                         text_node.subtree_end = text_idx;
                     }
 
-                    node = &self.doc.nodes.items[node_idx];
-                    node.subtree_end = @intCast(self.doc.nodes.items.len - 1);
+                    node = &self.nodes.items[node_idx];
+                    node.subtree_end = @intCast(self.nodes.items.len - 1);
                     self.i = close.close_end;
                     return;
                 } else {
                     @branchHint(.cold);
                     if (self.input.len > content_start) {
                         const text_idx = try self.appendTextNode(node_idx);
-                        var text_node = &self.doc.nodes.items[text_idx];
+                        var text_node = &self.nodes.items[text_idx];
                         text_node.name_or_text = .{ .start = @intCast(content_start), .end = @intCast(self.input.len) };
                         text_node.subtree_end = text_idx;
                     }
-                    node = &self.doc.nodes.items[node_idx];
-                    node.subtree_end = @intCast(self.doc.nodes.items.len - 1);
+                    node = &self.nodes.items[node_idx];
+                    node.subtree_end = @intCast(self.nodes.items.len - 1);
                     self.i = self.input.len;
                     return;
                 }
@@ -352,8 +360,8 @@ fn Parser(comptime opts: ParseOptions) type {
                 const top = self.parse_stack.items[self.parse_stack.items.len - 1];
                 if (self.openElemMatchesClose(top, close_name, close_key)) {
                     _ = self.parse_stack.pop();
-                    var node = &self.doc.nodes.items[top.idx];
-                    node.subtree_end = @intCast(self.doc.nodes.items.len - 1);
+                    var node = &self.nodes.items[top.idx];
+                    node.subtree_end = @intCast(self.nodes.items.len - 1);
                     return;
                 }
             }
@@ -371,8 +379,8 @@ fn Parser(comptime opts: ParseOptions) type {
             if (found) |pos| {
                 while (self.parse_stack.items.len > pos) {
                     const open = self.parse_stack.pop().?;
-                    var node = &self.doc.nodes.items[open.idx];
-                    node.subtree_end = @intCast(self.doc.nodes.items.len - 1);
+                    var node = &self.nodes.items[open.idx];
+                    node.subtree_end = @intCast(self.nodes.items.len - 1);
                 }
             } else {
                 @branchHint(.unlikely);
@@ -386,14 +394,14 @@ fn Parser(comptime opts: ParseOptions) type {
                 if (!tags.shouldImplicitlyCloseWithLenAndKey(top.tag_len, top.tag_key, new_tag, new_tag_key)) break;
 
                 _ = self.parse_stack.pop();
-                var n = &self.doc.nodes.items[top.idx];
-                n.subtree_end = @intCast(self.doc.nodes.items.len - 1);
+                var n = &self.nodes.items[top.idx];
+                n.subtree_end = @intCast(self.nodes.items.len - 1);
             }
         }
 
         fn appendTextNode(noalias self: *Self, parent_idx: IndexInt) !IndexInt {
-            const idx: IndexInt = @intCast(self.doc.nodes.items.len);
-            const node: @TypeOf(self.doc.nodes.items[0]) = .{
+            const idx: IndexInt = @intCast(self.nodes.items.len);
+            const node: @TypeOf(self.nodes.items[0]) = .{
                 .parent = parent_idx,
                 .subtree_end = idx,
             };
@@ -402,8 +410,8 @@ fn Parser(comptime opts: ParseOptions) type {
         }
 
         fn appendElementNode(noalias self: *Self, parent_idx: IndexInt) !IndexInt {
-            const idx: IndexInt = @intCast(self.doc.nodes.items.len);
-            const node: @TypeOf(self.doc.nodes.items[0]) = .{
+            const idx: IndexInt = @intCast(self.nodes.items.len);
+            const node: @TypeOf(self.nodes.items[0]) = .{
                 .parent = parent_idx,
                 .subtree_end = idx,
             };
@@ -411,12 +419,12 @@ fn Parser(comptime opts: ParseOptions) type {
             _ = try self.pushNode(node);
 
             if (parent_idx != InvalidIndex) {
-                var p = &self.doc.nodes.items[parent_idx];
+                var p = &self.nodes.items[parent_idx];
                 if (p.last_child == InvalidIndex) {
                     p.last_child = idx;
                 } else {
                     const prev = p.last_child;
-                    self.doc.nodes.items[idx].prev_sibling = prev;
+                    self.nodes.items[idx].prev_sibling = prev;
                     p.last_child = idx;
                 }
             }
@@ -424,9 +432,9 @@ fn Parser(comptime opts: ParseOptions) type {
             return idx;
         }
 
-        fn pushNode(noalias self: *Self, node: @TypeOf(self.doc.nodes.items[0])) !IndexInt {
-            const len = self.doc.nodes.items.len;
-            try self.doc.nodes.append(self.doc.allocator, node);
+        fn pushNode(noalias self: *Self, node: @TypeOf(self.nodes.items[0])) !IndexInt {
+            const len = self.nodes.items.len;
+            try self.nodes.append(self.doc.allocator, node);
             return @intCast(len);
         }
 
@@ -446,7 +454,7 @@ fn Parser(comptime opts: ParseOptions) type {
         inline fn openElemMatchesClose(noalias self: *Self, open: OpenElem, close_name: []const u8, close_key: u64) bool {
             if (open.tag_len != close_name.len or open.tag_key != close_key) return false;
             if (close_name.len <= 8) return true;
-            const open_name = self.doc.nodes.items[open.idx].name_or_text.slice(self.input);
+            const open_name = self.nodes.items[open.idx].name_or_text.slice(self.input);
             return tables.eqlIgnoreCaseAscii(open_name[8..], close_name[8..]);
         }
 

@@ -28,6 +28,7 @@ pub const TextRun = struct {
 
 /// Scans from `start` to the next `<`, tracking whether the run contains any non-whitespace bytes.
 pub fn scanTextRun(hay: []const u8, start: usize) TextRun {
+    // TODO: Make this faster in the case where we don't discard whitespace only nodes 
     if (start >= hay.len) return .{ .lt_index = hay.len, .has_non_whitespace = false };
 
     var i = start;
@@ -72,6 +73,7 @@ pub fn findTagEndRespectQuotes(hay: []const u8, _start: usize) ?TagEnd {
 
 /// Returns true when a tag ending at `gt_index` is explicitly self-closing
 /// via `.../>` (allowing whitespace before `>`).
+/// Only to be used for svg
 pub inline fn isExplicitSelfClosingTag(hay: []const u8, start: usize, gt_index: usize) bool {
     if (gt_index == 0 or gt_index >= hay.len or hay[gt_index] != '>') return false;
     var j = gt_index;

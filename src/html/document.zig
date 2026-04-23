@@ -790,6 +790,9 @@ pub const ParseOptions = struct {
             const DocSelf = @This();
             const DebugQueryResultType = options.QueryDebugResult();
             const RawNodeType = options.GetNodeRaw();
+            const NodeStorage = struct {
+                items: []RawNodeType = &[_]RawNodeType{},
+            };
             const ChildrenIterType = options.ChildrenIter();
             const NodeTypeWrapper = options.GetNode();
             const QueryIterType = options.QueryIter();
@@ -800,7 +803,7 @@ pub const ParseOptions = struct {
             source: options.GetInput(),
 
             /// Parsed node storage.
-            nodes: std.ArrayListUnmanaged(RawNodeType) = .empty,
+            nodes: NodeStorage = .{},
 
             /// Initializes an empty document using `allocator` for internal storage.
             pub fn init(allocator: std.mem.Allocator) DocSelf {
@@ -812,13 +815,19 @@ pub const ParseOptions = struct {
 
             /// Releases all document-owned memory.
             pub fn deinit(noalias self: *DocSelf) void {
-                self.nodes.deinit(self.allocator);
+                if (self.nodes.items.len != 0) {
+                    self.allocator.free(self.nodes.items);
+                    self.nodes.items = &[_]RawNodeType{};
+                }
             }
 
-            /// Clears parsed state while retaining reusable capacities.
+            /// Clears parsed state and releases parsed node storage.
             pub fn clear(noalias self: *DocSelf) void {
                 self.source = emptySource();
-                self.nodes.clearRetainingCapacity();
+                if (self.nodes.items.len != 0) {
+                    self.allocator.free(self.nodes.items);
+                    self.nodes.items = &[_]RawNodeType{};
+                }
             }
 
             /// Parses HTML using the behavior encoded in this document type.
