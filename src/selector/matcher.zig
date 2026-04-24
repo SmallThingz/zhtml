@@ -27,14 +27,14 @@ pub const TraversalBounds = struct {
 };
 
 pub fn traversalBounds(comptime Doc: type, doc: *const Doc, scope_root: IndexInt) TraversalBounds {
-    if (scope_root != InvalidIndex and scope_root >= doc.nodes.items.len) {
+    if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) {
         return .{ .start = 1, .end_excl = 1 };
     }
     const start: IndexInt = if (scope_root == InvalidIndex) 1 else scope_root + 1;
     const end_excl: IndexInt = if (scope_root == InvalidIndex)
-        @as(IndexInt, @intCast(doc.nodes.items.len))
+        @as(IndexInt, @intCast(doc.nodes.len))
     else
-        doc.nodes.items[scope_root].subtree_end + 1;
+        doc.nodes[scope_root].subtree_end + 1;
     return .{ .start = start, .end_excl = end_excl };
 }
 
@@ -138,7 +138,7 @@ pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
 
 /// Returns first matching node index for `selector` within optional `scope_root`.
 pub fn queryOneIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: IndexInt) ?IndexInt {
-    if (scope_root != InvalidIndex and scope_root >= doc.nodes.items.len) return null;
+    if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return null;
     var best: ?IndexInt = null;
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
@@ -150,7 +150,7 @@ pub fn queryOneIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.
 
 /// Returns whether `node_index` matches any selector group within scope.
 pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt) bool {
-    if (scope_root != InvalidIndex and scope_root >= doc.nodes.items.len) return false;
+    if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
         const rightmost = group.compound_len - 1;
@@ -302,7 +302,7 @@ fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selecto
 
     const bounds = traversalBounds(Doc, doc, scope_root);
     var i = bounds.start;
-    while (i < bounds.end_excl and i < doc.nodes.items.len) : (i += 1) {
+    while (i < bounds.end_excl and i < doc.nodes.len) : (i += 1) {
         if (!doc.isElementIndex(i)) continue;
         if (matchGroupFromRight(Doc, doc, selector, group, rightmost, i, scope_root)) return i;
     }
@@ -311,7 +311,7 @@ fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selecto
 
 fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt) bool {
     if (!doc.isElementIndex(node_index)) return false;
-    const node = &doc.nodes.items[node_index];
+    const node = &doc.nodes[node_index];
     var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer scratch.deinit();
     const scratch_alloc = scratch.allocator();
@@ -402,8 +402,8 @@ pub fn matchesPseudo(doc: anytype, node_index: IndexInt, pseudo: ast.Pseudo) boo
         .nth_child => blk: {
             _ = parentElement(doc, node_index) orelse break :blk false;
             var position: usize = 1;
-            var prev = doc.nodes.items[node_index].prev_sibling;
-            while (prev != InvalidIndex) : (prev = doc.nodes.items[prev].prev_sibling) {
+            var prev = doc.nodes[node_index].prev_sibling;
+            while (prev != InvalidIndex) : (prev = doc.nodes[prev].prev_sibling) {
                 position += 1;
             }
             break :blk pseudo.nth.matches(position);

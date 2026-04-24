@@ -25,7 +25,7 @@ pub fn explainFirstMatch(
     const bounds = matcher.traversalBounds(Doc, doc, scope_root);
 
     var i = bounds.start;
-    while (i < bounds.end_excl and i < doc.nodes.items.len) : (i += 1) {
+    while (i < bounds.end_excl and i < doc.nodes.len) : (i += 1) {
         if (!doc.isElementIndex(i)) continue;
         report.visited_elements += 1;
 
@@ -105,7 +105,7 @@ fn classifyCompoundFailure(
     group_index: usize,
     compound_index: usize,
 ) selector_debug.Failure {
-    const node = &doc.nodes.items[node_index];
+    const node = &doc.nodes[node_index];
     var predicate_index: u16 = 0;
     const g: u16 = @intCast(@min(group_index, std.math.maxInt(u16)));
     const c: u16 = @intCast(@min(compound_index, std.math.maxInt(u16)));

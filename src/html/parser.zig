@@ -35,7 +35,7 @@ pub fn parse(comptime opts: ParseOptions, allocator: std.mem.Allocator, input: o
     };
     try state.parse();
 
-    doc.nodes.items = try node_buf.toOwnedSlice(allocator);
+    doc.nodes = try node_buf.toOwnedSlice(allocator);
     return doc;
 }
 
@@ -590,7 +590,7 @@ const NonDestructiveTestDocument = NonDestructiveTestOptions.GetDocument();
 
 fn expectDocumentStructureValid(doc: anytype) !void {
     const testing = std.testing;
-    const nodes = doc.nodes.items;
+    const nodes = doc.nodes;
     try testing.expect(nodes.len >= 1);
     try testing.expect(nodes[0].attr_end == 0);
     try testing.expect(nodes[0].parent == InvalidIndex);
@@ -646,9 +646,9 @@ fn expectDocumentStructureValid(doc: anytype) !void {
 
 fn expectEquivalentStructures(a: *const TestDocument, b: *const NonDestructiveTestDocument) !void {
     const testing = std.testing;
-    try testing.expectEqual(a.nodes.items.len, b.nodes.items.len);
+    try testing.expectEqual(a.nodes.len, b.nodes.len);
 
-    for (a.nodes.items, b.nodes.items) |lhs, rhs| {
+    for (a.nodes, b.nodes) |lhs, rhs| {
         try testing.expectEqual(lhs.name_or_text.start, rhs.name_or_text.start);
         try testing.expectEqual(lhs.name_or_text.end, rhs.name_or_text.end);
         try testing.expectEqual(lhs.attr_end, rhs.attr_end);
@@ -690,7 +690,7 @@ fn exerciseRuntimeApis(doc: anytype, alloc: std.mem.Allocator) !void {
 
     var visited: usize = 0;
     var idx: usize = 0;
-    while (idx < doc.nodes.items.len and visited < 16) : (idx += 1) {
+    while (idx < doc.nodes.len and visited < 16) : (idx += 1) {
         const node = doc.nodeAt(@intCast(idx)) orelse continue;
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
@@ -876,7 +876,7 @@ test "u64 parse accepts sparse 8 GiB plaintext input" {
     defer doc.deinit();
     try doc.parse(mapped.memory);
 
-    try std.testing.expectEqual(@as(usize, 3), doc.nodes.items.len);
+    try std.testing.expectEqual(@as(usize, 3), doc.nodes.len);
     const plaintext = doc.nodeAt(1) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("plaintext", plaintext.tagName());
 
@@ -949,7 +949,7 @@ test "raw text element metadata remains valid after child append growth" {
     const script = doc.queryOne("script") orelse return error.TestUnexpectedResult;
     try std.testing.expect(script.raw().subtree_end > script.index);
 
-    const text_node = doc.nodes.items[script.index + 1];
+    const text_node = doc.nodes[script.index + 1];
     try std.testing.expect(text_node.attr_end == 0);
     try std.testing.expectEqualStrings("const x = 1;", text_node.name_or_text.slice(doc.source));
 
@@ -979,7 +979,7 @@ test "raw-text unterminated tail keeps element open to end of input" {
     try doc.parse(&html);
 
     const script = doc.queryOne("script") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(IndexInt, @intCast(doc.nodes.items.len - 1)), script.raw().subtree_end);
+    try std.testing.expectEqual(@as(IndexInt, @intCast(doc.nodes.len - 1)), script.raw().subtree_end);
     try std.testing.expect(doc.queryOne("div") == null);
 }
 
@@ -1114,8 +1114,8 @@ test "whitespace-only text nodes drop only in fastest mode" {
     try strict_doc.parse(&strict_html);
     try fast_doc.parse(&fast_html);
 
-    try std.testing.expectEqual(@as(usize, 5), strict_doc.nodes.items.len);
-    try std.testing.expectEqual(@as(usize, 4), fast_doc.nodes.items.len);
+    try std.testing.expectEqual(@as(usize, 5), strict_doc.nodes.len);
+    try std.testing.expectEqual(@as(usize, 4), fast_doc.nodes.len);
 
     const y = fast_doc.queryOne("#y") orelse return error.TestUnexpectedResult;
     const text = try y.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
@@ -1130,14 +1130,14 @@ test "fastest mode drops indentation-only runs between child elements" {
     var html = "<div>\n  <a></a>\n  <b></b>\n</div>".*;
     try doc.parse(&html);
 
-    try std.testing.expectEqual(@as(usize, 4), doc.nodes.items.len);
+    try std.testing.expectEqual(@as(usize, 4), doc.nodes.len);
 
     const div = doc.nodeAt(1) orelse return error.TestUnexpectedResult;
     const a = div.firstChild() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("a", doc.nodes.items[a.index].name_or_text.slice(doc.source));
+    try std.testing.expectEqualStrings("a", doc.nodes[a.index].name_or_text.slice(doc.source));
 
     const b = a.nextSibling() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("b", doc.nodes.items[b.index].name_or_text.slice(doc.source));
+    try std.testing.expectEqualStrings("b", doc.nodes[b.index].name_or_text.slice(doc.source));
     try std.testing.expect(b.nextSibling() == null);
 }
 
@@ -1162,7 +1162,7 @@ test "attribute parsing still builds the DOM" {
     var html = "<div id='x'><span id='y'></span></div>".*;
     try doc.parse(&html);
 
-    try std.testing.expect(doc.nodes.items.len > 1);
+    try std.testing.expect(doc.nodes.len > 1);
     try std.testing.expect(doc.queryOne("#x") != null);
     try std.testing.expect(doc.queryOne("#y") != null);
 }

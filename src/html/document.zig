@@ -101,7 +101,7 @@ pub const ParseOptions = struct {
 
             /// Returns the underlying raw node record.
             pub fn raw(self: @This()) *const options.GetNodeRaw() {
-                return &self.doc.nodes.items[self.index];
+                return &self.doc.nodes[self.index];
             }
 
             /// Returns element tag name bytes from parsed source.
@@ -111,13 +111,13 @@ pub const ParseOptions = struct {
 
             /// Writes HTML serialization of this node and its subtree to `writer`.
             pub fn writeHtml(self: @This(), writer: anytype) WriterError(@TypeOf(writer))!void {
-                const node_raw = &self.doc.nodes.items[@intCast(self.index)];
+                const node_raw = &self.doc.nodes[@intCast(self.index)];
                 try writeNodeHtml(self.doc, self.index, node_raw, writer);
             }
 
             /// Writes HTML serialization of this node only, excluding its children.
             pub fn writeHtmlSelf(self: @This(), writer: anytype) WriterError(@TypeOf(writer))!void {
-                const node_raw = &self.doc.nodes.items[@intCast(self.index)];
+                const node_raw = &self.doc.nodes[@intCast(self.index)];
                 try writeNodeHtmlSelf(self.doc, self.index, node_raw, writer);
             }
 
@@ -134,7 +134,7 @@ pub const ParseOptions = struct {
             /// Same as `innerText` but with explicit text-normalization options.
             pub fn innerTextWithOptions(self: @This(), arena_alloc: std.mem.Allocator, opts: Self.TextOptions) ![]const u8 {
                 const doc = self.doc;
-                const node_raw = &doc.nodes.items[self.index];
+                const node_raw = &doc.nodes[self.index];
 
                 if (comptime options.non_destructive) {
                     if (doc.isTextIndex(self.index)) {
@@ -146,8 +146,8 @@ pub const ParseOptions = struct {
                     var text_count: usize = 0;
                     var first_text: ?[]const u8 = null;
                     var idx = self.index + 1;
-                    while (idx <= node_raw.subtree_end and idx < doc.nodes.items.len) : (idx += 1) {
-                        const node = &doc.nodes.items[idx];
+                    while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
+                        const node = &doc.nodes[idx];
                         if (!doc.isTextIndex(idx)) continue;
                         text_count += 1;
                         if (text_count == 1) first_text = node.name_or_text.slice(doc.source);
@@ -161,7 +161,7 @@ pub const ParseOptions = struct {
                     return self.innerTextOwnedWithOptions(arena_alloc, opts);
                 } else {
                     if (doc.isTextIndex(self.index)) {
-                        const mut_node = &doc.nodes.items[self.index];
+                        const mut_node = &doc.nodes[self.index];
                         _ = decodeTextNode(mut_node, doc);
                         if (!opts.normalize_whitespace) return mut_node.name_or_text.slice(doc.source);
                         return normalizeTextNodeInPlace(mut_node, doc);
@@ -171,8 +171,8 @@ pub const ParseOptions = struct {
                     var count: usize = 0;
 
                     var idx = self.index + 1;
-                    while (idx <= node_raw.subtree_end and idx < doc.nodes.items.len) : (idx += 1) {
-                        const node = &doc.nodes.items[idx];
+                    while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
+                        const node = &doc.nodes[idx];
                         if (!doc.isTextIndex(idx)) continue;
                         count += 1;
                         _ = decodeTextNode(node, doc);
@@ -181,7 +181,7 @@ pub const ParseOptions = struct {
 
                     if (count == 0) return "";
                     if (count == 1) {
-                        const only = &doc.nodes.items[first_idx];
+                        const only = &doc.nodes[first_idx];
                         if (!opts.normalize_whitespace) return only.name_or_text.slice(doc.source);
                         return normalizeTextNodeInPlace(only, doc);
                     }
@@ -191,8 +191,8 @@ pub const ParseOptions = struct {
 
                     if (!opts.normalize_whitespace) {
                         idx = self.index + 1;
-                        while (idx <= node_raw.subtree_end and idx < doc.nodes.items.len) : (idx += 1) {
-                            const node = &doc.nodes.items[idx];
+                        while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
+                            const node = &doc.nodes[idx];
                             if (!doc.isTextIndex(idx)) continue;
                             const seg = node.name_or_text.slice(doc.source);
                             try ensureOutExtra(&out, arena_alloc, seg.len);
@@ -201,8 +201,8 @@ pub const ParseOptions = struct {
                     } else {
                         var state: WhitespaceNormState = .{};
                         idx = self.index + 1;
-                        while (idx <= node_raw.subtree_end and idx < doc.nodes.items.len) : (idx += 1) {
-                            const node = &doc.nodes.items[idx];
+                        while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
+                            const node = &doc.nodes[idx];
                             if (!doc.isTextIndex(idx)) continue;
                             try appendNormalizedSegment(&out, arena_alloc, node.name_or_text.slice(doc.source), &state);
                         }
@@ -221,7 +221,7 @@ pub const ParseOptions = struct {
             /// Owned variant of `innerTextWithOptions`.
             pub fn innerTextOwnedWithOptions(self: @This(), arena_alloc: std.mem.Allocator, opts: Self.TextOptions) ![]const u8 {
                 const doc = self.doc;
-                const node_raw = &doc.nodes.items[self.index];
+                const node_raw = &doc.nodes[self.index];
 
                 var out = std.ArrayList(u8).empty;
                 defer out.deinit(arena_alloc);
@@ -239,8 +239,8 @@ pub const ParseOptions = struct {
 
                 if (!opts.normalize_whitespace) {
                     var idx = self.index + 1;
-                    while (idx <= node_raw.subtree_end and idx < doc.nodes.items.len) : (idx += 1) {
-                        const node = &doc.nodes.items[idx];
+                    while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
+                        const node = &doc.nodes[idx];
                         if (!doc.isTextIndex(idx)) continue;
                         try appendDecodedSegment(&out, arena_alloc, node.name_or_text.slice(doc.source));
                     }
@@ -249,8 +249,8 @@ pub const ParseOptions = struct {
 
                 var state: WhitespaceNormState = .{};
                 var idx = self.index + 1;
-                while (idx <= node_raw.subtree_end and idx < doc.nodes.items.len) : (idx += 1) {
-                    const node = &doc.nodes.items[idx];
+                while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
+                    const node = &doc.nodes[idx];
                     if (!doc.isTextIndex(idx)) continue;
                     try appendDecodedNormalizedSegment(&out, arena_alloc, node.name_or_text.slice(doc.source), &state);
                 }
@@ -262,13 +262,13 @@ pub const ParseOptions = struct {
                 if (comptime options.non_destructive) {
                     @compileError("Use getAttributeValueAlloc for non-destructive documents.");
                 }
-                const node_raw = &self.doc.nodes.items[self.index];
+                const node_raw = &self.doc.nodes[self.index];
                 return attr.getAttrValue(self.doc, node_raw, name, self.doc.allocator);
             }
 
             /// Returns decoded attribute value for `name`, allocating from `allocator` when needed.
             pub fn getAttributeValueAlloc(self: @This(), allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
-                const node_raw = &self.doc.nodes.items[self.index];
+                const node_raw = &self.doc.nodes[self.index];
                 return attr.getAttrValue(self.doc, node_raw, name, allocator);
             }
 
@@ -281,9 +281,9 @@ pub const ParseOptions = struct {
 
             /// Returns last element child.
             pub fn lastChild(self: @This()) ?@This() {
-                const node_raw = &self.doc.nodes.items[self.index];
+                const node_raw = &self.doc.nodes[self.index];
                 var idx = node_raw.last_child;
-                while (idx != InvalidIndex) : (idx = self.doc.nodes.items[idx].prev_sibling) {
+                while (idx != InvalidIndex) : (idx = self.doc.nodes[idx].prev_sibling) {
                     if (self.doc.isElementIndex(idx)) return self.doc.nodeAt(idx);
                 }
                 return null;
@@ -298,9 +298,9 @@ pub const ParseOptions = struct {
 
             /// Returns previous element sibling.
             pub fn prevSibling(self: @This()) ?@This() {
-                const node_raw = &self.doc.nodes.items[self.index];
+                const node_raw = &self.doc.nodes[self.index];
                 var idx = node_raw.prev_sibling;
-                while (idx != InvalidIndex) : (idx = self.doc.nodes.items[idx].prev_sibling) {
+                while (idx != InvalidIndex) : (idx = self.doc.nodes[idx].prev_sibling) {
                     if (self.doc.isElementIndex(idx)) return self.doc.nodeAt(idx);
                 }
                 return null;
@@ -437,9 +437,9 @@ pub const ParseOptions = struct {
             fn writeChildrenHtml(doc: anytype, parent_idx: IndexInt, noalias node_raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
                 const end: IndexInt = node_raw.subtree_end;
                 var idx: IndexInt = parent_idx + 1;
-                const len_idx: IndexInt = @intCast(doc.nodes.items.len);
+                const len_idx: IndexInt = @intCast(doc.nodes.len);
                 while (idx <= end and idx < len_idx) {
-                    const child = &doc.nodes.items[@intCast(idx)];
+                    const child = &doc.nodes[@intCast(idx)];
                     if (child.parent != parent_idx) {
                         idx += 1;
                         continue;
@@ -702,11 +702,11 @@ pub const ParseOptions = struct {
 
             /// Returns next matching node or `null` when exhausted.
             pub fn next(noalias self: *@This()) ?NodeTypeWrapper {
-                while (self.next_index < self.doc.nodes.items.len) : (self.next_index += 1) {
+                while (self.next_index < self.doc.nodes.len) : (self.next_index += 1) {
                     const idx = self.next_index;
 
                     if (self.scope_root != InvalidIndex) {
-                        const root = &self.doc.nodes.items[self.scope_root];
+                        const root = &self.doc.nodes[self.scope_root];
                         if (idx <= self.scope_root or idx > root.subtree_end) continue;
                     }
 
@@ -795,9 +795,6 @@ pub const ParseOptions = struct {
             const DocSelf = @This();
             const DebugQueryResultType = options.QueryDebugResult();
             const RawNodeType = options.GetNodeRaw();
-            const NodeStorage = struct {
-                items: []RawNodeType = &[_]RawNodeType{},
-            };
             const ChildrenIterType = options.ChildrenIter();
             const NodeTypeWrapper = options.GetNode();
             const QueryIterType = options.QueryIter();
@@ -808,7 +805,7 @@ pub const ParseOptions = struct {
             source: options.GetInput(),
 
             /// Parsed node storage.
-            nodes: NodeStorage = .{},
+            nodes: []RawNodeType = &[_]RawNodeType{},
 
             /// Initializes an empty document using `allocator` for internal storage.
             pub fn init(allocator: std.mem.Allocator) DocSelf {
@@ -820,18 +817,18 @@ pub const ParseOptions = struct {
 
             /// Releases all document-owned memory.
             pub fn deinit(noalias self: *DocSelf) void {
-                if (self.nodes.items.len != 0) {
-                    self.allocator.free(self.nodes.items);
-                    self.nodes.items = &[_]RawNodeType{};
+                if (self.nodes.len != 0) {
+                    self.allocator.free(self.nodes);
+                    self.nodes = &[_]RawNodeType{};
                 }
             }
 
             /// Clears parsed state and releases parsed node storage.
             pub fn clear(noalias self: *DocSelf) void {
                 self.source = emptySource();
-                if (self.nodes.items.len != 0) {
-                    self.allocator.free(self.nodes.items);
-                    self.nodes.items = &[_]RawNodeType{};
+                if (self.nodes.len != 0) {
+                    self.allocator.free(self.nodes);
+                    self.nodes = &[_]RawNodeType{};
                 }
             }
 
@@ -976,8 +973,8 @@ pub const ParseOptions = struct {
 
             /// Returns parent index for `idx`.
             pub fn parentIndex(self: *const DocSelf, idx: IndexInt) IndexInt {
-                if (idx >= self.nodes.items.len) return InvalidIndex;
-                return self.nodes.items[idx].parent;
+                if (idx >= self.nodes.len) return InvalidIndex;
+                return self.nodes[idx].parent;
             }
 
             /// Returns whether `idx` is the document root node.
@@ -987,12 +984,12 @@ pub const ParseOptions = struct {
 
             /// Returns whether `idx` is an element node.
             pub inline fn isElementIndex(self: *const DocSelf, idx: IndexInt) bool {
-                return idx != 0 and idx < self.nodes.items.len and self.nodes.items[idx].attr_end != 0;
+                return idx != 0 and idx < self.nodes.len and self.nodes[idx].attr_end != 0;
             }
 
             /// Returns whether `idx` is a text node.
             pub inline fn isTextIndex(self: *const DocSelf, idx: IndexInt) bool {
-                return idx != 0 and idx < self.nodes.items.len and self.nodes.items[idx].attr_end == 0;
+                return idx != 0 and idx < self.nodes.len and self.nodes[idx].attr_end == 0;
             }
 
             /// Returns first `<html>` element in the document.
@@ -1023,8 +1020,8 @@ pub const ParseOptions = struct {
             /// Returns first element whose tag name equals `name` (ASCII-insensitive).
             pub fn findFirstTag(self: *const DocSelf, name: []const u8) ?NodeTypeWrapper {
                 var i: usize = 1;
-                while (i < self.nodes.items.len) : (i += 1) {
-                    const n = &self.nodes.items[i];
+                while (i < self.nodes.len) : (i += 1) {
+                    const n = &self.nodes[i];
                     if (!self.isElementIndex(@intCast(i))) continue;
                     if (tables.eqlIgnoreCaseAscii(n.name_or_text.slice(self.source), name)) return self.nodeAt(@intCast(i));
                 }
@@ -1033,7 +1030,7 @@ pub const ParseOptions = struct {
 
             /// Wraps raw node index as public `Node` wrapper when valid.
             pub inline fn nodeAt(self: *const DocSelf, idx: IndexInt) ?NodeTypeWrapper {
-                if (idx == InvalidIndex or idx >= self.nodes.items.len) return null;
+                if (idx == InvalidIndex or idx >= self.nodes.len) return null;
                 return .{
                     .doc = @constCast(self),
                     .index = idx,
@@ -1065,27 +1062,27 @@ pub const ParseOptions = struct {
 
             /// Returns first direct element-like child index for `parent_idx`, if any.
             pub fn firstElementChildIndex(self: *const DocSelf, parent_idx: IndexInt) IndexInt {
-                if (parent_idx >= self.nodes.items.len) return InvalidIndex;
+                if (parent_idx >= self.nodes.len) return InvalidIndex;
 
                 const candidate1: IndexInt = parent_idx + 1;
-                if (candidate1 >= self.nodes.items.len) return InvalidIndex;
+                if (candidate1 >= self.nodes.len) return InvalidIndex;
 
-                const node1 = &self.nodes.items[candidate1];
+                const node1 = &self.nodes[candidate1];
                 if (self.isElementIndex(candidate1)) {
                     if (node1.parent == parent_idx) return candidate1;
                     return InvalidIndex;
                 }
 
                 const candidate2: IndexInt = candidate1 + 1;
-                if (candidate2 >= self.nodes.items.len) return InvalidIndex;
+                if (candidate2 >= self.nodes.len) return InvalidIndex;
 
-                const node2 = &self.nodes.items[candidate2];
+                const node2 = &self.nodes[candidate2];
                 if (self.isTextIndex(candidate2)) {
                     @branchHint(.cold);
                     var scan: IndexInt = candidate2;
-                    while (scan < self.nodes.items.len and self.isTextIndex(scan)) : (scan += 1) {}
-                    if (scan >= self.nodes.items.len) return InvalidIndex;
-                    const scanned = &self.nodes.items[scan];
+                    while (scan < self.nodes.len and self.isTextIndex(scan)) : (scan += 1) {}
+                    if (scan >= self.nodes.len) return InvalidIndex;
+                    const scanned = &self.nodes[scan];
                     if (scanned.parent == parent_idx and self.isElementIndex(scan)) return scan;
                     return InvalidIndex;
                 }
@@ -1095,15 +1092,15 @@ pub const ParseOptions = struct {
 
             /// Returns next direct element-like sibling index for `node_idx`, if any.
             pub fn nextElementSiblingIndex(self: *const DocSelf, node_idx: IndexInt) IndexInt {
-                if (node_idx >= self.nodes.items.len) return InvalidIndex;
-                const node = &self.nodes.items[node_idx];
+                if (node_idx >= self.nodes.len) return InvalidIndex;
+                const node = &self.nodes[node_idx];
                 if (!self.isElementIndex(node_idx)) return InvalidIndex;
                 const parent_idx = node.parent;
                 if (parent_idx == InvalidIndex) return InvalidIndex;
 
                 var candidate: IndexInt = node.subtree_end + 1;
-                while (candidate < self.nodes.items.len) : (candidate += 1) {
-                    const cand = &self.nodes.items[candidate];
+                while (candidate < self.nodes.len) : (candidate += 1) {
+                    const cand = &self.nodes[candidate];
                     if (cand.parent != parent_idx) return InvalidIndex;
                     if (self.isElementIndex(candidate)) return candidate;
                     if (!self.isTextIndex(candidate)) return InvalidIndex;
@@ -1352,7 +1349,7 @@ test "non-destructive text reads do not rewrite text bytes" {
     const text = try node.innerText(arena.allocator());
     try std.testing.expectEqualStrings("a & b", text);
 
-    const text_node = doc.nodes.items[node.index + 1];
+    const text_node = doc.nodes[node.index + 1];
     try std.testing.expectEqualStrings(" a &amp;  b ", text_node.name_or_text.slice(doc.source));
     try std.testing.expectEqualSlices(u8, before[0..], html[0..]);
 }
@@ -1446,7 +1443,7 @@ test "matcher queryOneIndex rejects invalid scope roots safely" {
     try doc.parse(&html);
 
     const sel = comptime ast.Selector.compile("div");
-    const idx = matcher.queryOneIndex(Document, &doc, sel, @as(IndexInt, @intCast(doc.nodes.items.len + 10)));
+    const idx = matcher.queryOneIndex(Document, &doc, sel, @as(IndexInt, @intCast(doc.nodes.len + 10)));
     try std.testing.expect(idx == null);
 }
 
@@ -1612,7 +1609,7 @@ test "parse-time text normalization is off by default and query-time normalizati
     try doc.parse(&html);
 
     const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
-    const text_node = doc.nodes.items[node.index + 1];
+    const text_node = doc.nodes[node.index + 1];
     try std.testing.expect(text_node.attr_end == 0);
     try std.testing.expectEqualStrings("  alpha  &amp;   beta  ", text_node.name_or_text.slice(doc.source));
 
@@ -1673,7 +1670,7 @@ test "innerTextOwned always returns allocated output and does not mutate source 
     try doc.parse(&html);
 
     const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
-    const text_node_before = doc.nodes.items[node.index + 1];
+    const text_node_before = doc.nodes[node.index + 1];
     try std.testing.expect(text_node_before.attr_end == 0);
     try std.testing.expectEqualStrings("a &amp; b", text_node_before.name_or_text.slice(doc.source));
 
@@ -1681,7 +1678,7 @@ test "innerTextOwned always returns allocated output and does not mutate source 
     try std.testing.expectEqualStrings("a & b", owned);
     try std.testing.expect(!doc.isOwned(owned));
 
-    const text_node_after = doc.nodes.items[node.index + 1];
+    const text_node_after = doc.nodes[node.index + 1];
     try std.testing.expectEqualStrings("a &amp; b", text_node_after.name_or_text.slice(doc.source));
 }
 
@@ -2144,7 +2141,7 @@ test "clear resets parsed state and ownership tracking" {
     try std.testing.expect(doc.isOwned(text_before_clear));
 
     doc.clear();
-    try std.testing.expectEqual(@as(usize, 0), doc.nodes.items.len);
+    try std.testing.expectEqual(@as(usize, 0), doc.nodes.len);
     try std.testing.expectEqual(@as(usize, 0), doc.source.len);
     try std.testing.expect(!doc.isOwned(text_before_clear));
     try std.testing.expect(doc.queryOne("main") == null);
@@ -2185,7 +2182,7 @@ test "runtime attr-heavy selector stress uses in-node parents" {
         const b = doc.queryOneCached(compiled);
         try std.testing.expect((a == null) == (b == null));
     }
-    try std.testing.expectEqual(0, doc.nodes.items[1].parent);
+    try std.testing.expectEqual(0, doc.nodes[1].parent);
 }
 
 test "bench fixture attr-heavy runtime and cached query smoke" {
@@ -2216,7 +2213,7 @@ test "bench fixture attr-heavy runtime and cached query smoke" {
             const b = doc.queryOneCached(compiled);
             try std.testing.expect((a == null) == (b == null));
         }
-        try std.testing.expectEqual(0, doc.nodes.items[1].parent);
+        try std.testing.expectEqual(0, doc.nodes[1].parent);
     }
 
     {
@@ -2233,7 +2230,7 @@ test "bench fixture attr-heavy runtime and cached query smoke" {
             const b = doc.queryOneCached(compiled);
             try std.testing.expect((a == null) == (b == null));
         }
-        try std.testing.expectEqual(0, doc.nodes.items[1].parent);
+        try std.testing.expectEqual(0, doc.nodes[1].parent);
     }
 }
 

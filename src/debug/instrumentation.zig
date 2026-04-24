@@ -85,7 +85,7 @@ pub fn parseWithHooks(io: std.Io, doc: anytype, input: anytype, hooks: anytype) 
     const stats: ParseInstrumentationStats = .{
         .elapsed_ns = elapsedNs(start, std.Io.Timestamp.now(io, .awake)),
         .input_len = input.len,
-        .node_count = doc.nodes.items.len,
+        .node_count = doc.nodes.len,
     };
 
     if (comptime @hasDecl(HookDeclType(@TypeOf(hooks)), "onParseEnd")) {
