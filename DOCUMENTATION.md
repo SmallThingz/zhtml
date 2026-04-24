@@ -28,14 +28,11 @@ This is the canonical manual for usage, API, selector behavior, performance work
 const std = @import("std");
 const html = @import("html");
 const options: html.ParseOptions = .{};
-const Document = options.GetDocument();
 
 test "basic parse + query" {
-    var doc = Document.init(std.testing.allocator);
-    defer doc.deinit();
-
     var input = "<div id='app'><a class='nav' href='/docs'>Docs</a></div>".*;
-    try doc.parse(&input);
+    var doc = try options.parse(std.testing.allocator, &input);
+    defer doc.deinit();
 
     const a = doc.queryOne("div#app > a.nav") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("/docs", a.getAttributeValue("href").?);
@@ -51,16 +48,14 @@ All examples are verified by running `zig build examples-check`
 
 ## Core API
 
-### `Document` factory and lifecycle
+### Parse and document lifecycle
 
 - `const opts: ParseOptions = .{};`
-- `const Document = opts.GetDocument();`
-- `Document.init(allocator)`
+- `var doc = try opts.parse(allocator, input);`
 - `doc.deinit()`
 - `doc.clear()`
-- `doc.parse(input)`
-- destructive document types accept mutable input and parse it in place
-- non-destructive document types accept read-only input and parse directly from the original bytes
+- destructive options accept mutable input and parse it in place
+- non-destructive options accept read-only input and parse directly from the original bytes
 - maximum parseable input size is controlled at build time with `-Dintlen`
 
 ### Query APIs
@@ -135,9 +130,9 @@ Use a non-destructive document type when the caller bytes must remain unchanged.
 
 ```zig
 const opts: html.ParseOptions = .{ .non_destructive = true };
-const Document = opts.GetDocument();
 const html_bytes = "<div id='x' data-v='a&amp;b'> hi &amp; bye </div>";
-try doc.parse(html_bytes);
+var doc = try opts.parse(std.testing.allocator, html_bytes);
+defer doc.deinit();
 ```
 
 Behavior:
@@ -197,9 +192,9 @@ Compilation modes:
 
 | Mode | Parse Options | Best For | Tradeoffs |
 |---|---|---|---|
-| `strictest` | `const Document = html.ParseOptions{ .drop_whitespace_text_nodes = false }.GetDocument();` | traversal predictability and text fidelity | keeps whitespace-only text nodes |
-| `fastest` | `const Document = html.ParseOptions{}.GetDocument();` | throughput-first scraping | whitespace-only text nodes dropped |
-| `non-destructive` | `const Document = html.ParseOptions{ .non_destructive = true }.GetDocument();` | preserving input bytes, memory maps, exact whole-document formatting | decoded attrs/text are materialized outside the source buffer |
+| `strictest` | `const opts = html.ParseOptions{ .drop_whitespace_text_nodes = false };` | traversal predictability and text fidelity | keeps whitespace-only text nodes |
+| `fastest` | `const opts = html.ParseOptions{};` | throughput-first scraping | whitespace-only text nodes dropped |
+| `non-destructive` | `const opts = html.ParseOptions{ .non_destructive = true };` | preserving input bytes, memory maps, exact whole-document formatting | decoded attrs/text are materialized outside the source buffer |
 
 Fallback playbook:
 

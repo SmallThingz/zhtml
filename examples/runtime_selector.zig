@@ -1,14 +1,11 @@
 const std = @import("std");
 const html = @import("html");
-const default_options: html.ParseOptions = .{};
-const Document = default_options.Document();
 
 pub fn run() !void {
-    var doc = Document.init(std.testing.allocator);
-    defer doc.deinit();
-
+    const options: html.ParseOptions = .{};
     var input = "<div><a class='primary' href='/x'></a><a class='secondary' href='/y'></a></div>".*;
-    try doc.parse(&input);
+    var doc = try options.parse(std.testing.allocator, &input);
+    defer doc.deinit();
 
     const one = try doc.queryOneRuntime(std.testing.allocator, "a.primary");
     try std.testing.expect(one != null);

@@ -53,21 +53,18 @@ Source: `bench/results/external_suite_report.json`
 const std = @import("std");
 const html = @import("html");
 const options: html.ParseOptions = .{};
-const Document = options.GetDocument();
 
 test "basic parse + query" {
-    var doc = Document.init(std.testing.allocator);
-    defer doc.deinit();
-
     var input = "<div id='app'><a class='nav' href='/docs'>Docs</a></div>".*;
-    try doc.parse(&input);
+    var doc = try options.parse(std.testing.allocator, &input);
+    defer doc.deinit();
 
     const a = doc.queryOne("div#app > a.nav") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("/docs", a.getAttributeValue("href").?);
 }
 ```
 
-`doc.parse` only takes the input buffer. Parse behavior is part of the `Document` type you derive from `ParseOptions`. Use `const Document = html.ParseOptions{ .non_destructive = true }.GetDocument();` when the caller bytes must remain unchanged, including file-backed memory maps. This mode reads the original source directly and does not make a full-source copy.
+Parsing goes through `options.parse(...)`. Use `const options: html.ParseOptions = .{ .non_destructive = true };` when the caller bytes must remain unchanged, including file-backed memory maps. This mode reads the original source directly and does not make a full-source copy.
 
 ## ⚙️ Build Configuration
 

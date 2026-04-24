@@ -1,7 +1,6 @@
 const std = @import("std");
 const html = @import("html");
 const options: html.ParseOptions = .{ .non_destructive = true };
-const Document = options.Document();
 
 pub fn run() !void {
     try runBufferCase();
@@ -9,12 +8,10 @@ pub fn run() !void {
 }
 
 fn runBufferCase() !void {
-    var doc = Document.init(std.testing.allocator);
-    defer doc.deinit();
-
     var input = "<div id='x' data-v='a&amp;b'> hi &amp; bye </div>".*;
     const original = input;
-    try doc.parse(&input);
+    var doc = try options.parse(std.testing.allocator, &input);
+    defer doc.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
@@ -67,9 +64,8 @@ fn runMappedFileCase() !void {
     });
     defer mapped.destroy(io);
 
-    var doc = Document.init(std.testing.allocator);
+    var doc = try options.parse(std.testing.allocator, mapped.memory);
     defer doc.deinit();
-    try doc.parse(mapped.memory);
 
     const node = doc.queryOne("section#mapped") orelse return error.TestUnexpectedResult;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

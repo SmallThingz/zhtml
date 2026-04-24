@@ -1,14 +1,11 @@
 const std = @import("std");
 const html = @import("html");
-const default_options: html.ParseOptions = .{};
-const Document = default_options.Document();
 
 pub fn run() !void {
-    var doc = Document.init(std.testing.allocator);
-    defer doc.deinit();
-
+    const options: html.ParseOptions = .{};
     var input = "<a id='x' href='https://example.test/?a=1&amp;b=2' data-k='a&amp;b'>link</a>".*;
-    try doc.parse(&input);
+    var doc = try options.parse(std.testing.allocator, &input);
+    defer doc.deinit();
 
     const a = doc.queryOne("a#x[data-k='a&b']") orelse return error.TestUnexpectedResult;
     const href = a.getAttributeValue("href") orelse return error.TestUnexpectedResult;

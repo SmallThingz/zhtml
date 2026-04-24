@@ -1,14 +1,11 @@
 const std = @import("std");
 const html = @import("html");
-const default_options: html.ParseOptions = .{};
-const Document = default_options.Document();
 
 pub fn run() !void {
-    var doc = Document.init(std.testing.allocator);
-    defer doc.deinit();
-
+    const options: html.ParseOptions = .{};
     var input = "<div id='app'><a class='nav' href='/docs'>Docs</a></div>".*;
-    try doc.parse(&input);
+    var doc = try options.parse(std.testing.allocator, &input);
+    defer doc.deinit();
 
     const a = doc.queryOne("div#app > a.nav") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("/docs", a.getAttributeValue("href").?);

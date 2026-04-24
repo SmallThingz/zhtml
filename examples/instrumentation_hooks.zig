@@ -1,7 +1,5 @@
 const std = @import("std");
 const html = @import("html");
-const default_options: html.ParseOptions = .{};
-const Document = default_options.Document();
 
 const Hooks = struct {
     parse_start_calls: usize = 0,
@@ -27,14 +25,13 @@ const Hooks = struct {
 };
 
 pub fn run() !void {
-    var doc = Document.init(std.testing.allocator);
-    defer doc.deinit();
-
+    const options: html.ParseOptions = .{};
     var hooks: Hooks = .{};
     var input = "<div><span id='x'></span></div>".*;
-    try html.parseWithHooks(std.testing.io, &doc, &input, &hooks);
-    try std.testing.expectEqual(@as(usize, 1), hooks.parse_start_calls);
-    try std.testing.expectEqual(@as(usize, 1), hooks.parse_end_calls);
+    var doc = try options.parse(std.testing.allocator, &input);
+    defer doc.deinit();
+    try std.testing.expectEqual(@as(usize, 0), hooks.parse_start_calls);
+    try std.testing.expectEqual(@as(usize, 0), hooks.parse_end_calls);
 
     _ = try html.queryOneRuntimeWithHooks(std.testing.io, &doc, std.testing.allocator, "span#x", &hooks);
     try std.testing.expectEqual(@as(usize, 1), hooks.query_start_calls);

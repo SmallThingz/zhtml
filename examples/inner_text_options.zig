@@ -1,14 +1,11 @@
 const std = @import("std");
 const html = @import("html");
-const default_options: html.ParseOptions = .{};
-const Document = default_options.Document();
 
 pub fn run() !void {
-    var doc = Document.init(std.testing.allocator);
-    defer doc.deinit();
-
+    const options: html.ParseOptions = .{};
     var input = "<div id='x'> Hello\n  <span>world</span> &amp;\tteam </div>".*;
-    try doc.parse(&input);
+    var doc = try options.parse(std.testing.allocator, &input);
+    defer doc.deinit();
 
     const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
 

@@ -3,24 +3,20 @@ const html = @import("html");
 
 pub fn run() !void {
     const strictest_options: html.ParseOptions = .{ .drop_whitespace_text_nodes = false };
-    const StrictestDocument = strictest_options.Document();
     const fastest_options: html.ParseOptions = .{};
-    const FastestDocument = fastest_options.Document();
 
     const fixture =
         "<html><body>" ++
         "<ul><li class='item'>A</li><li class='item'>B</li></ul>" ++
         "</body></html>";
 
-    var strictest_doc = StrictestDocument.init(std.testing.allocator);
-    defer strictest_doc.deinit();
     var strictest_buf = fixture.*;
-    try strictest_doc.parse(&strictest_buf);
+    var strictest_doc = try strictest_options.parse(std.testing.allocator, &strictest_buf);
+    defer strictest_doc.deinit();
 
-    var fastest_doc = FastestDocument.init(std.testing.allocator);
-    defer fastest_doc.deinit();
     var fastest_buf = fixture.*;
-    try fastest_doc.parse(&fastest_buf);
+    var fastest_doc = try fastest_options.parse(std.testing.allocator, &fastest_buf);
+    defer fastest_doc.deinit();
 
     const strictest_count = blk: {
         var it = strictest_doc.queryAll("li.item");

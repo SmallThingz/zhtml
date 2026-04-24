@@ -1,12 +1,8 @@
 const std = @import("std");
 const html = @import("html");
-const default_options: html.ParseOptions = .{};
-const Document = default_options.Document();
 
 pub fn run() !void {
-    var doc = Document.init(std.testing.allocator);
-    defer doc.deinit();
-
+    const options: html.ParseOptions = .{};
     const input =
         "<div>" ++
         "<a id='a1' class='button nav' href='https://one'></a>" ++
@@ -14,7 +10,8 @@ pub fn run() !void {
         "</div>";
 
     var buf = input.*;
-    try doc.parse(&buf);
+    var doc = try options.parse(std.testing.allocator, &buf);
+    defer doc.deinit();
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
