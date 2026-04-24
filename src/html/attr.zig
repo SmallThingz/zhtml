@@ -73,6 +73,8 @@ pub fn parseRawValue(source: []const u8, span_end: usize, eq_index: usize) RawVa
     std.debug.assert(span_end <= source.len);
     std.debug.assert(eq_index < span_end);
     var i = eq_index + 1;
+    // Parsing starts from the `=` and skips leading whitespace so the caller
+    // can reuse the original attribute traversal cursor.
     while (i < span_end and tables.WhitespaceTable[source[i]]) : (i += 1) {}
 
     if (i >= span_end) {
@@ -108,6 +110,8 @@ pub fn parseParsedValue(source: []u8, span_end: usize, name_end: usize) ParsedVa
     std.debug.assert(span_end <= source.len);
     if (name_end + 1 >= span_end) return .{ .value = "", .next_start = span_end };
 
+    // In destructive mode parsed values are materialized in place and delimited
+    // by zero bytes plus optional gap metadata.
     const marker = source[name_end + 1];
     var value_start: usize = if (marker == 0) name_end + 2 else name_end + 1;
     if (value_start > span_end) value_start = span_end;
@@ -133,6 +137,8 @@ pub fn nextAfterValue(source: []const u8, value_end: usize, span_end: usize) usi
     if (i >= span_end) return span_end;
 
     if (source[i] == 0) {
+        // Gap metadata preserves how much source was skipped when the decoded
+        // value is shorter than its raw representation.
         if (i + 1 >= span_end) return span_end;
 
         const len_byte = source[i + 1];
@@ -170,6 +176,8 @@ pub fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []const u8, a
         return getAttrValueNonDestructive(doc_ptr, node, name, allocator);
     }
 
+    // Destructive mode does a single left-to-right pass over the raw attribute
+    // bytes and only materializes a value when the requested name matches.
     const mut_doc = @constCast(doc_ptr);
     const source: []u8 = mut_doc.source;
     const lookup_kind = classifyLookupName(name);
@@ -256,6 +264,8 @@ pub fn collectSelectedValues(
     if (selected_names.len == 0) return;
     if (selected_names.len != out_values.len) return;
 
+    // Selector matching often probes a few attribute names repeatedly; this
+    // helper resolves all requested names in one traversal of the attr span.
     var i: usize = node.name_or_text.end;
     const end: usize = @intCast(node.attr_end);
     var remaining: usize = 0;

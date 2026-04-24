@@ -30,6 +30,8 @@ pub fn traversalBounds(comptime Doc: type, doc: *const Doc, scope_root: IndexInt
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) {
         return .{ .start = 1, .end_excl = 1 };
     }
+    // Queries walk the document's preorder node array. Scoped queries stay
+    // inside the subtree range computed during parse.
     const start: IndexInt = if (scope_root == InvalidIndex) 1 else scope_root + 1;
     const end_excl: IndexInt = if (scope_root == InvalidIndex)
         @as(IndexInt, @intCast(doc.nodes.len))
@@ -140,6 +142,7 @@ pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
 pub fn queryOneIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: IndexInt) ?IndexInt {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return null;
     var best: ?IndexInt = null;
+    // Group matches are independent; the earliest document-order hit wins.
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
         const idx = firstMatchForGroup(Doc, doc, selector, group, scope_root) orelse continue;
@@ -201,6 +204,8 @@ fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: as
         .node_index = node_index,
     };
 
+    // Matching runs right-to-left with an explicit stack so descendant/sibling
+    // combinators avoid recursion and stay bounded on deep documents.
     while (depth != 0) {
         var frame = &frames[depth - 1];
         switch (frame.phase) {

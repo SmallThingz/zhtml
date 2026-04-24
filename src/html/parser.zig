@@ -67,19 +67,20 @@ fn ParseState(comptime opts: ParseOptions) type {
             defer self.parse_stack.deinit(self.doc.allocator);
             try self.reserveCapacities();
 
-            try self.pushNode(.{
-                .subtree_end = 0,
+            // Seed the synthetic document root so every parsed node has a stable
+            // parent chain and the open-element stack always has a sentinel.
+            try self.nodes.append(self.doc.allocator, .{ .subtree_end = 0 });
+            try self.parse_stack.append(self.doc.allocator, .{
+                .idx = 0,
+                .tag_key = 0,
+                .tag_len = 0,
             });
-            try self.pushStack(0, 0, 0);
 
-            try self.parseLoop(comptime opts.drop_whitespace_text_nodes);
-            self.finishOpenElements();
-        }
-
-        fn parseLoop(noalias self: *Self, comptime drop_ws_text: bool) !void {
+            // Main tokenization loop. Text spans and tags are dispatched here,
+            // while specialized helpers handle the actual node construction.
             while (self.i < self.input.len) {
                 if (self.input[self.i] != '<') {
-                    if (comptime drop_ws_text) {
+                    if (comptime opts.drop_whitespace_text_nodes) {
                         comptime std.debug.assert(opts.drop_whitespace_text_nodes);
                         try self.parseTextDropWhitespace();
                     } else {
@@ -109,9 +110,9 @@ fn ParseState(comptime opts: ParseOptions) type {
                     else => try self.parseOpeningTag(),
                 }
             }
-        }
 
-        fn finishOpenElements(noalias self: *Self) void {
+            // Any elements still on the open stack are implicitly closed at EOF.
+            // Their subtrees end at the final parsed node.
             while (self.parse_stack.items.len > 1) {
                 const open = self.parse_stack.pop().?;
                 var node = &self.nodes.items[open.idx];
@@ -126,6 +127,8 @@ fn ParseState(comptime opts: ParseOptions) type {
             const input_len = self.input.len;
 
             var estimated_nodes: usize = undefined;
+            // Fastest mode tends to collapse pure-whitespace runs, so its node
+            // count grows more slowly than strict mode on the same input bytes.
             if (opts.drop_whitespace_text_nodes) {
                 estimated_nodes = @max(@as(usize, 32), (input_len / 32) + 32);
             } else {
@@ -143,6 +146,8 @@ fn ParseState(comptime opts: ParseOptions) type {
         inline fn parseTextKeepWhitespace(noalias self: *Self) !void {
             comptime std.debug.assert(!opts.drop_whitespace_text_nodes);
             const start = self.i;
+            // Strict mode keeps every text run, so all we need here is the next
+            // tag boundary.
             self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '<') orelse self.input.len;
             if (self.i == start) return;
 
@@ -156,6 +161,8 @@ fn ParseState(comptime opts: ParseOptions) type {
         inline fn parseTextDropWhitespace(noalias self: *Self) !void {
             comptime std.debug.assert(opts.drop_whitespace_text_nodes);
             const start = self.i;
+            // Fastest mode can drop indentation-only runs, so the scanner tracks
+            // both the next tag boundary and whether any real text was present.
             const scanned = scanner.scanTextRun(self.input, self.i);
             self.i = scanned.lt_index;
             if (self.i == start) return;
@@ -175,6 +182,8 @@ fn ParseState(comptime opts: ParseOptions) type {
             const name_start = self.i;
             var tag_name_key: u64 = 0;
             var tag_name_key_len: u8 = 0;
+            // Parse the tag name once while opportunistically building the
+            // first-8-bytes lowercase key used by stack matching.
             while (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) : (self.i += 1) {
                 if (tag_name_key_len < 8) {
                     var c = self.input[self.i];
@@ -199,6 +208,8 @@ fn ParseState(comptime opts: ParseOptions) type {
             const tag_name = self.input[name_start..self.i];
             const name_end = self.i;
 
+            // Optional-close HTML elements are resolved before the new element
+            // is appended so sibling/parent links reflect the implied structure.
             if (self.parse_stack.items.len > 1 and tags.mayTriggerImplicitCloseWithKey(tag_name, tag_name_key)) {
                 self.applyImplicitClosures(tag_name, tag_name_key);
             }
@@ -217,6 +228,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 self.i = tag_end.gt_index + 1;
             } else {
                 @branchHint(.cold);
+                // Unterminated start tags degrade to "open until EOF".
                 attr_bytes_end = self.input.len;
                 self.i = self.input.len;
                 tag_gt_index = self.input.len;
@@ -279,6 +291,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             node.name_or_text = .{ .start = @intCast(name_start), .end = @intCast(name_end) };
             node.attr_end = @intCast(attr_bytes_end);
 
+            // Plaintext tags consume the rest of the document as one text child.
             if (!self_close and tags.isPlainTextTagWithKey(tag_name, tag_name_key)) {
                 const content_start = self.i;
                 if (self.input.len > content_start) {
@@ -294,6 +307,8 @@ fn ParseState(comptime opts: ParseOptions) type {
                 return;
             }
 
+            // Raw-text tags stay structured as elements, but their contents are
+            // copied as one opaque text child up to the matching close tag.
             if (!self_close and tags.isRawTextTagWithKey(tag_name, tag_name_key)) {
                 const content_start = self.i;
                 if (self.findRawTextClose(tag_name, self.i)) |close| {
@@ -328,8 +343,14 @@ fn ParseState(comptime opts: ParseOptions) type {
                 return;
             }
 
+            // Non-void, non-raw elements stay on the open stack until an
+            // explicit close, an optional-close rule, or EOF pops them.
             self.skipDroppedWhitespaceAfterStartTag();
-            try self.pushStack(node_idx, tag_name_key, @intCast(tag_name.len));
+            try self.parse_stack.append(self.doc.allocator, .{
+                .idx = node_idx,
+                .tag_key = tag_name_key,
+                .tag_len = @intCast(tag_name.len),
+            });
         }
 
         fn parseClosingTag(noalias self: *Self) void {
@@ -339,6 +360,8 @@ fn ParseState(comptime opts: ParseOptions) type {
             const name_start = self.i;
             var close_key: u64 = 0;
             var close_key_len: u8 = 0;
+            // Closing tags rebuild the same first-8-bytes key so stack matching
+            // usually avoids slicing the stored element name.
             while (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) : (self.i += 1) {
                 if (close_key_len < 8) {
                     var c = self.input[self.i];
@@ -369,6 +392,7 @@ fn ParseState(comptime opts: ParseOptions) type {
 
             if (self.parse_stack.items.len > 1) {
                 const top = self.parse_stack.items[self.parse_stack.items.len - 1];
+                // Fast path: most closing tags match the current open element.
                 if (self.openElemMatchesClose(top, close_name, close_key)) {
                     _ = self.parse_stack.pop();
                     var node = &self.nodes.items[top.idx];
@@ -388,6 +412,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             }
 
             if (found) |pos| {
+                // Permissive recovery: pop everything above the matched opener.
                 while (self.parse_stack.items.len > pos) {
                     const open = self.parse_stack.pop().?;
                     var node = &self.nodes.items[open.idx];
@@ -404,6 +429,8 @@ fn ParseState(comptime opts: ParseOptions) type {
                 if (!tags.isImplicitCloseSourceWithLenAndKey(top.tag_len, top.tag_key)) break;
                 if (!tags.shouldImplicitlyCloseWithLenAndKey(top.tag_len, top.tag_key, new_tag, new_tag_key)) break;
 
+                // Optional-close rules rewrite nesting into sibling structure
+                // before the incoming tag is appended.
                 _ = self.parse_stack.pop();
                 var n = &self.nodes.items[top.idx];
                 n.subtree_end = @intCast(self.nodes.items.len - 1);
@@ -416,7 +443,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 .parent = parent_idx,
                 .subtree_end = idx,
             };
-            try self.pushNode(node);
+            try self.nodes.append(self.doc.allocator, node);
             return idx;
         }
 
@@ -427,9 +454,11 @@ fn ParseState(comptime opts: ParseOptions) type {
                 .subtree_end = idx,
             };
 
-            try self.pushNode(node);
+            try self.nodes.append(self.doc.allocator, node);
 
             if (parent_idx != InvalidIndex) {
+                // Children are stored in append order but linked backward through
+                // `prev_sibling` so append stays O(1).
                 var p = &self.nodes.items[parent_idx];
                 if (p.last_child == InvalidIndex) {
                     p.last_child = idx;
@@ -443,24 +472,14 @@ fn ParseState(comptime opts: ParseOptions) type {
             return idx;
         }
 
-        fn pushNode(noalias self: *Self, node: @TypeOf(self.nodes.items[0])) !void {
-            try self.nodes.append(self.doc.allocator, node);
-        }
-
-        fn pushStack(noalias self: *Self, idx: IndexInt, tag_key: u64, tag_len: u16) !void {
-            try self.parse_stack.append(self.doc.allocator, .{
-                .idx = idx,
-                .tag_key = tag_key,
-                .tag_len = tag_len,
-            });
-        }
-
         inline fn currentParent(noalias self: *Self) IndexInt {
             if (self.parse_stack.items.len == 0) return InvalidIndex;
             return self.parse_stack.items[self.parse_stack.items.len - 1].idx;
         }
 
         inline fn openElemMatchesClose(noalias self: *Self, open: OpenElem, close_name: []const u8, close_key: u64) bool {
+            // Length + key rejects the common non-match case without touching
+            // the stored tag bytes. Long names only compare the tail on a hit.
             if (open.tag_len != close_name.len or open.tag_key != close_key) return false;
             if (close_name.len <= 8) return true;
             const open_name = self.nodes.items[open.idx].name_or_text.slice(self.input);
@@ -493,6 +512,7 @@ fn ParseState(comptime opts: ParseOptions) type {
 
         fn skipBangNode(noalias self: *Self) void {
             self.i += 2;
+            // Doctype-like nodes are skipped as opaque declarations.
             if (scanner.findTagEndRespectQuotes(self.input, self.i)) |tag_end| {
                 self.i = tag_end.gt_index + 1;
             } else {
@@ -502,6 +522,8 @@ fn ParseState(comptime opts: ParseOptions) type {
 
         fn skipPi(noalias self: *Self) void {
             self.i += 2;
+            // Processing-instruction-like forms are treated as opaque and end at
+            // the next `>`.
             self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '>') orelse self.input.len;
             if (self.i < self.input.len) self.i += 1;
         }
@@ -514,6 +536,8 @@ fn ParseState(comptime opts: ParseOptions) type {
             if (!opts.drop_whitespace_text_nodes) return;
             if (self.i >= self.input.len or !tables.WhitespaceTable[self.input[self.i]]) return;
 
+            // Whitespace immediately before another tag would become a dropped
+            // text node anyway, so skip it eagerly in fastest mode.
             var j = self.i + 1;
             while (j < self.input.len and tables.WhitespaceTable[self.input[j]]) : (j += 1) {}
             if (j < self.input.len and self.input[j] == '<') {
@@ -526,6 +550,8 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         inline fn findRawTextClose(noalias self: *Self, tag_name: []const u8, start: usize) ?struct { content_end: usize, close_end: usize } {
+            // Raw-text scanning only recognizes a real `</tag>` terminator.
+            // Everything else, including stray `<` bytes, stays in the text run.
             var j = std.mem.indexOfScalarPos(u8, self.input, start, '<') orelse return null;
             const tag_len = tag_name.len;
             if (tag_len == 0) return null;

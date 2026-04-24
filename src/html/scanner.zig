@@ -50,6 +50,8 @@ pub fn scanTextRun(hay: []const u8, start: usize) TextRun {
 pub fn findTagEndRespectQuotes(hay: []const u8, _start: usize) ?TagEnd {
     std.debug.assert(_start <= hay.len);
     var start = _start;
+    // Search for the next tag delimiter, but bounce over quoted attribute
+    // payloads so embedded `>` bytes do not terminate the tag early.
     var end = @call(.always_inline, std.mem.indexOfAnyPos, .{ u8, hay, start, ">'\"" }) orelse {
         @branchHint(.cold);
         return null;
@@ -121,6 +123,7 @@ pub fn findSvgSubtreeEnd(hay: []const u8, start: usize) ?usize {
                 i = gt + 1;
             },
             '/' => {
+                // Only explicit closing `</svg>` tags reduce nesting depth.
                 var j = k + 1;
                 while (j < hay.len and tables.WhitespaceTable[hay[j]]) : (j += 1) {}
                 const name_start = j;
@@ -133,6 +136,8 @@ pub fn findSvgSubtreeEnd(hay: []const u8, start: usize) ?usize {
                 i = gt + 1;
             },
             else => {
+                // Opening tags still need quote-aware end scanning so `<svg`
+                // inside attribute values does not perturb the nesting depth.
                 var j = k;
                 while (j < hay.len and tables.TagNameCharTable[hay[j]]) : (j += 1) {}
                 if (j == k) {
