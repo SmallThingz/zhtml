@@ -20,6 +20,33 @@ const IndexInt = common.IndexInt;
 
 /// Sentinel used for missing node indexes and invalid spans.
 pub const InvalidIndex: IndexInt = common.InvalidIndex;
+/// Inclusive-exclusive byte span into the document source buffer.
+pub const Span = struct {
+    /// Inclusive start byte offset in the document source.
+    start: IndexInt = 0,
+    /// Exclusive end byte offset in the document source.
+    end: IndexInt = 0,
+
+    /// Returns the span length in bytes.
+    pub fn len(self: @This()) IndexInt {
+        return self.end - self.start;
+    }
+
+    /// Borrows immutable bytes referenced by this span.
+    pub fn slice(self: @This(), source: []const u8) []const u8 {
+        return source[self.start..self.end];
+    }
+
+    /// Borrows mutable bytes referenced by this span.
+    pub fn sliceMut(self: @This(), source: []u8) []u8 {
+        return source[self.start..self.end];
+    }
+
+    /// Formats this span for human-readable output.
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("Span{{start={}, end={}}}", .{ self.start, self.end });
+    }
+};
 
 /// Backing node storage record for parsed DOM state.
 pub const RawNode = struct {
@@ -1112,34 +1139,6 @@ pub const ParseOptions = struct {
                 };
             }
         };
-    }
-};
-
-/// Inclusive-exclusive byte span into the document source buffer.
-pub const Span = struct {
-    /// Inclusive start byte offset in the document source.
-    start: IndexInt = 0,
-    /// Exclusive end byte offset in the document source.
-    end: IndexInt = 0,
-
-    /// Returns the span length in bytes.
-    pub fn len(self: @This()) IndexInt {
-        return self.end - self.start;
-    }
-
-    /// Borrows immutable bytes referenced by this span.
-    pub fn slice(self: @This(), source: []const u8) []const u8 {
-        return source[self.start..self.end];
-    }
-
-    /// Borrows mutable bytes referenced by this span.
-    pub fn sliceMut(self: @This(), source: []u8) []u8 {
-        return source[self.start..self.end];
-    }
-
-    /// Formats this span for human-readable output.
-    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("Span{{start={}, end={}}}", .{ self.start, self.end });
     }
 };
 
