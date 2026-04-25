@@ -32,7 +32,7 @@ pub const TextRun = struct {
 /// This is intended for parse paths that drop whitespace-only text nodes. When
 /// whitespace-only text must be preserved, the parser uses a plain `<` search
 /// instead.
-pub fn scanTextRun(hay: []const u8, start: usize) TextRun {
+pub inline fn scanTextRun(hay: []const u8, start: usize) TextRun {
     if (start >= hay.len) return .{ .lt_index = hay.len, .has_non_whitespace = false };
 
     var i = start;

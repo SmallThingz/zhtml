@@ -63,9 +63,26 @@ fn ParseState(comptime opts: ParseOptions) type {
             tag_len: u16 = 0,
         };
 
-        fn parse(noalias self: *Self) !void {
-            defer self.parse_stack.deinit(self.doc.allocator);
-            try self.reserveCapacities();
+        /// Reserve capacities + add initial values to containers
+        inline fn initContainers(noalias self: *Self) !void {
+            const alloc = self.doc.allocator;
+            const input_len = self.input.len;
+
+            var estimated_nodes: usize = undefined;
+            // Fastest mode tends to collapse pure-whitespace runs, so its node
+            // count grows more slowly than strict mode on the same input bytes.
+            if (opts.drop_whitespace_text_nodes) {
+                estimated_nodes = @max(@as(usize, 32), (input_len / 32) + 32);
+            } else {
+                estimated_nodes = @max(@as(usize, 16), (input_len / 16) + 8);
+            }
+
+            // Keep startup reserves bounded so giant sparse/plaintext inputs do
+            // not try to preallocate nodes proportional to total byte length.
+            estimated_nodes = @min(estimated_nodes, MaxInitialNodeReserve);
+
+            try self.nodes.ensureTotalCapacity(alloc, estimated_nodes);
+            try self.parse_stack.ensureTotalCapacity(alloc, InitialParseStackCapacity);
 
             // Seed the synthetic document root so every parsed node has a stable
             // parent chain and the open-element stack always has a sentinel.
@@ -75,35 +92,41 @@ fn ParseState(comptime opts: ParseOptions) type {
                 .tag_key = 0,
                 .tag_len = 0,
             });
+        }
+
+        inline fn parse(noalias self: *Self) !void {
+            defer self.parse_stack.deinit(self.doc.allocator);
+            try self.initContainers();
 
             // Main tokenization loop. Text spans and tags are dispatched here,
             // while specialized helpers handle the actual node construction.
             while (self.i + 1 < self.input.len) {
                 if (self.input[self.i] != '<') {
                     if (comptime opts.drop_whitespace_text_nodes) {
-                        comptime std.debug.assert(opts.drop_whitespace_text_nodes);
                         try self.parseTextDropWhitespace();
                     } else {
-                        comptime std.debug.assert(!opts.drop_whitespace_text_nodes);
                         try self.parseTextKeepWhitespace();
                     }
-                    continue;
-                }
-
-                switch (self.input[self.i + 1]) {
+                } else switch (self.input[self.i + 1]) {
                     '/' => self.parseClosingTag(),
-                    '?' => self.skipPi(),
+                    '?' => {
+                        @branchHint(.cold);
+                        self.skipPi();
+                    },
                     '!' => {
+                        @branchHint(.unlikely);
                         if (self.i + 3 < self.input.len and self.input[self.i + 2] == '-' and self.input[self.i + 3] == '-') {
                             self.skipComment();
                         } else {
-                            @branchHint(.unlikely);
+                            @branchHint(.cold);
                             self.skipBangNode();
                         }
                     },
                     else => try self.parseOpeningTag(),
                 }
             }
+
+            // Handle the last char
             if (self.i < self.input.len) {
                 std.debug.assert(self.i + 1 == self.input.len);
                 if (!(comptime opts.drop_whitespace_text_nodes) or !tables.WhitespaceTable[self.input[self.i]]) {
@@ -124,52 +147,31 @@ fn ParseState(comptime opts: ParseOptions) type {
             self.parse_stack.clearRetainingCapacity();
         }
 
-        fn reserveCapacities(noalias self: *Self) !void {
-            const alloc = self.doc.allocator;
-            const input_len = self.input.len;
-
-            var estimated_nodes: usize = undefined;
-            // Fastest mode tends to collapse pure-whitespace runs, so its node
-            // count grows more slowly than strict mode on the same input bytes.
-            if (opts.drop_whitespace_text_nodes) {
-                estimated_nodes = @max(@as(usize, 32), (input_len / 32) + 32);
-            } else {
-                estimated_nodes = @max(@as(usize, 16), (input_len / 16) + 8);
-            }
-
-            // Keep startup reserves bounded so giant sparse/plaintext inputs do
-            // not try to preallocate nodes proportional to total byte length.
-            estimated_nodes = @min(estimated_nodes, MaxInitialNodeReserve);
-
-            try self.nodes.ensureTotalCapacity(alloc, estimated_nodes);
-            try self.parse_stack.ensureTotalCapacity(alloc, InitialParseStackCapacity);
-        }
-
         inline fn parseTextKeepWhitespace(noalias self: *Self) !void {
             comptime std.debug.assert(!opts.drop_whitespace_text_nodes);
+            std.debug.assert(self.input[self.i] != '<');
+            std.debug.assert(self.i + 1 < self.input.len);
+
             const start = self.i;
-            // Strict mode keeps every text run, so all we need here is the next
-            // tag boundary.
             self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '<') orelse self.input.len;
-            if (self.i == start) return;
 
             _ = try self.appendTextNode(start, self.i);
         }
 
         inline fn parseTextDropWhitespace(noalias self: *Self) !void {
             comptime std.debug.assert(opts.drop_whitespace_text_nodes);
+            std.debug.assert(self.input[self.i] != '<');
+            std.debug.assert(self.i + 1 < self.input.len);
+
             const start = self.i;
-            // Fastest mode can drop indentation-only runs, so the scanner tracks
-            // both the next tag boundary and whether any real text was present.
             const scanned = scanner.scanTextRun(self.input, self.i);
             self.i = scanned.lt_index;
-            if (self.i == start) return;
             if (!scanned.has_non_whitespace) return;
 
             _ = try self.appendTextNode(start, self.i);
         }
 
-        fn parseOpeningTag(noalias self: *Self) !void {
+        inline fn parseOpeningTag(noalias self: *Self) !void {
             self.i += 1; // <
             self.skipWs();
 
@@ -326,7 +328,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             });
         }
 
-        fn parseClosingTag(noalias self: *Self) void {
+        inline fn parseClosingTag(noalias self: *Self) void {
             self.i += 2; // </
             self.skipWs();
 
@@ -498,7 +500,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             }
         }
 
-        fn skipPi(noalias self: *Self) void {
+        inline fn skipPi(noalias self: *Self) void {
             self.i += 2;
             // Processing-instruction-like forms are treated as opaque and end at
             // the next `>`.
