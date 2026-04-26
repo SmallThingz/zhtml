@@ -17,40 +17,6 @@ const MaxInitialNodeReserve: usize = 1 << 20;
 // In destructive mode tag names are normalized in-place. In non-destructive mode
 // parsing is read-only and any lazy decode work happens outside this file.
 
-/// Scans from `start` to next `>` while skipping quoted `>` inside attributes.
-pub fn findTagEndRespectQuotes(hay: []const u8, _start: usize) ?usize {
-    std.debug.assert(_start <= hay.len);
-    var start = _start;
-    // Search for the next tag delimiter, but bounce over quoted attribute
-    // payloads so embedded `>` bytes do not terminate the tag early.
-    var end = @call(.always_inline, std.mem.indexOfAnyPos, .{ u8, hay, start, ">'\"" }) orelse {
-        @branchHint(.cold);
-        return null;
-    };
-    blk: switch (hay[end]) {
-        '>' => return end,
-        '\'', '"' => |q| {
-            start = 1 + end;
-            start = 1 + (std.mem.indexOfScalarPos(u8, hay, start, q) orelse {
-                @branchHint(.cold);
-                return null;
-            });
-            end = @call(.always_inline, std.mem.indexOfAnyPos, .{ u8, hay, start, ">'\"" }) orelse {
-                @branchHint(.cold);
-                return null;
-            };
-            continue :blk hay[end];
-        },
-        else => unreachable,
-    }
-}
-
-test "findTagEndRespectQuotes handles quoted >" {
-    const s = " x='1>2' y=z />";
-    const out = findTagEndRespectQuotes(s, 0) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, s.len - 1), out);
-}
-
 /// Parses `input` and returns a fully owned document for `opts`.
 pub fn parse(comptime opts: ParseOptions, allocator: std.mem.Allocator, input: opts.Input()) !opts.Document() {
     if (!common.lenFits(input.len)) return error.InputTooLarge;
@@ -281,8 +247,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 if (self.input[self.i] == '>') {
                     defer self.i += 1;
                     break :blk self.i;
-                } else if (findTagEndRespectQuotes(self.input, self.i)) |v| {
-                    self.i = v + 1;
+                } else if (self.findTagEndRespectQuotes()) |v| {
                     break :blk v;
                 } else {
                     @branchHint(.cold);
@@ -494,10 +459,36 @@ fn ParseState(comptime opts: ParseOptions) type {
         fn skipBangNode(noalias self: *Self) void {
             self.i += 2;
             // Doctype-like nodes are skipped as opaque declarations.
-            if (findTagEndRespectQuotes(self.input, self.i)) |tag_end| {
-                self.i = tag_end + 1;
+            if (self.findTagEndRespectQuotes()) |_| {
             } else {
                 self.i = self.input.len;
+            }
+        }
+
+        inline fn findTagEndRespectQuotes(noalias self: *Self) ?usize {
+            std.debug.assert(self.i <= self.input.len);
+            var end = @call(.always_inline, std.mem.indexOfAnyPos, .{ u8, self.input, self.i, ">'\"" }) orelse {
+                @branchHint(.cold);
+                return null;
+            };
+            blk: switch (self.input[end]) {
+                '>' => {
+                    self.i = end + 1;
+                    return end;
+                },
+                '\'', '"' => |q| {
+                    self.i = 1 + end;
+                    self.i = 1 + (std.mem.indexOfScalarPos(u8, self.input, self.i, q) orelse {
+                        @branchHint(.cold);
+                        return null;
+                    });
+                    end = @call(.always_inline, std.mem.indexOfAnyPos, .{ u8, self.input, self.i, ">'\"" }) orelse {
+                        @branchHint(.cold);
+                        return null;
+                    };
+                    continue :blk self.input[end];
+                },
+                else => unreachable,
             }
         }
 
@@ -554,16 +545,16 @@ fn ParseState(comptime opts: ParseOptions) type {
                     else => {
                         const name_start = self.i;
                         while (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) : (self.i += 1) {}
-                        if (self.i == name_start) {
+                        const name_end = self.i;
+                        if (name_end == name_start) {
                             self.i = lt + 1;
                             continue;
                         }
 
-                        const tag_end = findTagEndRespectQuotes(self.input, self.i) orelse return null;
-                        if (self.i - name_start == 3 and isSvgTag(tags.first8Key(self.input[name_start..self.i])) and self.input[tag_end - 1] != '/') {
+                        const tag_end = self.findTagEndRespectQuotes() orelse return null;
+                        if (name_end - name_start == 3 and isSvgTag(tags.first8Key(self.input[name_start..name_end])) and self.input[tag_end - 1] != '/') {
                             depth += 1;
                         }
-                        self.i = tag_end + 1;
                     },
                 }
             }
@@ -615,15 +606,15 @@ fn ParseState(comptime opts: ParseOptions) type {
                     continue;
                 }
 
-                self.i = findTagEndRespectQuotes(self.input, self.i) orelse self.input.len;
-                if (self.i >= self.input.len or self.input[self.i] != '>') {
+                const tag_end = self.findTagEndRespectQuotes() orelse self.input.len;
+                if (tag_end >= self.input.len or self.input[tag_end] != '>') {
                     j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
                     continue;
                 }
 
                 return .{
                     .content_end = j,
-                    .close_end = self.i + 1,
+                    .close_end = self.i,
                 };
             }
             return null;
