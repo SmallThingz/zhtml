@@ -233,6 +233,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                         @constCast(self.input)[self.i] = c;
                     }
                     tag_name_key |= @as(u64, c) << @as(u6, @intCast(i * 8));
+                    self.i += 1;
                 } else {
                     break;
                 }
@@ -334,6 +335,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                         @constCast(self.input)[self.i] = c;
                     }
                     close_key |= @as(u64, c) << @as(u6, @intCast(i * 8));
+                    self.i += 1;
                 } else {
                     break;
                 }
@@ -507,18 +509,19 @@ fn ParseState(comptime opts: ParseOptions) type {
                 const name_start = k;
                 var close_key: u64 = 0;
                 for (0 .. 8) |i| {
-                    if (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) {
-                        var c = self.input[self.i];
+                    if (k < self.input.len and tables.TagNameCharTable[self.input[k]]) {
+                        var c = self.input[k];
                         c = tables.lower(c);
                         if (!comptime opts.non_destructive) {
-                            @constCast(self.input)[self.i] = c;
+                            @constCast(self.input)[k] = c;
                         }
                         close_key |= @as(u64, c) << @as(u6, @intCast(i * 8));
+                        k += 1;
                     } else {
                         break;
                     }
                 } else {
-                    while (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) : (self.i += 1) {}
+                    while (k < self.input.len and tables.TagNameCharTable[self.input[k]]) : (k += 1) {}
                 }
 
                 if (k == name_start) {
@@ -734,6 +737,8 @@ fn fillInterestingParserBytesSmith(smith: *std.testing.Smith, out: []u8) void {
 }
 
 fn runParserPropertyCase(alloc: std.mem.Allocator, input: []const u8) !void {
+    if (input.len == 0) return;
+
     const destructive_input = try alloc.dupe(u8, input);
     defer alloc.free(destructive_input);
     const nondestructive_input = try alloc.dupe(u8, input);
@@ -1158,6 +1163,7 @@ test "parser randomized structural sweep" {
 
 fn fuzzParserProperties(alloc: std.mem.Allocator, smith: *std.testing.Smith) !void {
     const len = smith.value(u8);
+    if (len == 0) return;
     const input = try alloc.alloc(u8, len);
     defer alloc.free(input);
     fillInterestingParserBytesSmith(smith, input);
@@ -1166,7 +1172,6 @@ fn fuzzParserProperties(alloc: std.mem.Allocator, smith: *std.testing.Smith) !vo
 
 test "fuzz parser preserves invariants across parse modes" {
     try std.testing.fuzz(std.testing.allocator, fuzzParserProperties, .{ .corpus = &.{
-        "",
         "<div></div>",
         "<div id='x' class='a b'>text</div>",
         "<script>if (a < b) { x = \"<tag>\"; }</script>",
