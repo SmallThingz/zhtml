@@ -132,8 +132,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             }
 
             // Handle the last char; only possibility: self.i == self.input.len - 1
-            // Done this way to prevent underflow/overflow
-            if (self.input.len - self.i == 1) {
+            if (self.i == self.input.len - 1) {
                 const parent_idx = self.currentParent();
                 const last_idx = self.nodes.items.len - 1;
                 const last = &self.nodes.items[last_idx];
@@ -157,7 +156,7 @@ fn ParseState(comptime opts: ParseOptions) type {
 
         inline fn handleText(noalias self: *Self) !void {
             std.debug.assert(self.input[self.i] != '<');
-            std.debug.assert(self.i + 1 < self.input.len);
+            std.debug.assert(self.i < self.input.len - 1);
 
             const start = self.i;
             if (comptime opts.drop_whitespace_text_nodes) {
@@ -186,7 +185,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 try self.addNode(.{start, self.i}, .text_node, .{});
             }
 
-            std.debug.assert(self.i + 1 >= self.input.len or self.input[self.i] == '<');
+            std.debug.assert(self.i >= self.input.len - 1 or self.input[self.i] == '<');
         }
 
         /// Intended to be called from inside of parseOpeningTag to parse the remaining contents as text
@@ -319,7 +318,6 @@ fn ParseState(comptime opts: ParseOptions) type {
 
         inline fn parseClosingTag(noalias self: *Self) void {
             self.i += 2; // </
-            self.skipWs();
 
             const name_start = self.i;
             var close_key: u64 = 0;
@@ -329,11 +327,9 @@ fn ParseState(comptime opts: ParseOptions) type {
             while (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) : (self.i += 1) {
                 if (close_key_len < 8) {
                     var c = self.input[self.i];
-                    if (c >= 'A' and c <= 'Z') {
-                        c = tables.lower(c);
-                        if (!comptime opts.non_destructive) {
-                            @constCast(self.input)[self.i] = c;
-                        }
+                    c = tables.lower(c);
+                    if (!comptime opts.non_destructive) {
+                        @constCast(self.input)[self.i] = c;
                     }
                     close_key |= @as(u64, c) << @as(u6, @intCast(close_key_len * 8));
                     close_key_len += 1;
@@ -345,28 +341,26 @@ fn ParseState(comptime opts: ParseOptions) type {
             if (self.i < self.input.len and self.input[self.i] == '>') {
                 self.i += 1;
             } else {
-                self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '>') orelse self.input.len;
-                if (self.i < self.input.len) self.i += 1;
+                self.i = 1 + (std.mem.indexOfScalarPos(u8, self.input, self.i, '>') orelse (self.input.len - 1));
             }
 
-            if (close_name.len == 0) {
+            if (close_name.len == 0 or self.parse_stack.items.len == 0) { // same behavior as browser; skip this
                 @branchHint(.cold);
                 return;
             }
 
-            if (self.parse_stack.items.len > 1) {
-                const top = self.parse_stack.items[self.parse_stack.items.len - 1];
-                // Fast path: most closing tags match the current open element.
-                if (self.openElemMatchesClose(top, close_name, close_key)) {
-                    _ = self.parse_stack.pop();
-                    var node = &self.nodes.items[top.idx];
-                    node.subtree_end = @intCast(self.nodes.items.len - 1);
-                    return;
-                }
+            const top = self.parse_stack.items[self.parse_stack.items.len - 1];
+            // Fast path: most closing tags match the current open element.
+            if (self.openElemMatchesClose(top, close_name, close_key)) {
+                @branchHint(.likely);
+                _ = self.parse_stack.pop();
+                var node = &self.nodes.items[top.idx];
+                node.subtree_end = @intCast(self.nodes.items.len - 1);
+                return;
             }
 
             var found: ?usize = null;
-            var s = self.parse_stack.items.len;
+            var s = self.parse_stack.items.len - 1;
             while (s > 1) {
                 s -= 1;
                 const open = self.parse_stack.items[s];
@@ -376,6 +370,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             }
 
             if (found) |pos| {
+                @branchHint(.likely);
                 // Permissive recovery: pop everything above the matched opener.
                 while (self.parse_stack.items.len > pos) {
                     const open = self.parse_stack.pop().?;
