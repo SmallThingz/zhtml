@@ -23,9 +23,9 @@ pub const InvalidIndex: IndexInt = common.InvalidIndex;
 /// Inclusive-exclusive byte span into the document source buffer.
 pub const Span = struct {
     /// Inclusive start byte offset in the document source.
-    start: IndexInt = 0,
+    start: IndexInt,
     /// Exclusive end byte offset in the document source.
-    end: IndexInt = 0,
+    end: IndexInt,
 
     /// Returns the span length in bytes.
     pub fn len(self: @This()) IndexInt {
@@ -51,22 +51,33 @@ pub const Span = struct {
 /// Backing node storage record for parsed DOM state.
 pub const RawNode = struct {
     /// Tag-name span for elements or text span for text nodes.
-    name_or_text: Span = .{},
+    name_or_text: Span,
 
     /// End of the raw attribute byte span for element nodes.
     /// Attribute bytes begin at `name_or_text.end`.
     /// `0` marks non-element nodes (document root at index 0, or text).
-    attr_end: IndexInt = 0,
+    attr_end: AttrEnd = .invalid_1,
 
     /// Last direct child index. The first child is derived from `index + 1`.
-    last_child: IndexInt = InvalidIndex,
+    last_child: IndexInt,
     /// Previous sibling index. The next sibling is derived from `subtree_end + 1`.
-    prev_sibling: IndexInt = InvalidIndex,
+    prev_sibling: IndexInt,
     /// Parent node index.
-    parent: IndexInt = InvalidIndex,
+    parent: IndexInt,
 
     /// Inclusive subtree tail index for fast descendant skipping.
-    subtree_end: IndexInt = 0,
+    subtree_end: IndexInt ,
+
+    /// It is not possible for attr end to be < 2; here is the reasoning.
+    /// `<x>`
+    ///  ^^!
+    ///
+    ///  So the very first attr can only start at 2nd index
+    pub const AttrEnd = enum (IndexInt) {
+        text_node = 0,
+        invalid_1 = 1,
+        _,
+    };
 
     /// Returns whether `idx` designates the synthetic document root.
     pub inline fn isDocument(_: @This(), idx: IndexInt) bool {

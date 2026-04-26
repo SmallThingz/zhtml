@@ -3,8 +3,10 @@ const tables = @import("tables.zig");
 const tags = @import("tags.zig");
 const scanner = @import("scanner.zig");
 const common = @import("../common.zig");
-const ParseOptions = @import("document.zig").ParseOptions;
-const RawNode = @import("document.zig").RawNode;
+const document = @import("document.zig");
+
+const ParseOptions = document.ParseOptions;
+const RawNode = document.RawNode;
 
 const InvalidIndex: IndexInt = common.InvalidIndex;
 const IndexInt = common.IndexInt;
@@ -122,23 +124,24 @@ fn ParseState(comptime opts: ParseOptions) type {
                 }
             }
 
-            // Handle the last char
-            if (self.i < self.input.len) {
-                std.debug.assert(self.i + 1 == self.input.len);
-                if (!(comptime opts.drop_whitespace_text_nodes) or !tables.WhitespaceTable[self.input[self.i]]) {
-                    const start = self.i;
-                    self.i += 1;
-                    _ = try self.appendTextNode(start, self.i);
+            // Handle the last char; only possibility: self.i == self.input.len - 1
+            if (self.i == self.input.len - 1) {
+                const last_idx = self.nodes.items.len - 1;
+                const last = &self.nodes.items[last_idx];
+                if (last.isText(last_idx)) {
+                    last.name_or_text.end = self.input.len;
+                } else {
+                    if (!(comptime opts.drop_whitespace_text_nodes) or !tables.WhitespaceTable[self.input[self.i]]) {
+                        try self.addNode(.{self.i, self.input.len}, .text_node, .{});
+                    }
                 }
+                self.i += 1;
             }
+            std.debug.assert(self.i == self.input.len);
 
             // Any elements still on the open stack are implicitly closed at EOF.
             // Their subtrees end at the final parsed node.
-            while (self.parse_stack.items.len > 1) {
-                const open = self.parse_stack.pop().?;
-                var node = &self.nodes.items[open.idx];
-                node.subtree_end = @intCast(self.nodes.items.len - 1);
-            }
+            for (self.parse_stack.items) |open| self.nodes.items[open.idx].subtree_end = @intCast(self.nodes.items.len - 1);
             self.nodes.items[0].subtree_end = @intCast(self.nodes.items.len - 1);
             self.parse_stack.clearRetainingCapacity();
         }
@@ -160,7 +163,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             }
 
             self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '<') orelse self.input.len;
-            _ = try self.appendTextNode(start, self.i);
+            try self.addNode(.{start, self.i}, .text_node, .{});
         }
 
         /// Intended to be called from inside of parseOpeningTag to parse the remaining contents as text
@@ -185,15 +188,9 @@ fn ParseState(comptime opts: ParseOptions) type {
             name_start: usize,
             name_end: usize,
             attr_end: usize,
-            tag_end: IndexInt
         ) !void {
-            const svg_self_close = self.input[tag_end - 1] == '/';
-            const node_idx = try self.appendElementNode(name_start, name_end, attr_end);
-            var node = &self.nodes.items[node_idx];
-            if (svg_self_close) {
-                node.subtree_end = node_idx;
-                return;
-            }
+            const parent_idx: IndexInt = @intCast(self.nodes.items.len);
+            try self.addNode(.{name_start, name_end}, @enumFromInt(attr_end), .{});
 
             const content_start = self.i;
             const end = blk: {
@@ -205,10 +202,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                     break :blk .{.gt_index = self.i, .content_end = self.i};
                 }
             };
-            _ = try self.appendTextNodeToParent(node_idx, content_start, end.content_end - 1);
-
-            node = &self.nodes.items[node_idx];
-            node.subtree_end = @intCast(self.nodes.items.len - 1);
+            try self.addNode(.{content_start, end.content_end - 1}, .text_node, .{.parent = parent_idx});
         }
 
         inline fn parseOpeningTag(noalias self: *Self) !void {
@@ -239,11 +233,13 @@ fn ParseState(comptime opts: ParseOptions) type {
                 return self.handleInvalidOpeningTag(@intCast(name_start - 1));
             }
 
-            const attr_end, const tag_end: usize = blk: {
+            const attr_end: usize = blk: {
                 if (self.input[self.i] == '>') {
-                    break :blk .{self.i, self.i};
+                    defer self.i += 1;
+                    break :blk self.i;
                 } else if (scanner.findTagEndRespectQuotes(self.input, self.i)) |v| {
-                    break :blk .{v.attr_end, v.gt_index};
+                    self.i = v.gt_index + 1;
+                    break :blk v.attr_end;
                 } else {
                     @branchHint(.cold);
                     // invalid tag, skip content; same as browser
@@ -254,7 +250,32 @@ fn ParseState(comptime opts: ParseOptions) type {
 
             // In case this is an svg tag: Note: we still treat svg's attribute like we do html attributes which is not 100% correct
             // This is preferred over the complications that arise from parsing as xml tho
-            if (isSvgTag(tag_name, tag_name_key)) return self.handleSvgTag(name_start, name_end, attr_end, tag_end);
+            if (isSvgTag(tag_name, tag_name_key)) {
+                return self.handleSvgTag(name_start, name_end, attr_end);
+            } else if (tags.isPlainTextTagWithKey(tag_name, tag_name_key)) {
+                // Plaintext tags consume the rest of the document as one text child.
+                try self.addNode(.{self.i, self.input.len}, .text_node, .{});
+                self.i = self.input.len;
+                return;
+            } else if (tags.isRawTextTagWithKey(tag_name, tag_name_key)) {
+                // Raw-text tags stay structured as elements, but their contents are
+                // copied as one opaque text child up to the matching close tag.
+                const parent_idx: IndexInt = @intCast(self.nodes.items.len);
+                try self.addNode(.{name_start, name_end}, attr_end, .{});
+
+                const content_start = self.i;
+                const content_end = blk: {
+                    if (self.findRawTextClose(tag_name, self.i)) |close| {
+                        self.i = close.close_end;
+                        break :blk close.content_end;
+                    } else {
+                        self.i = self.input.len;
+                        break :blk self.i;
+                    }
+                };
+
+                return self.addNode(.{content_start, content_end}, .text_node, .{.parent = parent_idx});
+            }
 
             // Optional-close HTML elements are resolved before the new element
             // is appended so sibling/parent links reflect the implied structure.
@@ -262,66 +283,14 @@ fn ParseState(comptime opts: ParseOptions) type {
                 self.applyImplicitClosures(tag_name, tag_name_key);
             }
 
-            const self_close = tags.isVoidTagWithKey(tag_name, tag_name_key);
+            const node_idx = self.nodes.items.len;
+            try self.addNode(.{name_start, name_end}, @enumFromInt(attr_end), .{});
 
-            const node_idx = try self.appendElementNode(name_start, name_end, attr_end);
-            var node = &self.nodes.items[node_idx];
-
-            // Plaintext tags consume the rest of the document as one text child.
-            if (!self_close and tags.isPlainTextTagWithKey(tag_name, tag_name_key)) {
-                const content_start = self.i;
-                if (self.input.len > content_start) {
-                    _ = try self.appendTextNodeToParent(node_idx, content_start, self.input.len);
-                }
-
-                node = &self.nodes.items[node_idx];
-                node.subtree_end = @intCast(self.nodes.items.len - 1);
-                self.i = self.input.len;
-                return;
-            }
-
-            // Raw-text tags stay structured as elements, but their contents are
-            // copied as one opaque text child up to the matching close tag.
-            if (!self_close and tags.isRawTextTagWithKey(tag_name, tag_name_key)) {
-                const content_start = self.i;
-                if (self.findRawTextClose(tag_name, self.i)) |close| {
-                    if (close.content_end > content_start) {
-                        _ = try self.appendTextNodeToParent(node_idx, content_start, close.content_end);
-                    }
-
-                    node = &self.nodes.items[node_idx];
-                    node.subtree_end = @intCast(self.nodes.items.len - 1);
-                    self.i = close.close_end;
-                    return;
-                } else {
-                    @branchHint(.cold);
-                    if (self.input.len > content_start) {
-                        _ = try self.appendTextNodeToParent(node_idx, content_start, self.input.len);
-                    }
-                    node = &self.nodes.items[node_idx];
-                    node.subtree_end = @intCast(self.nodes.items.len - 1);
-                    self.i = self.input.len;
-                    return;
-                }
-            }
-
-            if (self_close) {
-                node.subtree_end = node_idx;
-                return;
-            }
+            if (tags.isVoidTagWithKey(tag_name, tag_name_key)) return;
 
             // Non-void, non-raw elements stay on the open stack until an
             // explicit close, an optional-close rule, or EOF pops them.
-            self.skipDroppedWhitespaceAfterStartTag();
-            if (self.parse_stack.items.len == self.parse_stack.capacity) {
-                @branchHint(.cold);
-                try self.parse_stack.ensureUnusedCapacity(self.doc.allocator, 1);
-            }
-            self.parse_stack.appendAssumeCapacity(.{
-                .idx = node_idx,
-                .tag_key = tag_name_key,
-                .tag_len = @intCast(tag_name.len),
-            });
+            self.parse_stack.append(.{.idx = node_idx, .tag_key = tag_name_key, .tag_len = @intCast(tag_name.len)});
         }
 
         inline fn parseClosingTag(noalias self: *Self) void {
@@ -408,44 +377,25 @@ fn ParseState(comptime opts: ParseOptions) type {
             }
         }
 
-        inline fn appendNodeToParent(noalias self: *Self, parent_idx: IndexInt, node: RawNode) !IndexInt {
-            std.debug.assert(parent_idx != InvalidIndex);
-            const idx: IndexInt = @intCast(self.nodes.items.len);
-            const prev_sibling = self.nodes.items[parent_idx].last_child;
+        inline fn addNode(noalias self: *Self, name_or_text: document.Span, attr_end: document.RawNode.AttrEnd, overrides: anytype) !void {
+            comptime for (std.meta.declarations(overrides)) |d| {
+                std.debug.assert(
+                    std.mem.eql(u8, d.name, "last_child") or
+                    std.mem.eql(u8, d.name, "prev_sibling") or
+                    std.mem.eql(u8, d.name, "parent") or
+                    std.mem.eql(u8, d.name, "subtree_end")
+                );
+            };
+            const parent_idx: IndexInt = @intCast(if (@hasField(overrides, "parent")) overrides.parent else self.currentParent());
 
-            var appended = node;
-            appended.parent = parent_idx;
-            appended.prev_sibling = prev_sibling;
-            appended.subtree_end = idx;
-
-            if (self.nodes.items.len == self.nodes.capacity) {
-                @branchHint(.cold);
-                try self.nodes.ensureUnusedCapacity(self.doc.allocator, 1);
-            }
-            self.nodes.addOneAssumeCapacity().* = appended;
-            self.nodes.items[parent_idx].last_child = idx;
-            return idx;
-        }
-
-        inline fn appendTextNode(noalias self: *Self, start: usize, end: usize) !IndexInt {
-            return self.appendTextNodeToParent(self.currentParent(), start, end);
-        }
-
-        inline fn appendTextNodeToParent(noalias self: *Self, parent_idx: IndexInt, start: usize, end: usize) !IndexInt {
-            return self.appendNodeToParent(parent_idx, .{
-                .name_or_text = .{ .start = @intCast(start), .end = @intCast(end) },
-            });
-        }
-
-        inline fn appendElementNode(noalias self: *Self, name_start: usize, name_end: usize, attr_end: usize) !IndexInt {
-            return self.appendElementNodeToParent(self.currentParent(), name_start, name_end, attr_end);
-        }
-
-        inline fn appendElementNodeToParent(noalias self: *Self, parent_idx: IndexInt, name_start: usize, name_end: usize, attr_end: usize) !IndexInt {
-            return self.appendNodeToParent(parent_idx, .{
-                .name_or_text = .{ .start = @intCast(name_start), .end = @intCast(name_end) },
-                .attr_end = @intCast(attr_end),
-            });
+            @call(.always_inline, self.nodes.append, .{self.doc.allocator, document.RawNode{
+                .name_or_text = name_or_text,
+                .attr_end = attr_end,
+                .last_child = @intCast(if (@hasField(overrides, "last_child")) overrides.last_child else self.nodes.items.len),
+                .prev_sibling = @intCast(if (@hasField(overrides, "prev_sibling")) overrides.prev_sibling else self.nodes.items[parent_idx].last_child),
+                .parent = parent_idx,
+                .subtree_end = @intCast(if (@hasField(overrides, "subtree_end")) overrides.subtree_end else self.nodes.items.len),
+            }});
         }
 
         inline fn currentParent(noalias self: *Self) IndexInt {
@@ -506,19 +456,6 @@ fn ParseState(comptime opts: ParseOptions) type {
 
         inline fn skipWs(noalias self: *Self) void {
             while (self.i < self.input.len and tables.WhitespaceTable[self.input[self.i]]) : (self.i += 1) {}
-        }
-
-        inline fn skipDroppedWhitespaceAfterStartTag(noalias self: *Self) void {
-            if (!opts.drop_whitespace_text_nodes) return;
-            if (self.i >= self.input.len or !tables.WhitespaceTable[self.input[self.i]]) return;
-
-            // Whitespace immediately before another tag would become a dropped
-            // text node anyway, so skip it eagerly in fastest mode.
-            var j = self.i + 1;
-            while (j < self.input.len and tables.WhitespaceTable[self.input[j]]) : (j += 1) {}
-            if (j < self.input.len and self.input[j] == '<') {
-                self.i = j;
-            }
         }
 
         inline fn isSvgTag(tag_name: []const u8, tag_key: u64) bool {
