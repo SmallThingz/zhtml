@@ -73,6 +73,36 @@ pub fn decodeInPlace(slice: []u8) usize {
     }
 }
 
+fn decodeReferenceAlloc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] != '&') {
+            try out.append(alloc, input[i]);
+            i += 1;
+            continue;
+        }
+
+        if (i + 1 >= input.len) {
+            try out.append(alloc, '&');
+            break;
+        }
+
+        if (decodeEntity(input[i + 1 ..])) |decoded| {
+            try out.appendSlice(alloc, decoded.bytes[0..decoded.len]);
+            i += decoded.consumed;
+            continue;
+        }
+
+        try out.append(alloc, '&');
+        i += 1;
+    }
+
+    return try out.toOwnedSlice(alloc);
+}
+
 fn decodeEntity(rem: []const u8) ?Decoded {
     if (rem.len < 3) return null;
 
@@ -178,35 +208,9 @@ inline fn finishNumeric(value: u32, consumed: usize) Decoded {
     return .{ .consumed = @intCast(consumed), .bytes = out, .len = len };
 }
 
-fn decodeReferenceAlloc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(alloc);
-
-    var i: usize = 0;
-    while (i < input.len) {
-        if (input[i] != '&') {
-            try out.append(alloc, input[i]);
-            i += 1;
-            continue;
-        }
-
-        if (i + 1 >= input.len) {
-            try out.append(alloc, '&');
-            break;
-        }
-
-        if (decodeEntity(input[i + 1 ..])) |decoded| {
-            try out.appendSlice(alloc, decoded.bytes[0..decoded.len]);
-            i += decoded.consumed;
-            continue;
-        }
-
-        try out.append(alloc, '&');
-        i += 1;
-    }
-
-    return try out.toOwnedSlice(alloc);
-}
+// ---
+// Testing
+// ---
 
 fn fillInterestingEntityBytes(random: std.Random, out: []u8) void {
     for (out) |*b| {
