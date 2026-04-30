@@ -1,48 +1,48 @@
 const std = @import("std");
+const IndexInt = @import("../common.zig").IndexInt;
 const InvalidDigit = 0xff;
 const ReplacementUtf8 = [3]u8{ 0xEF, 0xBF, 0xBD };
 
 /// Result of decoding one HTML entity prefix.
 pub const Decoded = struct {
     /// Number of source bytes consumed from the entity prefix.
-    consumed: usize,
+    consumed: IndexInt,
     /// UTF-8 bytes produced by the decode.
     bytes: [4]u8,
     /// Number of valid bytes in `bytes`.
-    len: usize,
+    len: u3,
 
     /// Formats this decoded entity result for human-readable output.
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print(
-            "Decoded{{consumed={}, len={}, bytes=[{d},{d},{d},{d}]}}",
-            .{ self.consumed, self.len, self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3] },
-        );
+        try writer.print("Decoded{{consumed={}, len={}, bytes=[{},{},{},{}]}}", .{
+            self.consumed,
+            self.len,
+            self.bytes[0],
+            self.bytes[1],
+            self.bytes[2],
+            self.bytes[3],
+        });
     }
-};
-
-const NumericDecoded = struct {
-    consumed: usize,
-    bytes: [4]u8,
-    len: usize,
 };
 
 const NumericParseResult = union(enum) {
     none,
-    decoded: NumericDecoded,
+    decoded: Decoded,
     replacement: usize,
 };
 
-fn isInvalidNumericCodepoint(value: u32) bool {
+const NumericBase = enum(u8) {
+    decimal = 10,
+    hex = 16,
+};
+
+inline fn isInvalidNumericCodepoint(value: u32) bool {
     return value == 0 or value > 0x10FFFF or (value >= 0xD800 and value <= 0xDFFF);
 }
 
 /// Decodes entities in-place over entire slice and returns new length.
 pub fn decodeInPlace(slice: []u8) usize {
-    return decodeInPlaceFrom(slice, 0);
-}
-
-fn decodeInPlaceFrom(slice: []u8, start_index: usize) usize {
-    const first = std.mem.indexOfScalarPos(u8, slice, start_index, '&') orelse return slice.len;
+    const first = std.mem.indexOfScalar(u8, slice, '&') orelse return slice.len;
     var r: usize = first;
     var w: usize = first;
 
@@ -112,7 +112,7 @@ fn decodeEntity(rem: []const u8) ?Decoded {
 
 fn literalDecoded(consumed: usize, c: u8) Decoded {
     return .{
-        .consumed = consumed,
+        .consumed = @intCast(consumed),
         .bytes = .{ c, 0, 0, 0 },
         .len = 1,
     };
@@ -120,7 +120,7 @@ fn literalDecoded(consumed: usize, c: u8) Decoded {
 
 fn replacementDecoded(consumed: usize) Decoded {
     return .{
-        .consumed = consumed,
+        .consumed = @intCast(consumed),
         .bytes = .{ ReplacementUtf8[0], ReplacementUtf8[1], ReplacementUtf8[2], 0 },
         .len = 3,
     };
@@ -138,66 +138,57 @@ const NumericDigitTable = blk: {
 };
 
 fn parseNumericDecimal(rem: []const u8) NumericParseResult {
-    if (rem.len < 1) return .none;
-
-    var i: usize = 0;
-    while (i < rem.len and rem[i] == '0') : (i += 1) {}
-    const scan_end = @min(rem.len, i + 9);
-    const semi_rel = std.mem.indexOfScalar(u8, rem[i..scan_end], ';') orelse return .none;
-    const semi = i + semi_rel;
-    const consumed = semi + 3;
-    if (semi_rel == 0) return .{ .replacement = consumed };
-    const digits = semi_rel;
-    if (digits > 7) return .{ .replacement = consumed };
-
-    var value: u32 = 0;
-    while (i < semi) : (i += 1) {
-        const digit_u8 = NumericDigitTable[rem[i]];
-        if (digit_u8 > 9) return .{ .replacement = consumed };
-        const digit: u32 = digit_u8;
-        value = value * 10 + digit;
-    }
-
-    if (isInvalidNumericCodepoint(value)) return .{ .replacement = consumed };
-    if (encodeNumericValue(value, consumed)) |decoded| {
-        return .{ .decoded = decoded };
-    }
-    return .{ .replacement = consumed };
+    return parseNumeric(.decimal, rem);
 }
 
 fn parseNumericHex(rem: []const u8) NumericParseResult {
-    if (rem.len < 1) return .none;
+    return parseNumeric(.hex, rem);
+}
+
+fn parseNumeric(comptime base: NumericBase, rem: []const u8) NumericParseResult {
+    if (rem.len == 0) return .none;
 
     var i: usize = 0;
     while (i < rem.len and rem[i] == '0') : (i += 1) {}
-    const scan_end = @min(rem.len, i + 8);
+
+    const max_scan = switch (base) {
+        .decimal => 9,
+        .hex => 8,
+    };
+    const max_digits = switch (base) {
+        .decimal => 7,
+        .hex => 6,
+    };
+    const consumed_extra = switch (base) {
+        .decimal => 3,
+        .hex => 4,
+    };
+
+    const scan_end = @min(rem.len, i + max_scan);
     const semi_rel = std.mem.indexOfScalar(u8, rem[i..scan_end], ';') orelse return .none;
     const semi = i + semi_rel;
-    const consumed = semi + 4;
-    if (semi_rel == 0) return .{ .replacement = consumed };
-    const digits = semi_rel;
-    if (digits > 6) return .{ .replacement = consumed };
+    const consumed = semi + consumed_extra;
+    if (semi_rel == 0 or semi_rel > max_digits) return .{ .replacement = consumed };
 
     var value: u32 = 0;
     while (i < semi) : (i += 1) {
         const digit_u8 = NumericDigitTable[rem[i]];
-        if (digit_u8 == InvalidDigit) return .{ .replacement = consumed };
-        const digit: u32 = digit_u8;
-        value = value * 16 + digit;
+        if (digit_u8 >= @intFromEnum(base)) return .{ .replacement = consumed };
+        value = value * @intFromEnum(base) + digit_u8;
     }
 
     if (isInvalidNumericCodepoint(value)) return .{ .replacement = consumed };
-    if (encodeNumericValue(value, consumed)) |decoded| {
-        return .{ .decoded = decoded };
-    }
-    return .{ .replacement = consumed };
+    return if (encodeNumericValue(value, consumed)) |decoded|
+        .{ .decoded = decoded }
+    else
+        .{ .replacement = consumed };
 }
 
-fn encodeNumericValue(value: u32, consumed: usize) ?NumericDecoded {
+fn encodeNumericValue(value: u32, consumed: usize) ?Decoded {
     var out: [4]u8 = undefined;
     const codepoint: u21 = @intCast(value);
     const len = std.unicode.utf8Encode(codepoint, &out) catch return null;
-    return .{ .consumed = consumed, .bytes = out, .len = len };
+    return .{ .consumed = @intCast(consumed), .bytes = out, .len = len };
 }
 
 fn decodeReferenceAlloc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
@@ -217,7 +208,7 @@ fn decodeReferenceAlloc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
             break;
         }
 
-        if (decodeEntityReference(input[i + 1 ..])) |decoded| {
+        if (decodeEntity(input[i + 1 ..])) |decoded| {
             try out.appendSlice(alloc, decoded.bytes[0..decoded.len]);
             i += decoded.consumed;
             continue;
@@ -228,104 +219,6 @@ fn decodeReferenceAlloc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     }
 
     return try out.toOwnedSlice(alloc);
-}
-
-fn decodeEntityReference(rem: []const u8) ?Decoded {
-    if (rem.len < 3) return null;
-
-    return switch (rem[0]) {
-        'a' => if (std.mem.startsWith(u8, rem, "amp;"))
-            literalDecoded(5, '&')
-        else if (std.mem.startsWith(u8, rem, "apos;"))
-            literalDecoded(6, '\'')
-        else
-            null,
-        'l' => if (std.mem.startsWith(u8, rem, "lt;")) literalDecoded(4, '<') else null,
-        'g' => if (std.mem.startsWith(u8, rem, "gt;")) literalDecoded(4, '>') else null,
-        'q' => if (std.mem.startsWith(u8, rem, "quot;")) literalDecoded(6, '"') else null,
-        '#' => switch (decodeNumericReference(rem[1..])) {
-            .none => null,
-            .decoded => |decoded| decoded,
-            .replacement => |consumed| replacementDecoded(consumed),
-        },
-        else => null,
-    };
-}
-
-const ReferenceNumericResult = union(enum) {
-    none,
-    decoded: Decoded,
-    replacement: usize,
-};
-
-fn decodeNumericReference(rem: []const u8) ReferenceNumericResult {
-    if (rem.len == 0) return .none;
-    return switch (rem[0]) {
-        'x', 'X' => decodeNumericReferenceHex(rem[1..]),
-        else => decodeNumericReferenceDecimal(rem),
-    };
-}
-
-fn decodeNumericReferenceDecimal(rem: []const u8) ReferenceNumericResult {
-    if (rem.len == 0) return .none;
-
-    var i: usize = 0;
-    while (i < rem.len and rem[i] == '0') : (i += 1) {}
-
-    const scan_end = @min(rem.len, i + 9);
-    const semi_rel = std.mem.indexOfScalar(u8, rem[i..scan_end], ';') orelse return .none;
-    const semi = i + semi_rel;
-    const consumed = semi + 3;
-    if (semi_rel == 0) return .{ .replacement = consumed };
-    if (semi_rel > 7) return .{ .replacement = consumed };
-
-    var value: u32 = 0;
-    var j = i;
-    while (j < semi) : (j += 1) {
-        const digit = std.fmt.charToDigit(rem[j], 10) catch return .{ .replacement = consumed };
-        value = value * 10 + digit;
-    }
-
-    if (isInvalidNumericCodepoint(value)) return .{ .replacement = consumed };
-    if (encodeNumericValue(value, consumed)) |decoded| {
-        return .{ .decoded = asDecoded(decoded) };
-    }
-    return .{ .replacement = consumed };
-}
-
-fn decodeNumericReferenceHex(rem: []const u8) ReferenceNumericResult {
-    if (rem.len == 0) return .none;
-
-    var i: usize = 0;
-    while (i < rem.len and rem[i] == '0') : (i += 1) {}
-
-    const scan_end = @min(rem.len, i + 8);
-    const semi_rel = std.mem.indexOfScalar(u8, rem[i..scan_end], ';') orelse return .none;
-    const semi = i + semi_rel;
-    const consumed = semi + 4;
-    if (semi_rel == 0) return .{ .replacement = consumed };
-    if (semi_rel > 6) return .{ .replacement = consumed };
-
-    var value: u32 = 0;
-    var j = i;
-    while (j < semi) : (j += 1) {
-        const digit = std.fmt.charToDigit(rem[j], 16) catch return .{ .replacement = consumed };
-        value = value * 16 + digit;
-    }
-
-    if (isInvalidNumericCodepoint(value)) return .{ .replacement = consumed };
-    if (encodeNumericValue(value, consumed)) |decoded| {
-        return .{ .decoded = asDecoded(decoded) };
-    }
-    return .{ .replacement = consumed };
-}
-
-fn asDecoded(numeric: NumericDecoded) Decoded {
-    return .{
-        .consumed = numeric.consumed,
-        .bytes = numeric.bytes,
-        .len = numeric.len,
-    };
 }
 
 fn fillInterestingEntityBytes(random: std.Random, out: []u8) void {
