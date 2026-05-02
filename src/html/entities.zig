@@ -30,6 +30,7 @@ pub fn decodeInPlace(slice: []u8) usize {
 
     while (true) {
         if (decodeEntity(slice[r + 1 ..])) |decoded| {
+            @branchHint(.likely);
             @memcpy(slice[w..][0..decoded.len], decoded.bytes[0..decoded.len]);
             r += decoded.consumed;
             w += decoded.len;

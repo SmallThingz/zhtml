@@ -69,10 +69,9 @@ pub const RawNode = struct {
     subtree_end: IndexInt,
 
     /// It is not possible for attr end to be < 2; here is the reasoning.
-    /// `<x>`
+    /// `<x>` is the shortest possible tag that starts at very start of the data
     ///  ^^!
-    ///
-    ///  So the very first attr can only start at 2nd index
+    ///  So the very first attr can only start at 2nd index and nothing lower
     pub const AttrEnd = enum(IndexInt) {
         text_node = 0,
         invalid_1 = 1,
@@ -112,7 +111,7 @@ pub const ParseOptions = struct {
 
     /// Returns the accepted parse input slice type for this option set.
     pub fn Input(options: @This()) type {
-        return GetInput(options);
+        return if (options.non_destructive) []const u8 else []u8;
     }
 
     /// Parses `input` and returns a fully-owned document for this option set.
@@ -153,10 +152,6 @@ pub const ParseOptions = struct {
         });
     }
 };
-
-fn GetInput(comptime options: ParseOptions) type {
-    return if (options.non_destructive) []const u8 else []u8;
-}
 
 fn GetNode(comptime options: ParseOptions) type {
     return struct {
