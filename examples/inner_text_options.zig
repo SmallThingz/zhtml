@@ -13,7 +13,7 @@ pub fn run() !void {
     const gpa = std.testing.allocator;
     const normalized = try node.innerTextWithOptions(gpa, .{});
     defer normalized.free(&doc, gpa);
-    try std.testing.expectEqualStrings("Hello world& team", normalized.value);
+    try std.testing.expectEqualStrings("Hello world & team", normalized.value);
 
     const raw = try node.innerTextWithOptions(gpa, .{ .normalize_whitespace = false });
     defer raw.free(&doc, gpa);
@@ -21,7 +21,7 @@ pub fn run() !void {
 
     const owned = try node.innerTextOwnedWithOptions(gpa, .{});
     defer gpa.free(owned);
-    try std.testing.expectEqualStrings("Hello world& team", owned);
+    try std.testing.expectEqualStrings("Hello world & team", owned);
     try std.testing.expect(!doc.isOwnedSlice(owned));
 }
 

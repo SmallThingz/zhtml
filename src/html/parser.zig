@@ -432,12 +432,12 @@ fn ParseState(comptime opts: ParseOptions) type {
             }
         }
 
-        inline fn currentParent(noalias self: *Self) IndexInt {
+        inline fn currentParent(noalias self: *const Self) IndexInt {
             std.debug.assert(self.parse_stack.items.len != 0);
             return self.parse_stack.items[self.parse_stack.items.len - 1].idx;
         }
 
-        inline fn openElemMatchesClose(noalias self: *Self, open: OpenElem, close_name: []const u8, close_key: u64) bool {
+        inline fn openElemMatchesClose(noalias self: *const Self, open: OpenElem, close_name: []const u8, close_key: u64) bool {
             // Length + key rejects the common non-match case without touching
             // the stored tag bytes. Long names only compare the tail on a hit.
             if (open.tag_len != close_name.len or open.tag_key != close_key) return false;
@@ -761,7 +761,7 @@ fn runtimeFirst(scope: anytype, allocator: std.mem.Allocator, selector: []const 
     return firstQuery(scope.queryRuntime(sel));
 }
 
-fn expectRuntimeQueryParity(a: *TestDocument, b: *NonDestructiveTestDocument, selector: []const u8) !void {
+fn expectRuntimeQueryParity(a: *const TestDocument, b: *const NonDestructiveTestDocument, selector: []const u8) !void {
     const testing = std.testing;
     const lhs = try runtimeFirst(a, testing.allocator, selector);
     const rhs = try runtimeFirst(b, testing.allocator, selector);

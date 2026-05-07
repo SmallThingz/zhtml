@@ -121,6 +121,7 @@ pub fn parseParsedValue(source: []const u8, span_end: usize, name_end: usize) Pa
     return .{ .value = source[value_start..value_end], .next_start = next };
 }
 
+/// Finds the zero terminator ending a destructive-mode parsed value.
 pub fn findValueEnd(source: []const u8, value_start: usize, span_end: usize) usize {
     std.debug.assert(span_end <= source.len);
     std.debug.assert(value_start <= span_end);
@@ -129,6 +130,7 @@ pub fn findValueEnd(source: []const u8, value_start: usize, span_end: usize) usi
     return i;
 }
 
+/// Returns the next attribute scan cursor after a parsed value and gap metadata.
 pub fn nextAfterValue(source: []const u8, value_end: usize, span_end: usize) usize {
     std.debug.assert(span_end <= source.len);
     std.debug.assert(value_end <= span_end);
@@ -161,14 +163,33 @@ pub fn nextAfterValue(source: []const u8, value_end: usize, span_end: usize) usi
     return i;
 }
 
+/// Returns the next cursor after a destructive-mode attribute gap marker.
+pub fn skipAttrGap(source: []const u8, span_end: usize, start: usize) usize {
+    std.debug.assert(span_end <= source.len);
+    std.debug.assert(start < span_end);
+    if (start + 1 >= span_end) return span_end;
+    const len_byte = source[start + 1];
+    if (len_byte == ExtendedGapSentinel) {
+        if (start + ExtendedGapHeaderLen > span_end) return span_end;
+        const skip = std.mem.readInt(IndexInt, source[start + 2 .. start + ExtendedGapHeaderLen][0..@sizeOf(IndexInt)], nativeEndian());
+        const next = start + ExtendedGapHeaderLen + @as(usize, @intCast(skip));
+        return @min(next, span_end);
+    }
+    const next = start + 2 + @as(usize, len_byte);
+    return @min(next, span_end);
+}
+
+/// Returns native endian used to encode in-buffer gap metadata.
 pub fn nativeEndian() std.builtin.Endian {
     return @import("builtin").cpu.arch.endian();
 }
 
+/// Advances `i` past ASCII/HTML whitespace within an attribute span.
 inline fn skipWhitespace(source: []const u8, end: usize, i: *usize) void {
     while (i.* < end and tables.WhitespaceTable[source[i.*]]) : (i.* += 1) {}
 }
 
+/// Returns whether document source is immutable/non-destructive.
 inline fn hasConstSource(comptime Doc: type) bool {
     return @FieldType(Doc, "source") == []const u8;
 }
@@ -321,9 +342,8 @@ pub fn collectSelectedValues(
     }
 }
 
+/// Finds and lazily decodes one attribute value in destructive document source.
 inline fn getAttrValueDestructive(doc: anytype, node: anytype, name: []const u8) ?[]const u8 {
-    // Destructive mode does a single left-to-right pass over the raw attribute
-    // bytes and only materializes a value when the requested name matches.
     const mut_doc = @constCast(doc);
     const source: []u8 = mut_doc.source;
     const lookup_kind = classifyLookupName(name);
@@ -387,6 +407,7 @@ inline fn getAttrValueDestructive(doc: anytype, node: anytype, name: []const u8)
     return null;
 }
 
+/// Finds and materializes one attribute value without mutating document source.
 inline fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
     const source: []const u8 = doc.source;
     const lookup_kind = classifyLookupName(name);
@@ -429,6 +450,7 @@ inline fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const 
     return null;
 }
 
+/// Returns decoded raw value for non-destructive documents, allocating only when needed.
 fn materializeRawValueOwned(allocator: std.mem.Allocator, source: []const u8, raw: RawValue) ![]const u8 {
     if (raw.kind == .empty) return "";
 
@@ -443,6 +465,7 @@ fn materializeRawValueOwned(allocator: std.mem.Allocator, source: []const u8, ra
     return try allocator.realloc(copied, new_len);
 }
 
+/// Decodes a raw value into destructive source bytes and returns its new span.
 fn materializeRawValue(source: []u8, span_end: usize, eq_index: usize, raw: RawValue) []const u8 {
     std.debug.assert(span_end <= source.len);
     std.debug.assert(eq_index < span_end);
@@ -489,6 +512,7 @@ fn materializeRawValue(source: []u8, span_end: usize, eq_index: usize, raw: RawV
     return source[dst..term];
 }
 
+/// Writes gap metadata after a shortened decoded value.
 fn patchGap(source: []u8, span_end: usize, value_end: usize, raw_next_start: usize) void {
     std.debug.assert(span_end <= source.len);
     std.debug.assert(value_end <= span_end);
@@ -523,6 +547,7 @@ fn patchGap(source: []u8, span_end: usize, value_end: usize, raw_next_start: usi
     source[gap_start] = ' ';
 }
 
+/// Returns the first unresolved requested name matching `name`.
 fn firstUnresolvedMatch(selected_names: []const []const u8, out_values: []const ?[]const u8, name: []const u8) ?usize {
     var idx: usize = 0;
     while (idx < selected_names.len) : (idx += 1) {
@@ -532,6 +557,7 @@ fn firstUnresolvedMatch(selected_names: []const []const u8, out_values: []const 
     return null;
 }
 
+/// Returns whether an attribute name matches the requested lookup name.
 fn matchesLookupName(attr_name: []const u8, lookup: []const u8, lookup_kind: LookupKind) bool {
     switch (lookup_kind) {
         .id => return isExactAsciiWord(attr_name, "id"),
@@ -545,6 +571,7 @@ fn matchesLookupName(attr_name: []const u8, lookup: []const u8, lookup_kind: Loo
     return tables.eqlIgnoreCaseAscii(attr_name, lookup);
 }
 
+/// Classifies common lookup names for cheaper comparisons.
 fn classifyLookupName(lookup: []const u8) LookupKind {
     if (isExactAsciiWord(lookup, "id")) return .id;
     if (isExactAsciiWord(lookup, "class")) return .class;
@@ -552,6 +579,7 @@ fn classifyLookupName(lookup: []const u8) LookupKind {
     return .generic;
 }
 
+/// Returns true when `value` equals a known lowercase ASCII word.
 fn isExactAsciiWord(value: []const u8, comptime lower: []const u8) bool {
     if (value.len != lower.len) return false;
     var i: usize = 0;
@@ -561,6 +589,7 @@ fn isExactAsciiWord(value: []const u8, comptime lower: []const u8) bool {
     return true;
 }
 
+/// Lowercases one ASCII byte without touching non-uppercase bytes.
 fn toLowerAscii(c: u8) u8 {
     return if (c >= 'A' and c <= 'Z') c + ('a' - 'A') else c;
 }
