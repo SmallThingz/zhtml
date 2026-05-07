@@ -74,7 +74,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             // Fastest mode tends to collapse pure-whitespace runs, so its node
             // count grows more slowly than strict mode on the same input bytes.
             if (opts.drop_whitespace_text_nodes != .none) {
-                estimated_nodes = @max(@as(usize, 32), (input_len / 32) + 32);
+                estimated_nodes = @max(@as(usize, 32), (input_len / 16) + 32);
             } else {
                 estimated_nodes = @max(@as(usize, 16), (input_len / 16) + 8);
             }
@@ -480,29 +480,31 @@ fn ParseState(comptime opts: ParseOptions) type {
 
         inline fn findTagEndRespectQuotes(noalias self: *Self) ?usize {
             std.debug.assert(self.i <= self.input.len);
-            var end = @call(.always_inline, std.mem.indexOfAnyPos, .{ u8, self.input, self.i, ">'\"" }) orelse {
-                @branchHint(.cold);
-                return null;
-            };
-            blk: switch (self.input[end]) {
-                '>' => {
-                    self.i = end + 1;
-                    return end;
-                },
-                '\'', '"' => |q| {
-                    self.i = 1 + end;
-                    self.i = 1 + (std.mem.indexOfScalarPos(u8, self.input, self.i, q) orelse {
-                        @branchHint(.cold);
-                        return null;
-                    });
-                    end = @call(.always_inline, std.mem.indexOfAnyPos, .{ u8, self.input, self.i, ">'\"" }) orelse {
-                        @branchHint(.cold);
-                        return null;
-                    };
-                    continue :blk self.input[end];
-                },
-                else => unreachable,
+            while (self.i < self.input.len) : (self.i += 1) {
+                switch (self.input[self.i]) {
+                    '>' => {
+                        defer self.i += 1;
+                        return self.i;
+                    },
+                    '=' => if (self.i + 1 < self.input.len and (self.input[self.i + 1] == '\'' or self.input[self.i + 1] == '"')) {
+                        const q = self.input[self.i + 1];
+                        self.i += 2;
+                        self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, q) orelse {
+                            @branchHint(.cold);
+                            return null;
+                        };
+                    },
+                    '\'', '"' => |q| {
+                        self.i += 1;
+                        self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, q) orelse {
+                            @branchHint(.cold);
+                            return null;
+                        };
+                    },
+                    else => {},
+                }
             }
+            return null;
         }
 
         inline fn skipPi(noalias self: *Self) void {
