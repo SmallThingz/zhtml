@@ -27,14 +27,13 @@ const ParserCapability = struct {
 const parser_capabilities = [_]ParserCapability{
     .{ .parser = "ours", .capability = "dom" },
     .{ .parser = "strlen", .capability = "scan" },
-    .{ .parser = "lexbor", .capability = "dom" },
     .{ .parser = "lol-html", .capability = "streaming" },
+    .{ .parser = "lexbor", .capability = "dom" },
 };
 
-const parse_parsers = [_][]const u8{
+const default_parse_parsers = [_][]const u8{
     "ours",
     "strlen",
-    "lexbor",
     "lol-html",
 };
 
@@ -239,12 +238,12 @@ fn setupFixtures(io: std.Io, alloc: std.mem.Allocator, refresh: bool) !void {
     std.debug.print("fixtures ready in {s}\n", .{FIXTURES_DIR});
 }
 
-fn ensureExternalParsersBuilt(io: std.Io, alloc: std.mem.Allocator) !void {
+fn ensureExternalParsersBuilt(io: std.Io, alloc: std.mem.Allocator, include_lexbor: bool) !void {
     if (!pathExists(io, "bench/parsers/lol-html/Cargo.toml")) {
         try setupParsers(io, alloc);
     }
 
-    if (!pathExists(io, "bench/build/lexbor/liblexbor_static.a")) {
+    if (include_lexbor and !pathExists(io, "bench/build/lexbor/liblexbor_static.a")) {
         const cmake_cfg = [_][]const u8{
             "cmake",
             "-S",
@@ -261,7 +260,7 @@ fn ensureExternalParsersBuilt(io: std.Io, alloc: std.mem.Allocator) !void {
     }
 }
 
-fn buildRunners(io: std.Io, alloc: std.mem.Allocator) !void {
+fn buildRunners(io: std.Io, alloc: std.mem.Allocator, include_lexbor: bool) !void {
     try common.ensureDir(io, BIN_DIR);
     const zig_build = [_][]const u8{ "zig", "build", "-Doptimize=ReleaseFast" };
     try common.runInherit(io, alloc, &zig_build, REPO_ROOT);
@@ -276,17 +275,19 @@ fn buildRunners(io: std.Io, alloc: std.mem.Allocator) !void {
     };
     try common.runInherit(io, alloc, &strlen_cc, REPO_ROOT);
 
-    const lexbor_cc = [_][]const u8{
-        "cc",
-        "-O3",
-        "bench/runners/lexbor_runner.c",
-        "bench/build/lexbor/liblexbor_static.a",
-        "-Ibench/parsers/lexbor/source",
-        "-lm",
-        "-o",
-        "bench/build/bin/lexbor_runner",
-    };
-    try common.runInherit(io, alloc, &lexbor_cc, REPO_ROOT);
+    if (include_lexbor) {
+        const lexbor_cc = [_][]const u8{
+            "cc",
+            "-O3",
+            "bench/runners/lexbor_runner.c",
+            "bench/build/lexbor/liblexbor_static.a",
+            "-Ibench/parsers/lexbor/source",
+            "-lm",
+            "-o",
+            "bench/build/bin/lexbor_runner",
+        };
+        try common.runInherit(io, alloc, &lexbor_cc, REPO_ROOT);
+    }
 
     const cargo_lol = [_][]const u8{
         "cargo",
@@ -615,6 +616,18 @@ fn renderDocumentationBenchmarkSection(alloc: std.mem.Allocator, snap: ReadmeBen
         if (!seen) try fixtures.append(alloc, row.fixture);
     }
 
+    var parse_parsers_for_docs = std.ArrayList([]const u8).empty;
+    defer parse_parsers_for_docs.deinit(alloc);
+    for (parser_capabilities) |cap| {
+        if (std.mem.eql(u8, cap.parser, "strlen")) continue;
+        for (snap.parse_results) |row| {
+            if (std.mem.eql(u8, row.parser, cap.parser)) {
+                try parse_parsers_for_docs.append(alloc, cap.parser);
+                break;
+            }
+        }
+    }
+
     var query_match_cases = std.ArrayList([]const u8).empty;
     defer query_match_cases.deinit(alloc);
     for (snap.query_match_results) |row| {
@@ -644,28 +657,27 @@ fn renderDocumentationBenchmarkSection(alloc: std.mem.Allocator, snap: ReadmeBen
     try w.print("Source: `bench/results/latest.json` (`{s}` profile).\n\n", .{snap.profile});
 
     try w.writeAll("#### Parse Throughput Comparison (MB/s)\n\n");
-    try w.writeAll("| Fixture | ours | lol-html | lexbor |\n");
-    try w.writeAll("|---|---:|---:|---:|\n");
+    try w.writeAll("| Fixture |");
+    for (parse_parsers_for_docs.items) |parser_name| {
+        try w.print(" {s} |", .{parser_name});
+    }
+    try w.writeAll("\n|---|");
+    for (parse_parsers_for_docs.items) |_| {
+        try w.writeAll("---:|");
+    }
+    try w.writeAll("\n");
     for (fixtures.items) |fixture| {
-        try w.print("| `{s}` | ", .{fixture});
-        if (findReadmeParseThroughput(snap.parse_results, "ours", fixture)) |v| {
-            try w.print("{d:.2}", .{v});
-        } else {
-            try w.writeAll("-");
+        try w.print("| `{s}` |", .{fixture});
+        for (parse_parsers_for_docs.items) |parser_name| {
+            try w.writeAll(" ");
+            if (findReadmeParseThroughput(snap.parse_results, parser_name, fixture)) |v| {
+                try w.print("{d:.2}", .{v});
+            } else {
+                try w.writeAll("-");
+            }
+            try w.writeAll(" |");
         }
-        try w.writeAll(" | ");
-        if (findReadmeParseThroughput(snap.parse_results, "lol-html", fixture)) |v| {
-            try w.print("{d:.2}", .{v});
-        } else {
-            try w.writeAll("-");
-        }
-        try w.writeAll(" | ");
-        if (findReadmeParseThroughput(snap.parse_results, "lexbor", fixture)) |v| {
-            try w.print("{d:.2}", .{v});
-        } else {
-            try w.writeAll("-");
-        }
-        try w.writeAll(" |\n");
+        try w.writeAll("\n");
     }
 
     try w.writeAll("\n#### Query Match Throughput (ours)\n\n");
@@ -785,11 +797,12 @@ fn cmpParseAverageDesc(_: void, a: ParseAverageRow, b: ParseAverageRow) bool {
 }
 
 fn parseAverageRows(alloc: std.mem.Allocator, snap: ReadmeBenchSnapshot) ![]ParseAverageRow {
-    const parser_names = [_][]const u8{ "ours", "lol-html", "lexbor" };
     var rows = std.ArrayList(ParseAverageRow).empty;
     errdefer rows.deinit(alloc);
 
-    for (parser_names) |parser_name| {
+    for (parser_capabilities) |cap| {
+        const parser_name = cap.parser;
+        if (std.mem.eql(u8, parser_name, "strlen")) continue;
         var sum: f64 = 0.0;
         var count: usize = 0;
         for (snap.parse_results) |r| {
@@ -1387,6 +1400,7 @@ fn renderQueryConsoleSection(alloc: std.mem.Allocator, w: *std.Io.Writer, title:
 fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var profile_name: []const u8 = "quick";
     var write_baseline = false;
+    var include_lexbor = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -1397,6 +1411,8 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
             profile_name = args[i];
         } else if (std.mem.eql(u8, arg, "--write-baseline")) {
             write_baseline = true;
+        } else if (std.mem.eql(u8, arg, "--lexbor")) {
+            include_lexbor = true;
         } else {
             return error.InvalidArgument;
         }
@@ -1404,10 +1420,26 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
 
     const profile = try getProfile(profile_name);
 
+    var parse_parsers = std.ArrayList([]const u8).empty;
+    defer parse_parsers.deinit(alloc);
+    try parse_parsers.appendSlice(alloc, &default_parse_parsers);
+    if (include_lexbor) try parse_parsers.append(alloc, "lexbor");
+
+    var active_parser_capabilities = std.ArrayList(ParserCapability).empty;
+    defer active_parser_capabilities.deinit(alloc);
+    for (parser_capabilities) |cap| {
+        for (parse_parsers.items) |parser_name| {
+            if (std.mem.eql(u8, cap.parser, parser_name)) {
+                try active_parser_capabilities.append(alloc, cap);
+                break;
+            }
+        }
+    }
+
     try common.ensureDir(io, BIN_DIR);
     try common.ensureDir(io, RESULTS_DIR);
-    try ensureExternalParsersBuilt(io, alloc);
-    try buildRunners(io, alloc);
+    try ensureExternalParsersBuilt(io, alloc, include_lexbor);
+    try buildRunners(io, alloc, include_lexbor);
 
     var parse_results = std.ArrayList(ParseResult).empty;
     defer {
@@ -1416,7 +1448,7 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
     }
 
     for (profile.fixtures) |fixture| {
-        for (parse_parsers) |parser_name| {
+        for (parse_parsers.items) |parser_name| {
             std.debug.print("benchmarking {s} on {s} ({d} iters)\n", .{ parser_name, fixture.name, fixture.iterations });
             const row = try benchParseOne(io, alloc, parser_name, fixture.name, fixture.iterations);
             try parse_results.append(alloc, row);
@@ -1481,8 +1513,8 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
         .generated_unix = common.nowUnix(io),
         .profile = profile.name,
         .repeats = repeats,
-        .bench_modes = .{ .parse = &[_][]const u8{"ours"}, .query = &[_][]const u8{"ours"} },
-        .parser_capabilities = &parser_capabilities,
+        .bench_modes = .{ .parse = parse_parsers.items, .query = &[_][]const u8{"ours"} },
+        .parser_capabilities = active_parser_capabilities.items,
         .parse_results = parse_results.items,
         .query_parse_results = query_parse_results.items,
         .query_match_results = query_match_results.items,
