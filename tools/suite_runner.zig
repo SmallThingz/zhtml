@@ -4,7 +4,7 @@ const parse_mode = @import("parse_mode.zig");
 const ParseMode = parse_mode.ParseMode;
 
 fn strictestDocumentType() type {
-    const options: html.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+    const options: html.ParseOptions = .{ .drop_whitespace_text_nodes = .none };
     return options.Document();
 }
 
@@ -46,7 +46,7 @@ fn parseFixtureDoc(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixtur
 
     return switch (mode) {
         .strictest => blk: {
-            const options: html.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+            const options: html.ParseOptions = .{ .drop_whitespace_text_nodes = .none };
             var doc = try options.parse(alloc, working);
             errdefer doc.deinit();
             break :blk .{ .strictest = .{ .doc = doc, .working = working } };

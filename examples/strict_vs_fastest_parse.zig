@@ -2,7 +2,7 @@ const std = @import("std");
 const html = @import("html");
 
 pub fn run() !void {
-    const strictest_options: html.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+    const strictest_options: html.ParseOptions = .{ .drop_whitespace_text_nodes = .none };
     const fastest_options: html.ParseOptions = .{};
 
     const fixture =

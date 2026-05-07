@@ -72,7 +72,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             var estimated_nodes: usize = undefined;
             // Fastest mode tends to collapse pure-whitespace runs, so its node
             // count grows more slowly than strict mode on the same input bytes.
-            if (opts.drop_whitespace_text_nodes) {
+            if (opts.drop_whitespace_text_nodes != .none) {
                 estimated_nodes = @max(@as(usize, 32), (input_len / 32) + 32);
             } else {
                 estimated_nodes = @max(@as(usize, 16), (input_len / 16) + 8);
@@ -138,7 +138,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 if (last.isText(@intCast(last_idx)) and last.parent == parent_idx and last.name_or_text.end == self.i) {
                     last.name_or_text.end = @intCast(self.input.len);
                 } else {
-                    if (!(comptime opts.drop_whitespace_text_nodes) or !tables.WhitespaceTable[self.input[self.i]]) {
+                    if ((comptime opts.drop_whitespace_text_nodes == .none) or !tables.WhitespaceTable[self.input[self.i]]) {
                         try self.addNode(.{ self.i, self.input.len }, .text_node, .{});
                     }
                 }
@@ -157,8 +157,8 @@ fn ParseState(comptime opts: ParseOptions) type {
             std.debug.assert(self.input[self.i] != '<');
             std.debug.assert(self.i < self.input.len - 1);
 
-            const start = self.i;
-            if (comptime opts.drop_whitespace_text_nodes) {
+            var start = self.i;
+            if (comptime opts.drop_whitespace_text_nodes != .none) {
                 self.skipWs();
                 if (self.i == self.input.len) {
                     @branchHint(.cold);
@@ -167,6 +167,7 @@ fn ParseState(comptime opts: ParseOptions) type {
 
                 // likely to hit a tag after ws on normal documents
                 if (self.input[self.i] == '<') return;
+                if (comptime opts.drop_whitespace_text_nodes == .nodes_and_preceding) start = self.i;
             }
 
             self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '<') orelse self.input.len;
@@ -627,7 +628,7 @@ fn ParseState(comptime opts: ParseOptions) type {
 }
 
 const DefaultTestOptions: ParseOptions = .{};
-const StrictTestOptions: ParseOptions = .{ .drop_whitespace_text_nodes = false };
+const StrictTestOptions: ParseOptions = .{ .drop_whitespace_text_nodes = .none };
 const NonDestructiveTestOptions: ParseOptions = .{ .non_destructive = true };
 const TestDocument = DefaultTestOptions.Document();
 const StrictTestDocument = StrictTestOptions.Document();
@@ -757,7 +758,8 @@ fn exerciseRuntimeApis(doc: anytype, alloc: std.mem.Allocator) !void {
                 _ = node.getAttributeValue("data-v");
             }
         }
-        _ = try node.innerText(arena.allocator());
+        const text = try node.innerTextWithOptions(arena.allocator(), .{});
+        text.free(doc, arena.allocator());
         visited += 1;
     }
 }
@@ -982,7 +984,9 @@ test "non-destructive parse supports file-backed memory maps without changing by
 
     const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a&b", node.getAttributeValueAlloc(arena.allocator(), "data-v").?);
-    try std.testing.expectEqualStrings("hi & bye", try node.innerText(arena.allocator()));
+    const text = try node.innerTextWithOptions(arena.allocator(), .{});
+    defer text.free(&doc, arena.allocator());
+    try std.testing.expectEqualStrings("hi & bye", text.value);
     try std.testing.expectEqualStrings(html, mapped.memory);
 
     const rendered = try std.fmt.allocPrint(alloc, "{f}", .{doc});
@@ -1045,7 +1049,8 @@ test "svg subtrees are skipped and stored as one text child payload" {
 
     const first_svg = doc.queryOne("svg") orelse return error.TestUnexpectedResult;
     const svg_text = try first_svg.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
-    try std.testing.expectEqualStrings("<g><svg id='inner'><rect id='r'/></svg><circle id='c'/></g>", svg_text);
+    defer svg_text.free(&doc, alloc);
+    try std.testing.expectEqualStrings("<g><svg id='inner'><rect id='r'/></svg><circle id='c'/></g>", svg_text.value);
 
     var svg_it = doc.queryAll("svg");
     try std.testing.expect(svg_it.next() != null);
@@ -1082,7 +1087,8 @@ test "self-closing svg is stored as regular element with no text child" {
 
     const first_svg = doc.queryOne("svg") orelse return error.TestUnexpectedResult;
     const svg_text = try first_svg.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
-    try std.testing.expectEqualStrings("", svg_text);
+    defer svg_text.free(&doc, alloc);
+    try std.testing.expectEqualStrings("", svg_text.value);
     try std.testing.expect(first_svg.firstChild() == null);
 
     try std.testing.expect(doc.queryOne("#before") != null);
@@ -1157,21 +1163,33 @@ test "whitespace-only text nodes drop only in fastest mode" {
 
     var strict_doc = StrictTestDocument.init(alloc);
     defer strict_doc.deinit();
+    const NodesOnlyOptions: ParseOptions = .{ .drop_whitespace_text_nodes = .nodes };
+    var nodes_doc = NodesOnlyOptions.Document().init(alloc);
+    defer nodes_doc.deinit();
     var fast_doc = TestDocument.init(alloc);
     defer fast_doc.deinit();
 
     var strict_html = "<div id='x'> \n\t </div><div id='y'> hi </div>".*;
+    var nodes_html = strict_html;
     var fast_html = strict_html;
 
     try resetParsed(StrictTestOptions, &strict_doc, &strict_html);
+    try resetParsed(NodesOnlyOptions, &nodes_doc, &nodes_html);
     try resetParsed(DefaultTestOptions, &fast_doc, &fast_html);
 
     try std.testing.expectEqual(@as(usize, 5), strict_doc.nodes.len);
+    try std.testing.expectEqual(@as(usize, 4), nodes_doc.nodes.len);
     try std.testing.expectEqual(@as(usize, 4), fast_doc.nodes.len);
+
+    const nodes_y = nodes_doc.queryOne("#y") orelse return error.TestUnexpectedResult;
+    const nodes_text = try nodes_y.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+    defer nodes_text.free(&nodes_doc, alloc);
+    try std.testing.expectEqualStrings(" hi ", nodes_text.value);
 
     const y = fast_doc.queryOne("#y") orelse return error.TestUnexpectedResult;
     const text = try y.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
-    try std.testing.expectEqualStrings(" hi ", text);
+    defer text.free(&fast_doc, alloc);
+    try std.testing.expectEqualStrings("hi ", text.value);
 }
 
 test "fastest mode drops indentation-only runs between child elements" {

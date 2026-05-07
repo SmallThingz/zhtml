@@ -12,12 +12,15 @@ fn runBufferCase() !void {
     const original = input;
     var doc = try options.parse(std.testing.allocator, &input);
     defer doc.deinit();
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
     const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a&b", node.getAttributeValueAlloc(arena.allocator(), "data-v").?);
-    try std.testing.expectEqualStrings("hi & bye", try node.innerText(arena.allocator()));
+    const text = try node.innerTextWithOptions(gpa, .{});
+    defer text.free(&doc, gpa);
+    try std.testing.expectEqualStrings("hi & bye", text.value);
 
     try std.testing.expectEqualSlices(u8, original[0..], input[0..]);
 
@@ -68,9 +71,12 @@ fn runMappedFileCase() !void {
     defer doc.deinit();
 
     const node = doc.queryOne("section#mapped") orelse return error.TestUnexpectedResult;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    try std.testing.expectEqualStrings("a & b", try node.innerText(arena.allocator()));
+    const text = try node.innerTextWithOptions(gpa, .{});
+    defer text.free(&doc, gpa);
+    try std.testing.expectEqualStrings("a & b", text.value);
     try std.testing.expectEqualStrings(html_bytes, mapped.memory);
     const rendered = try std.fmt.allocPrint(std.testing.allocator, "{f}", .{doc});
     defer std.testing.allocator.free(rendered);

@@ -86,10 +86,10 @@ All examples are verified by running `zig build examples-check`
   - `prevSibling()`
   - `children()` (iterator of wrapped child nodes; `collect(allocator)` returns an owned `[]Node`)
 - Text:
-  - `innerText(allocator)` (borrowed or allocated depending on shape)
-  - `innerTextWithOptions(allocator, TextOptions)`
-  - `innerTextOwned(allocator)` (always allocated)
-  - `innerTextOwnedWithOptions(allocator, TextOptions)`
+  - `innerTextWithOptions(gpa, TextOptions)` returns `TextResult`
+  - `TextResult.value`
+  - `TextResult.free(doc, gpa)`
+  - `innerTextOwnedWithOptions(gpa, TextOptions)` always allocates
 - Attributes:
   - `getAttributeValue(name)`
 - Scoped queries:
@@ -98,7 +98,7 @@ All examples are verified by running `zig build examples-check`
 ### Helpers
 
 - `doc.html()`, `doc.head()`, `doc.body()`
-- `doc.isOwned(slice)` to check whether a slice points into document source bytes
+- `TextResult.isBorrowed(doc)` to check whether text points into document source bytes
 
 ### Parse/Text options
 
@@ -111,6 +111,7 @@ All examples are verified by running `zig build examples-check`
   - too-small widths fail fast with `error.InputTooLarge`
 - `TextOptions`
   - `normalize_whitespace: bool = true`
+  - `unescape: bool = true`
 - parse/query work split:
   - parse keeps raw text and attribute spans as source slices
   - destructive mode may decode attrs/text in place on query-time APIs
@@ -337,8 +338,9 @@ Data model highlights:
 
 - default `innerText` normalizes whitespace
 - use `innerTextWithOptions(..., .{ .normalize_whitespace = false })` for raw spacing
-- use `innerTextOwned(...)` when output must always be allocated
-- use `doc.isOwned(slice)` to check borrowed vs allocated
+- use `innerTextWithOptions(..., .{ .unescape = false })` to preserve entity escapes
+- use `innerTextOwnedWithOptions(...)` when output must always be allocated
+- call `TextResult.free(doc, gpa)` for non-owned text results
 
 ### Runtime iterator invalidation
 

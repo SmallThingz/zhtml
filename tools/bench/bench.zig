@@ -62,7 +62,7 @@ pub fn runParseFile(io: std.Io, path: []const u8, iterations: usize, mode: Parse
         {
             switch (mode) {
                 .strictest => {
-                    const options: root.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+                    const options: root.ParseOptions = .{ .drop_whitespace_text_nodes = .none };
                     const working = working_opt.?;
                     @memcpy(working, input);
                     var doc = try options.parse(iter_alloc, working);
@@ -112,7 +112,7 @@ pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterati
 
     return switch (mode) {
         .strictest => blk: {
-            const options: root.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+            const options: root.ParseOptions = .{ .drop_whitespace_text_nodes = .none };
             var doc = try options.parse(alloc, working);
             defer doc.deinit();
 
@@ -155,7 +155,7 @@ pub fn runQueryCached(io: std.Io, path: []const u8, selector: []const u8, iterat
 
     return switch (mode) {
         .strictest => blk: {
-            const options: root.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+            const options: root.ParseOptions = .{ .drop_whitespace_text_nodes = .none };
             var doc = try options.parse(alloc, working);
             defer doc.deinit();
 
@@ -252,7 +252,7 @@ pub fn main(init: std.process.Init) !void {
 test "bench smoke uses parse_mode module for both parse modes" {
     const alloc = std.testing.allocator;
     const fastest_options: root.ParseOptions = .{};
-    const strictest_options: root.ParseOptions = .{ .drop_whitespace_text_nodes = false };
+    const strictest_options: root.ParseOptions = .{ .drop_whitespace_text_nodes = .none };
 
     var fastest_html = "<div><span id='x'>ok</span></div>".*;
     var fastest_doc = try fastest_options.parse(alloc, &fastest_html);

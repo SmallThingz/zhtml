@@ -101,9 +101,19 @@ pub const RawNode = struct {
 
 /// Compile-time parser options and type factory for generated public API types.
 pub const ParseOptions = struct {
-    /// Drops whitespace-only text nodes during parse when throughput matters more
-    /// than preserving indentation-only text nodes.
-    drop_whitespace_text_nodes: bool = true,
+    /// Parse-time whitespace text handling.
+    pub const WhitespaceText = enum {
+        /// Preserve every text node exactly as it appears in source.
+        none,
+        /// Drop text nodes that contain only HTML whitespace.
+        nodes,
+        /// Drop whitespace-only text nodes and trim leading whitespace from
+        /// retained text nodes. This is the default throughput-oriented mode.
+        nodes_and_preceding,
+    };
+
+    /// Controls which whitespace-only text is discarded during parse.
+    drop_whitespace_text_nodes: WhitespaceText = .nodes_and_preceding,
     /// Preserves caller bytes by parsing directly from the original source and
     /// keeping lazy attr/text decoding out of the input buffer.
     /// This is off by default so the destructive hot path stays unchanged.
@@ -146,8 +156,8 @@ pub const ParseOptions = struct {
 
     /// Formats parse options for human-readable output.
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("ParseOptions{{drop_whitespace_text_nodes={}, non_destructive={}}}", .{
-            self.drop_whitespace_text_nodes,
+        try writer.print("ParseOptions{{drop_whitespace_text_nodes={s}, non_destructive={}}}", .{
+            @tagName(self.drop_whitespace_text_nodes),
             self.non_destructive,
         });
     }
@@ -166,10 +176,33 @@ fn GetNode(comptime options: ParseOptions) type {
         pub const TextOptions = struct {
             /// Collapses runs of HTML whitespace to single spaces when true.
             normalize_whitespace: bool = true,
+            /// Decodes HTML character references when true.
+            unescape: bool = true,
 
             /// Formats text extraction options for human-readable output.
             pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-                try writer.print("TextOptions{{normalize_whitespace={}}}", .{self.normalize_whitespace});
+                try writer.print("TextOptions{{normalize_whitespace={}, unescape={}}}", .{
+                    self.normalize_whitespace,
+                    self.unescape,
+                });
+            }
+        };
+
+        /// Text lookup result. `value` may borrow document source or point to an
+        /// allocation made with the allocator passed to `innerTextWithOptions`.
+        pub const TextResult = struct {
+            /// Text bytes for the requested subtree.
+            value: []const u8,
+
+            /// Returns true when `value` points inside `doc` source.
+            pub fn isBorrowed(self: @This(), doc: *const DocType) bool {
+                return sliceInBounds(doc.source, self.value);
+            }
+
+            /// Frees `value` only when it is not borrowed from `doc` source.
+            pub fn free(self: @This(), doc: *const DocType, gpa: std.mem.Allocator) void {
+                if (self.value.len == 0 or self.isBorrowed(doc)) return;
+                gpa.free(@constCast(self.value));
             }
         };
 
@@ -203,28 +236,19 @@ fn GetNode(comptime options: ParseOptions) type {
             return self.writeHtml(writer);
         }
 
-        /// Returns text content of this subtree; may borrow or allocate in `arena`.
-        pub fn innerText(self: @This(), arena: std.mem.Allocator) ![]const u8 {
-            return self.innerTextWithOptions(arena, .{});
-        }
-
-        /// Same as `innerText` but with explicit text-normalization options.
-        pub fn innerTextWithOptions(self: @This(), arena: std.mem.Allocator, opts: Self.TextOptions) ![]const u8 {
-            return self.tryBorrowInnerText(opts) orelse try self.innerTextOwnedWithOptions(arena, opts);
-        }
-
-        /// Always materializes subtree text into newly allocated output.
-        pub fn innerTextOwned(self: @This(), arena: std.mem.Allocator) ![]const u8 {
-            return self.innerTextOwnedWithOptions(arena, .{});
+        /// Returns text content of this subtree; may borrow or allocate with `gpa`.
+        pub fn innerTextWithOptions(self: @This(), gpa: std.mem.Allocator, opts: Self.TextOptions) !TextResult {
+            const text = self.tryBorrowInnerText(opts) orelse try self.innerTextOwnedWithOptions(gpa, opts);
+            return .{ .value = text };
         }
 
         /// Owned variant of `innerTextWithOptions`.
-        pub fn innerTextOwnedWithOptions(self: @This(), arena: std.mem.Allocator, opts: Self.TextOptions) ![]const u8 {
+        pub fn innerTextOwnedWithOptions(self: @This(), gpa: std.mem.Allocator, opts: Self.TextOptions) ![]const u8 {
             var out = std.ArrayList(u8).empty;
-            defer out.deinit(arena);
+            defer out.deinit(gpa);
             var state: WhitespaceNormState = .{};
-            try self.appendInnerText(&out, arena, opts, &state);
-            return try out.toOwnedSlice(arena);
+            try self.appendInnerText(&out, gpa, opts, &state);
+            return try out.toOwnedSlice(gpa);
         }
 
         /// Returns decoded attribute value for `name`, if present.
@@ -319,11 +343,11 @@ fn GetNode(comptime options: ParseOptions) type {
         fn borrowSingleTextNode(self: @This(), noalias node: *RawNode, opts: Self.TextOptions) ?[]const u8 {
             if (comptime options.non_destructive) {
                 const text = node.name_or_text.slice(self.doc.source);
-                if (opts.normalize_whitespace or std.mem.indexOfScalar(u8, text, '&') != null) return null;
+                if (opts.normalize_whitespace or (opts.unescape and std.mem.indexOfScalar(u8, text, '&') != null)) return null;
                 return text;
             }
 
-            _ = decodeTextNode(node, self.doc);
+            if (opts.unescape) _ = decodeTextNode(node, self.doc);
             return if (opts.normalize_whitespace)
                 normalizeTextNodeInPlace(node, self.doc)
             else
@@ -341,13 +365,13 @@ fn GetNode(comptime options: ParseOptions) type {
             const node_raw = self.raw();
 
             if (node_raw.isText(self.index)) {
-                return appendTextSegment(out, arena, node_raw.name_or_text.slice(doc.source), opts.normalize_whitespace, state);
+                return appendTextSegment(out, arena, node_raw.name_or_text.slice(doc.source), opts, state);
             }
 
             var idx = self.index + 1;
             while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
                 if (!doc.nodes[idx].isText(idx)) continue;
-                try appendTextSegment(out, arena, doc.nodes[idx].name_or_text.slice(doc.source), opts.normalize_whitespace, state);
+                try appendTextSegment(out, arena, doc.nodes[idx].name_or_text.slice(doc.source), opts, state);
             }
         }
 
@@ -417,13 +441,19 @@ fn GetNode(comptime options: ParseOptions) type {
             noalias out: *std.ArrayList(u8),
             alloc: std.mem.Allocator,
             seg: []const u8,
-            normalize_whitespace: bool,
+            opts: Self.TextOptions,
             noalias state: *WhitespaceNormState,
         ) !void {
-            if (normalize_whitespace) {
+            if (opts.unescape and opts.normalize_whitespace) {
                 return appendDecodedNormalizedSegment(out, alloc, seg, state);
             }
-            return appendDecodedSegment(out, alloc, seg);
+            if (opts.unescape) return appendDecodedSegment(out, alloc, seg);
+            if (opts.normalize_whitespace) {
+                try ensureOutExtra(out, alloc, seg.len + 1);
+                appendNormalizedSegmentAssumeCapacity(out, seg, state);
+                return;
+            }
+            return out.appendSlice(alloc, seg);
         }
 
         fn writeNodeHtml(
@@ -652,12 +682,12 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         test "format text options" {
-            if (comptime options.non_destructive or !options.drop_whitespace_text_nodes) return error.SkipZigTest;
+            if (comptime options.non_destructive or options.drop_whitespace_text_nodes == .none) return error.SkipZigTest;
 
             const alloc = std.testing.allocator;
             const rendered = try std.fmt.allocPrint(alloc, "{f}", .{Self.TextOptions{ .normalize_whitespace = false }});
             defer alloc.free(rendered);
-            try std.testing.expectEqualStrings("TextOptions{normalize_whitespace=false}", rendered);
+            try std.testing.expectEqualStrings("TextOptions{normalize_whitespace=false, unescape=true}", rendered);
         }
 
         /// Compiles selector at comptime and returns first descendant match.
@@ -987,12 +1017,7 @@ fn GetDocument(comptime options: ParseOptions) type {
 
         /// Returns whether `bytes` points inside the document's source buffer.
         pub fn isOwned(self: *const @This(), bytes: []const u8) bool {
-            if (self.source.len == 0 or bytes.len == 0) return false;
-            const src_start = @intFromPtr(self.source.ptr);
-            const src_end = src_start + self.source.len;
-            const bytes_start = @intFromPtr(bytes.ptr);
-            const bytes_end = bytes_start + bytes.len;
-            return bytes_start >= src_start and bytes_end <= src_end;
+            return sliceInBounds(self.source, bytes);
         }
 
         /// Returns first `<head>` element in the document.
@@ -1105,6 +1130,16 @@ fn GetDocument(comptime options: ParseOptions) type {
 /// Re-exported text extraction options used by node text APIs.
 pub const TextOptions = GetNode(.{}).TextOptions;
 const NodeRaw = RawNode;
+
+fn sliceInBounds(source: []const u8, bytes: []const u8) bool {
+    if (source.len == 0 or bytes.len == 0) return false;
+    const source_start = @intFromPtr(source.ptr);
+    const source_end = source_start + source.len;
+    const bytes_start = @intFromPtr(bytes.ptr);
+    const bytes_end = bytes_start + bytes.len;
+    return bytes_start >= source_start and bytes_end <= source_end;
+}
+
 fn resetParsed(comptime options: ParseOptions, doc: *options.Document(), input: options.Input()) !void {
     doc.deinit();
     doc.* = try options.parse(doc.allocator, input);
@@ -1254,8 +1289,9 @@ test "non-destructive parse preserves caller bytes and formats exact original so
     const attr_value = node.getAttributeValueAlloc(arena.allocator(), "data-v") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a&b", attr_value);
 
-    const text = try node.innerText(arena.allocator());
-    try std.testing.expectEqualStrings("a & b", text);
+    const text = try node.innerTextWithOptions(alloc, .{});
+    defer text.free(&doc, alloc);
+    try std.testing.expectEqualStrings("a & b", text.value);
 
     try std.testing.expectEqualSlices(u8, before[0..], html[0..]);
 
@@ -1297,11 +1333,12 @@ test "non-destructive text reads do not rewrite text bytes" {
     try resetParsed(.{ .non_destructive = true }, &doc, &html);
 
     const node = doc.queryOne("p#x") orelse return error.TestUnexpectedResult;
-    const text = try node.innerText(arena.allocator());
-    try std.testing.expectEqualStrings("a & b", text);
+    const text = try node.innerTextWithOptions(alloc, .{});
+    defer text.free(&doc, alloc);
+    try std.testing.expectEqualStrings("a & b", text.value);
 
     const text_node = doc.nodes[node.index + 1];
-    try std.testing.expectEqualStrings(" a &amp;  b ", text_node.name_or_text.slice(doc.source));
+    try std.testing.expectEqualStrings("a &amp;  b ", text_node.name_or_text.slice(doc.source));
     try std.testing.expectEqualSlices(u8, before[0..], html[0..]);
 }
 
@@ -1317,8 +1354,9 @@ test "non-destructive innerText ignores oversized malformed entity prefixes safe
     try resetParsed(.{ .non_destructive = true }, &doc, &html);
 
     const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
-    const text = try node.innerText(arena.allocator());
-    try std.testing.expectEqualStrings("&xxxxxxxxxxxxxxxxxxxx&", text);
+    const text = try node.innerTextWithOptions(alloc, .{});
+    defer text.free(&doc, alloc);
+    try std.testing.expectEqualStrings("&xxxxxxxxxxxxxxxxxxxx&", text.value);
     try std.testing.expectEqualSlices(u8, before[0..], html[0..]);
 }
 
@@ -1515,8 +1553,9 @@ test "innerText normalizes whitespace by default" {
     try resetParsed(.{}, &doc, &html);
 
     const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
-    const text = try node.innerText(arena.allocator());
-    try std.testing.expectEqualStrings("alpha beta gamma", text);
+    const text = try node.innerTextWithOptions(alloc, .{});
+    defer text.free(&doc, alloc);
+    try std.testing.expectEqualStrings("alpha beta gamma", text.value);
 }
 
 test "innerText can return non-normalized text" {
@@ -1530,8 +1569,9 @@ test "innerText can return non-normalized text" {
     try resetParsed(.{}, &doc, &html);
 
     const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
-    const text = try node.innerTextWithOptions(arena.allocator(), .{ .normalize_whitespace = false });
-    try std.testing.expectEqualStrings("  alpha \n\t beta   gamma  ", text);
+    const text = try node.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+    defer text.free(&doc, alloc);
+    try std.testing.expectEqualStrings("alpha \n\t beta   gamma  ", text.value);
 }
 
 test "innerText normalization is applied across text-node boundaries" {
@@ -1545,11 +1585,12 @@ test "innerText normalization is applied across text-node boundaries" {
     try resetParsed(.{}, &doc, &html);
 
     const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
-    const text = try node.innerText(arena.allocator());
-    try std.testing.expectEqualStrings("A B", text);
+    const text = try node.innerTextWithOptions(alloc, .{});
+    defer text.free(&doc, alloc);
+    try std.testing.expectEqualStrings("A B", text.value);
 }
 
-test "parse-time text normalization is off by default and query-time normalization still works" {
+test "parse-time text whitespace trimming is on by default and query-time normalization still works" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);
     defer doc.deinit();
@@ -1562,13 +1603,28 @@ test "parse-time text normalization is off by default and query-time normalizati
     const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
     const text_node = doc.nodes[node.index + 1];
     try std.testing.expect(text_node.attr_end == .text_node);
-    try std.testing.expectEqualStrings("  alpha  &amp;   beta  ", text_node.name_or_text.slice(doc.source));
+    try std.testing.expectEqualStrings("alpha  &amp;   beta  ", text_node.name_or_text.slice(doc.source));
 
-    const raw = try node.innerTextWithOptions(arena.allocator(), .{ .normalize_whitespace = false });
-    try std.testing.expectEqualStrings("  alpha  &   beta  ", raw);
+    const escaped = try node.innerTextWithOptions(alloc, .{ .normalize_whitespace = false, .unescape = false });
+    defer escaped.free(&doc, alloc);
+    try std.testing.expectEqualStrings("alpha  &amp;   beta  ", escaped.value);
 
-    const normalized = try node.innerText(arena.allocator());
-    try std.testing.expectEqualStrings("alpha & beta", normalized);
+    const raw = try node.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+    defer raw.free(&doc, alloc);
+    try std.testing.expectEqualStrings("alpha  &   beta  ", raw.value);
+
+    const normalized = try node.innerTextWithOptions(alloc, .{});
+    defer normalized.free(&doc, alloc);
+    try std.testing.expectEqualStrings("alpha & beta", normalized.value);
+
+    var escaped_doc = GetDocument(.{}).init(alloc);
+    defer escaped_doc.deinit();
+    var escaped_html = "<div id='x'>  alpha  &amp;   beta  </div>".*;
+    try resetParsed(.{}, &escaped_doc, &escaped_html);
+    const escaped_node = escaped_doc.queryOne("#x") orelse return error.TestUnexpectedResult;
+    const escaped_normalized = try escaped_node.innerTextWithOptions(alloc, .{ .unescape = false });
+    defer escaped_normalized.free(&escaped_doc, alloc);
+    try std.testing.expectEqualStrings("alpha &amp; beta", escaped_normalized.value);
 }
 
 test "parse-time attribute decoding is off by default and query-time lookup decodes" {
@@ -1601,13 +1657,15 @@ test "isOwned distinguishes borrowed single-text and allocated multi-text innerT
     const x = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
     const y = doc.queryOne("#y") orelse return error.TestUnexpectedResult;
 
-    const x_text = try x.innerText(arena.allocator());
-    try std.testing.expectEqualStrings("single", x_text);
-    try std.testing.expect(doc.isOwned(x_text));
+    const x_text = try x.innerTextWithOptions(alloc, .{});
+    defer x_text.free(&doc, alloc);
+    try std.testing.expectEqualStrings("single", x_text.value);
+    try std.testing.expect(x_text.isBorrowed(&doc));
 
-    const y_text = try y.innerText(arena.allocator());
-    try std.testing.expectEqualStrings("ab", y_text);
-    try std.testing.expect(!doc.isOwned(y_text));
+    const y_text = try y.innerTextWithOptions(alloc, .{});
+    defer y_text.free(&doc, alloc);
+    try std.testing.expectEqualStrings("ab", y_text.value);
+    try std.testing.expect(!y_text.isBorrowed(&doc));
 }
 
 test "innerTextOwned always returns allocated output and does not mutate source text bytes" {
@@ -1625,7 +1683,8 @@ test "innerTextOwned always returns allocated output and does not mutate source 
     try std.testing.expect(text_node_before.attr_end == .text_node);
     try std.testing.expectEqualStrings("a &amp; b", text_node_before.name_or_text.slice(doc.source));
 
-    const owned = try node.innerTextOwned(arena.allocator());
+    const owned = try node.innerTextOwnedWithOptions(alloc, .{});
+    defer alloc.free(owned);
     try std.testing.expectEqualStrings("a & b", owned);
     try std.testing.expect(!doc.isOwned(owned));
 
@@ -1967,7 +2026,7 @@ test "leading child combinator works in node-scoped queries" {
 test "parse option bundles preserve selector/query behavior for representative input" {
     const alloc = std.testing.allocator;
 
-    var strict_doc = GetDocument(.{ .drop_whitespace_text_nodes = false }).init(alloc);
+    var strict_doc = GetDocument(.{ .drop_whitespace_text_nodes = .none }).init(alloc);
     defer strict_doc.deinit();
     var fast_doc = GetDocument(.{}).init(alloc);
     defer fast_doc.deinit();
@@ -1981,7 +2040,7 @@ test "parse option bundles preserve selector/query behavior for representative i
         "</body></html>").*;
     var fast_html = strict_html;
 
-    try resetParsed(.{ .drop_whitespace_text_nodes = false }, &strict_doc, &strict_html);
+    try resetParsed(.{ .drop_whitespace_text_nodes = .none }, &strict_doc, &strict_html);
     try resetParsed(.{}, &fast_doc, &fast_html);
 
     const selectors = [_][]const u8{
@@ -2089,12 +2148,12 @@ test "clear resets parsed state and ownership tracking" {
 
     const text_before_clear = (doc.queryOne("#z") orelse return error.TestUnexpectedResult)
         .innerTextWithOptions(alloc, .{ .normalize_whitespace = false }) catch return error.TestUnexpectedResult;
-    try std.testing.expect(doc.isOwned(text_before_clear));
+    try std.testing.expect(text_before_clear.isBorrowed(&doc));
 
     doc.clear();
     try std.testing.expectEqual(@as(usize, 0), doc.nodes.len);
     try std.testing.expectEqual(@as(usize, 0), doc.source.len);
-    try std.testing.expect(!doc.isOwned(text_before_clear));
+    try std.testing.expect(!doc.isOwned(text_before_clear.value));
     try std.testing.expect(doc.queryOne("main") == null);
 }
 
@@ -2324,10 +2383,10 @@ test "instrumentation wrappers invoke compile-time hooks and preserve results" {
 test "format document types" {
     const alloc = std.testing.allocator;
 
-    const opts: ParseOptions = .{ .drop_whitespace_text_nodes = false };
+    const opts: ParseOptions = .{ .drop_whitespace_text_nodes = .none };
     const opts_out = try std.fmt.allocPrint(alloc, "{f}", .{opts});
     defer alloc.free(opts_out);
-    try std.testing.expectEqualStrings("ParseOptions{drop_whitespace_text_nodes=false, non_destructive=false}", opts_out);
+    try std.testing.expectEqualStrings("ParseOptions{drop_whitespace_text_nodes=none, non_destructive=false}", opts_out);
 
     const span: Span = .{ .start = 2, .end = 5 };
     const span_out = try std.fmt.allocPrint(alloc, "{f}", .{span});

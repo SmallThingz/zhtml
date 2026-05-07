@@ -114,7 +114,8 @@ test "writeHtml reflects in-place text decoding" {
     defer doc.deinit();
 
     const p = doc.queryOne("p") orelse return error.TestUnexpectedResult;
-    _ = try p.innerText(alloc);
+    const text = try p.innerTextWithOptions(alloc, .{});
+    defer text.free(&doc, alloc);
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
@@ -134,12 +135,12 @@ test "writeHtml drops whitespace-only text nodes when configured" {
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     try div.writeHtml(&out.writer);
-    try std.testing.expectEqualStrings("<div> a <span> b </span> c </div>", out.written());
+    try std.testing.expectEqualStrings("<div>a <span>b </span>c </div>", out.written());
 }
 
 test "writeHtml parses and prints complex document" {
     const alloc = std.testing.allocator;
-    const opts: ParseOptions = .{ .drop_whitespace_text_nodes = false };
+    const opts: ParseOptions = .{ .drop_whitespace_text_nodes = .none };
     const src_const =
         \\<!DOCTYPE html>
         \\<html><head>
@@ -197,6 +198,6 @@ test "writeHtmlSelf excludes children" {
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try div.writeHtmlSelf(&out.writer);
+    try div.writeSelfHtml(&out.writer);
     try std.testing.expectEqualStrings("<div id='a'>", out.written());
 }
