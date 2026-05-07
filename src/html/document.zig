@@ -251,16 +251,22 @@ fn GetNode(comptime options: ParseOptions) type {
             std.debug.assert(self.index < self.doc.nodes.len);
         }
 
+        /// Asserts that this wrapper points at a text node.
+        fn assertText(self: @This()) void {
+            self.assertValidNode();
+            std.debug.assert(self.isText());
+        }
+
         /// Asserts that this wrapper points at an element node.
         fn assertElement(self: @This()) void {
             self.assertValidNode();
-            std.debug.assert(self.raw().isElement(self.index));
+            std.debug.assert(self.isElement());
         }
 
         /// Asserts that this wrapper can contain descendants for traversal/query.
         fn assertContainer(self: @This()) void {
             self.assertValidNode();
-            std.debug.assert(self.index == 0 or self.raw().isElement(self.index));
+            std.debug.assert(self.isDocument() or self.isElement());
         }
 
         /// Returns the underlying raw node record.
@@ -290,6 +296,11 @@ fn GetNode(comptime options: ParseOptions) type {
             return self.raw().name_or_text.slice(self.doc.source);
         }
 
+        pub fn text(self: @This()) []const u8 {
+            assertText();
+            return self.raw().name_or_text.slice(self.doc.source);
+        }
+
         /// Returns text content of this subtree; may borrow or allocate with `gpa`.
         /// It is also valid to call this on a text node
         pub fn innerTextWithOptions(self: @This(), gpa: std.mem.Allocator, comptime opts: Self.TextOptions) !TextResult {
@@ -302,7 +313,7 @@ fn GetNode(comptime options: ParseOptions) type {
 
                 std.debug.assert(node_raw.subtree_end < doc.nodes.len);
                 while (idx <= node_raw.subtree_end) : (idx += 1) {
-                    if (!doc.nodes[idx].isText(idx)) continue;
+                    if (!doc.nodeAt(idx).isText()) continue;
                     first_idx = idx;
                     if (comptime options.non_destructive) {
                         return .{ .value = try self.innerTextOwnedFromScan(gpa, opts, .{
@@ -317,7 +328,7 @@ fn GetNode(comptime options: ParseOptions) type {
 
                 idx += 1;
                 while (idx <= node_raw.subtree_end) : (idx += 1) {
-                    if (!doc.nodes[idx].isText(idx)) continue;
+                    if (!doc.nodeAt(idx).isText()) continue;
                     return .{ .value = try self.innerTextOwnedFromScan(gpa, opts, .{
                         .first_idx = first_idx,
                         .resume_idx = idx,
@@ -358,7 +369,7 @@ fn GetNode(comptime options: ParseOptions) type {
 
             var idx = scan.resume_idx;
             while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
-                if (!doc.nodes[idx].isText(idx)) continue;
+                if (!doc.nodeAt(idx).isText()) continue;
                 if (out.items.len != 0 and !tables.WhitespaceTable[out.items[out.items.len - 1]]) {
                     try out.append(gpa, ' ');
                 }
@@ -420,7 +431,7 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Returns next element sibling.
         pub fn nextSibling(self: @This()) ?@This() {
             self.assertElement();
-            const next = self.doc.nodes[self.index].next_sibling;
+            const next = self.doc.nodeAt(self.index).raw().next_sibling;
             if (next == InvalidIndex) return null;
             return .{ .doc = self.doc, .index = next };
         }
@@ -480,44 +491,70 @@ fn GetNode(comptime options: ParseOptions) type {
             writer: anytype,
             include_children: bool,
         ) WriterError(@TypeOf(writer))!void {
-            if (idx == 0) {
-                try writeChildrenHtml(doc, idx, node_raw, writer);
-                return;
-            }
             if (node_raw.isText(idx)) {
                 try writer.writeAll(node_raw.name_or_text.slice(doc.source));
                 return;
             }
 
+            if (idx != 0) {
+                try writeElementOpenHtml(doc, node_raw, writer);
+                if (!include_children or isVoidElement(doc, node_raw)) return;
+            }
+
+            const end = node_raw.subtree_end;
+            const len_idx: IndexInt = @intCast(doc.nodes.len);
+            var next_idx = idx + 1;
+            var open_idx: IndexInt = if (idx != 0) idx else InvalidIndex;
+
+            while (next_idx <= end and next_idx < len_idx) : (next_idx += 1) {
+                while (open_idx != InvalidIndex and doc.nodes[open_idx].subtree_end < next_idx) {
+                    try writeElementCloseHtml(doc, &doc.nodes[open_idx], writer);
+                    const parent = doc.nodes[open_idx].parent;
+                    open_idx = if (parent != InvalidIndex and parent != 0) parent else InvalidIndex;
+                }
+
+                const child = &doc.nodes[next_idx];
+                if (child.isText(next_idx)) {
+                    try writer.writeAll(child.name_or_text.slice(doc.source));
+                    continue;
+                }
+
+                try writeElementOpenHtml(doc, child, writer);
+                if (isVoidElement(doc, child)) continue;
+                if (child.subtree_end == next_idx) {
+                    try writeElementCloseHtml(doc, child, writer);
+                    continue;
+                }
+                open_idx = next_idx;
+            }
+
+            while (open_idx != InvalidIndex) {
+                try writeElementCloseHtml(doc, &doc.nodes[open_idx], writer);
+                const parent = doc.nodes[open_idx].parent;
+                open_idx = if (parent != InvalidIndex and parent != 0) parent else InvalidIndex;
+            }
+        }
+
+        /// Writes an element start tag and its serialized attributes.
+        fn writeElementOpenHtml(doc: anytype, noalias node_raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
             const name = node_raw.name_or_text.slice(doc.source);
             try writeByte(writer, '<');
             try writer.writeAll(name);
             try writeAttrsHtml(doc, node_raw, writer);
             try writeByte(writer, '>');
-
-            if (include_children and !tags.isVoidTagWithKey(name, tags.first8Key(name))) {
-                try writeChildrenHtml(doc, idx, node_raw, writer);
-                try writer.writeAll("</");
-                try writer.writeAll(name);
-                try writeByte(writer, '>');
-            }
         }
 
-        /// Writes direct child subtrees for `parent_idx` in preorder.
-        fn writeChildrenHtml(doc: anytype, parent_idx: IndexInt, noalias node_raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
-            const end: IndexInt = node_raw.subtree_end;
-            var idx: IndexInt = parent_idx + 1;
-            const len_idx: IndexInt = @intCast(doc.nodes.len);
-            while (idx <= end and idx < len_idx) {
-                const child = &doc.nodes[@intCast(idx)];
-                if (child.parent != parent_idx) {
-                    idx += 1;
-                    continue;
-                }
-                try writeNodeHtml(doc, idx, child, writer, true);
-                const next = child.subtree_end + 1;
-                idx = if (next > idx) next else idx + 1;
-            }
+        /// Writes an element end tag.
+        fn writeElementCloseHtml(doc: anytype, noalias node_raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
+            try writer.writeAll("</");
+            try writer.writeAll(node_raw.name_or_text.slice(doc.source));
+            try writeByte(writer, '>');
+        }
+
+        /// Returns true for HTML void elements, which never serialize end tags.
+        fn isVoidElement(doc: anytype, noalias node_raw: anytype) bool {
+            const name = node_raw.name_or_text.slice(doc.source);
+            return tags.isVoidTagWithKey(name, tags.first8Key(name));
         }
 
         /// Writes serialized attributes from raw or destructively parsed attr bytes.
@@ -686,18 +723,12 @@ fn GetQueryIter(comptime options: ParseOptions) type {
                 return null;
             }
 
-            const nodes = self.doc.nodes;
             while (self.next_index < self.end_index) : (self.next_index += 1) {
-                const idx = self.next_index;
+                if (!self.doc.nodeAt(self.next_index).isElement()) continue;
 
-                if (!nodes[idx].isElement(idx)) continue;
-
-                if (matcher.matchesSelectorAt(DocType, self.doc, self.selector, idx, self.scope_root)) {
-                    self.next_index += 1;
-                    return .{
-                        .doc = self.doc,
-                        .index = idx,
-                    };
+                if (matcher.matchesSelectorAt(DocType, self.doc, self.selector, self.next_index, self.scope_root)) {
+                    defer self.next_index += 1;
+                    return self.doc.nodeAt(self.next_index);
                 }
             }
             return null;
@@ -762,7 +793,7 @@ fn GetChildrenIter(comptime options: ParseOptions) type {
         /// Returns next wrapped child node or `null` when exhausted.
         pub inline fn next(noalias self: *@This()) ?NodeTypeWrapper {
             if (self.next_idx == InvalidIndex) return null;
-            defer self.next_idx = self.doc.nodes[self.next_idx].next_sibling;
+            defer self.next_idx = self.doc.nodeAt(self.next_idx).raw().next_sibling;
             return .{ .doc = self.doc, .index = self.next_idx };
         }
 
@@ -853,12 +884,12 @@ fn GetDocument(comptime options: ParseOptions) type {
 
         /// Compiles selector at comptime and returns lazy iterator over matches.
         pub fn query(self: *const @This(), comptime selector: []const u8) QueryIterType {
-            return @constCast(self).nodeAt(0).query(selector);
+            return self.nodeAt(0).query(selector);
         }
 
         /// Returns lazy iterator over matches for already compiled selector.
         pub fn queryRuntime(self: *const @This(), sel: ast.Selector) QueryIterType {
-            return @constCast(self).nodeAt(0).queryIter(sel);
+            return self.nodeAt(0).queryIter(sel);
         }
 
         /// Runs debug selector matching from a document or node scope.
@@ -918,7 +949,7 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Wraps a raw node index as a public `Node` wrapper.
-        pub inline fn nodeAt(self: *@This(), idx: IndexInt) NodeTypeWrapper {
+        pub inline fn nodeAt(self: *const @This(), idx: IndexInt) NodeTypeWrapper {
             std.debug.assert(idx != InvalidIndex);
             std.debug.assert(idx < self.nodes.len);
             return .{
@@ -2132,6 +2163,28 @@ test "clear resets parsed state and ownership tracking" {
     try std.testing.expectEqual(@as(usize, 0), doc.nodes.len);
     try std.testing.expectEqual(@as(usize, 0), doc.source.len);
     try std.testing.expect(!doc.isOwnedSlice(text_before_clear.value));
+}
+
+test "writeHtml handles deep documents without recursive calls" {
+    const alloc = std.testing.allocator;
+    const depth = 4096;
+
+    var input_builder: std.Io.Writer.Allocating = .init(alloc);
+    defer input_builder.deinit();
+    for (0..depth) |_| try input_builder.writer.writeAll("<div>");
+    for (0..depth) |_| try input_builder.writer.writeAll("</div>");
+
+    const input = try input_builder.toOwnedSlice();
+    defer alloc.free(input);
+
+    const opts: ParseOptions = .{};
+    var doc = try opts.parse(alloc, input);
+    defer doc.deinit();
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try doc.writeHtml(&out.writer);
+    try std.testing.expectEqualStrings(input, out.written());
 }
 
 test "runtime attr-heavy selector stress uses in-node parents" {
