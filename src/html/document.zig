@@ -259,7 +259,7 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         /// Returns text content of this subtree; may borrow or allocate with `gpa`.
-        pub fn innerTextWithOptions(self: @This(), gpa: std.mem.Allocator, opts: Self.TextOptions) !TextResult {
+        pub fn innerTextWithOptions(self: @This(), gpa: std.mem.Allocator, comptime opts: Self.TextOptions) !TextResult {
             return switch (self.probeInnerText(opts)) {
                 .borrowed => |text| .{ .value = text },
                 .owned => |scan| .{ .value = try self.innerTextOwnedFromScan(gpa, opts, scan) },
@@ -267,11 +267,24 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         /// Owned variant of `innerTextWithOptions`.
-        pub fn innerTextOwnedWithOptions(self: @This(), gpa: std.mem.Allocator, opts: Self.TextOptions) ![]const u8 {
+        pub fn innerTextOwnedWithOptions(self: @This(), gpa: std.mem.Allocator, comptime opts: Self.TextOptions) ![]const u8 {
             var out = std.ArrayList(u8).empty;
             defer out.deinit(gpa);
+            const doc = self.doc;
+            const node_raw = self.raw();
+
             var state: WhitespaceNormState = .{};
-            try self.appendInnerText(&out, gpa, opts, &state);
+
+            if (node_raw.isText(self.index)) {
+                try appendTextSegment(&out, gpa, node_raw.name_or_text.slice(doc.source), opts, &state);
+            } else {
+                var idx = self.index + 1;
+                while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
+                    if (!doc.nodes[idx].isText(idx)) continue;
+                    try appendTextSegment(&out, gpa, doc.nodes[idx].name_or_text.slice(doc.source), opts, &state);
+                }
+            }
+
             return try out.toOwnedSlice(gpa);
         }
 
@@ -333,61 +346,74 @@ fn GetNode(comptime options: ParseOptions) type {
             return self.doc.childrenIter(self.index);
         }
 
-        fn decodeTextNode(noalias node: anytype, doc: anytype) []const u8 {
-            if (comptime options.non_destructive) unreachable;
-            const text_mut = node.name_or_text.sliceMut(doc.source);
-            const new_len = entities.decodeInPlace(text_mut);
-            node.name_or_text.end = node.name_or_text.start + @as(IndexInt, @intCast(new_len));
-            return node.name_or_text.slice(doc.source);
-        }
-
-        const InnerTextOwnedScan = struct {
-            first_idx: IndexInt,
-            resume_idx: IndexInt,
-            first_amp: ?usize = null,
-        };
-
         const InnerTextProbe = union(enum) {
+            const Scan = struct {
+                first_idx: IndexInt,
+                resume_idx: IndexInt,
+                first_amp: ?usize = null,
+            };
+
             borrowed: []const u8,
-            owned: InnerTextOwnedScan,
+            owned: Scan,
         };
 
-        fn probeInnerText(self: @This(), opts: Self.TextOptions) InnerTextProbe {
+        fn probeInnerText(self: @This(), comptime opts: Self.TextOptions) InnerTextProbe {
             const doc = self.doc;
             const node_raw = self.raw();
 
-            if (node_raw.isText(self.index)) {
-                return if (self.probeSingleTextNode(self.index, opts)) |probe|
-                    probe
-                else if (self.borrowSingleTextNode(&doc.nodes[self.index], opts)) |text|
-                    .{ .borrowed = text }
-                else
-                    .{ .owned = .{ .first_idx = self.index, .resume_idx = self.index + 1 } };
-            }
-
-            var first_idx: IndexInt = InvalidIndex;
-            var idx = self.index + 1;
-            while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
-                if (!doc.nodes[idx].isText(idx)) continue;
-                if (first_idx != InvalidIndex) {
-                    return .{ .owned = .{
-                        .first_idx = first_idx,
-                        .resume_idx = idx,
-                    } };
+            const first_idx: IndexInt = if (node_raw.isText(self.index)) self.index else blk: {
+                var first_idx = InvalidIndex;
+                var idx = self.index + 1;
+                while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
+                    if (!doc.nodes[idx].isText(idx)) continue;
+                    if (first_idx != InvalidIndex) {
+                        return .{ .owned = .{
+                            .first_idx = first_idx,
+                            .resume_idx = idx,
+                        } };
+                    }
+                    first_idx = idx;
                 }
-                first_idx = idx;
+
+                if (first_idx == InvalidIndex) return .{ .borrowed = "" };
+                break :blk first_idx;
+            };
+
+            const node = &self.doc.nodes[first_idx];
+
+            if (comptime !options.non_destructive) {
+                if (comptime opts.unescape) {
+                    const new_len = entities.decodeInPlace(node.name_or_text.sliceMut(doc.source));
+                    node.name_or_text.end = node.name_or_text.start + @as(IndexInt, @intCast(new_len));
+                }
+                if (comptime opts.normalize_whitespace) {
+                    const new_len = normalizeWhitespaceInPlace(node.name_or_text.sliceMut(doc.source));
+                    node.name_or_text.end = node.name_or_text.start + @as(IndexInt, @intCast(new_len));
+                }
+                return .{ .borrowed = node.name_or_text.slice(self.doc.source) };
             }
 
-            if (first_idx == InvalidIndex) return .{ .borrowed = "" };
-            return if (self.probeSingleTextNode(first_idx, opts)) |probe|
-                probe
-            else if (self.borrowSingleTextNode(&doc.nodes[first_idx], opts)) |text|
-                .{ .borrowed = text }
-            else
-                .{ .owned = .{ .first_idx = first_idx, .resume_idx = first_idx + 1 } };
+            const text = node.name_or_text.slice(self.doc.source);
+            if (comptime opts.normalize_whitespace) {
+                return .{ .owned = .{
+                    .first_idx = first_idx,
+                    .resume_idx = first_idx + 1,
+                    .first_amp = if (comptime opts.unescape) std.mem.indexOfScalar(u8, text, '&') else null,
+                } };
+            }
+
+            if (comptime opts.unescape) {
+                return .{ .owned = .{
+                    .first_idx = first_idx,
+                    .resume_idx = first_idx + 1,
+                    .first_amp = std.mem.indexOfScalar(u8, text, '&') orelse return .{ .borrowed = text },
+                } };
+            }
+
+            return .{ .borrowed = text };
         }
 
-        fn innerTextOwnedFromScan(self: @This(), gpa: std.mem.Allocator, opts: Self.TextOptions, scan: InnerTextOwnedScan) ![]const u8 {
+        fn innerTextOwnedFromScan(self: @This(), gpa: std.mem.Allocator, comptime opts: Self.TextOptions, scan: InnerTextProbe.Scan) ![]const u8 {
             var out = std.ArrayList(u8).empty;
             defer out.deinit(gpa);
             var state: WhitespaceNormState = .{};
@@ -410,72 +436,6 @@ fn GetNode(comptime options: ParseOptions) type {
             }
 
             return try out.toOwnedSlice(gpa);
-        }
-
-        fn probeSingleTextNode(self: @This(), idx: IndexInt, opts: Self.TextOptions) ?InnerTextProbe {
-            if (!comptime options.non_destructive) return null;
-            const node = &self.doc.nodes[idx];
-            const text = node.name_or_text.slice(self.doc.source);
-
-            if (opts.normalize_whitespace) {
-                const first_amp = if (opts.unescape) std.mem.indexOfScalar(u8, text, '&') else null;
-                return .{ .owned = .{
-                    .first_idx = idx,
-                    .resume_idx = idx + 1,
-                    .first_amp = first_amp,
-                } };
-            }
-
-            if (!opts.unescape) return .{ .borrowed = text };
-            const first_amp = std.mem.indexOfScalar(u8, text, '&') orelse return .{ .borrowed = text };
-            return .{ .owned = .{
-                .first_idx = idx,
-                .resume_idx = idx + 1,
-                .first_amp = first_amp,
-            } };
-        }
-
-        fn borrowSingleTextNode(self: @This(), noalias node: *RawNode, opts: Self.TextOptions) ?[]const u8 {
-            if (comptime options.non_destructive) {
-                const text = node.name_or_text.slice(self.doc.source);
-                if (opts.normalize_whitespace or (opts.unescape and std.mem.indexOfScalar(u8, text, '&') != null)) return null;
-                return text;
-            }
-
-            if (opts.unescape) _ = decodeTextNode(node, self.doc);
-            return if (opts.normalize_whitespace)
-                normalizeTextNodeInPlace(node, self.doc)
-            else
-                node.name_or_text.slice(self.doc.source);
-        }
-
-        fn appendInnerText(
-            self: @This(),
-            noalias out: *std.ArrayList(u8),
-            arena: std.mem.Allocator,
-            opts: Self.TextOptions,
-            noalias state: *WhitespaceNormState,
-        ) !void {
-            const doc = self.doc;
-            const node_raw = self.raw();
-
-            if (node_raw.isText(self.index)) {
-                return appendTextSegment(out, arena, node_raw.name_or_text.slice(doc.source), opts, state);
-            }
-
-            var idx = self.index + 1;
-            while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
-                if (!doc.nodes[idx].isText(idx)) continue;
-                try appendTextSegment(out, arena, doc.nodes[idx].name_or_text.slice(doc.source), opts, state);
-            }
-        }
-
-        fn normalizeTextNodeInPlace(noalias node: anytype, doc: anytype) []const u8 {
-            if (comptime options.non_destructive) unreachable;
-            const text_mut = node.name_or_text.sliceMut(doc.source);
-            const new_len = normalizeWhitespaceInPlace(text_mut);
-            node.name_or_text.end = node.name_or_text.start + @as(IndexInt, @intCast(new_len));
-            return node.name_or_text.slice(doc.source);
         }
 
         fn normalizeWhitespaceInPlace(bytes: []u8) usize {
@@ -536,14 +496,14 @@ fn GetNode(comptime options: ParseOptions) type {
             noalias out: *std.ArrayList(u8),
             alloc: std.mem.Allocator,
             seg: []const u8,
-            opts: Self.TextOptions,
+            comptime opts: Self.TextOptions,
             noalias state: *WhitespaceNormState,
         ) !void {
-            if (opts.unescape and opts.normalize_whitespace) {
+            if (comptime (opts.unescape and opts.normalize_whitespace)) {
                 return appendDecodedNormalizedSegment(out, alloc, seg, state);
             }
-            if (opts.unescape) return appendDecodedSegment(out, alloc, seg);
-            if (opts.normalize_whitespace) {
+            if (comptime opts.unescape) return appendDecodedSegment(out, alloc, seg);
+            if (comptime opts.normalize_whitespace) {
                 try ensureOutExtra(out, alloc, seg.len + 1);
                 appendNormalizedSegmentAssumeCapacity(out, seg, state);
                 return;
@@ -555,21 +515,21 @@ fn GetNode(comptime options: ParseOptions) type {
             noalias out: *std.ArrayList(u8),
             alloc: std.mem.Allocator,
             seg: []const u8,
-            opts: Self.TextOptions,
+            comptime opts: Self.TextOptions,
             noalias state: *WhitespaceNormState,
             first_amp: ?usize,
         ) !void {
-            if (opts.unescape and opts.normalize_whitespace) {
+            if (comptime (opts.unescape and opts.normalize_whitespace)) {
                 if (first_amp) |amp| return appendDecodedNormalizedSegmentFrom(out, alloc, seg, state, amp);
                 try ensureOutExtra(out, alloc, seg.len + 1);
                 appendNormalizedSegmentAssumeCapacity(out, seg, state);
                 return;
             }
-            if (opts.unescape) {
+            if (comptime opts.unescape) {
                 if (first_amp) |amp| return appendDecodedSegmentFrom(out, alloc, seg, amp);
                 return out.appendSlice(alloc, seg);
             }
-            if (opts.normalize_whitespace) {
+            if (comptime opts.normalize_whitespace) {
                 try ensureOutExtra(out, alloc, seg.len + 1);
                 appendNormalizedSegmentAssumeCapacity(out, seg, state);
                 return;
