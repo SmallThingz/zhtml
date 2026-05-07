@@ -139,7 +139,7 @@ pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
 }
 
 /// Returns first matching node index for `selector` within optional `scope_root`.
-pub fn queryOneIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: IndexInt) ?IndexInt {
+pub fn firstMatchIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: IndexInt) ?IndexInt {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return null;
     var best: ?IndexInt = null;
     // Group matches are independent; the earliest document-order hit wins.

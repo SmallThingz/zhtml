@@ -16,7 +16,8 @@ fn runBufferCase() !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
-    const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
+    var divs = doc.query("div#x");
+    const node = divs.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a&b", (try node.getAttributeValue(arena.allocator(), "data-v")).?.value);
     const text = try node.innerTextWithOptions(gpa, .{});
     defer text.free(&doc, gpa);
@@ -70,7 +71,8 @@ fn runMappedFileCase() !void {
     var doc = try options.parse(std.testing.allocator, mapped.memory);
     defer doc.deinit();
 
-    const node = doc.queryOne("section#mapped") orelse return error.TestUnexpectedResult;
+    var sections = doc.query("section#mapped");
+    const node = sections.next() orelse return error.TestUnexpectedResult;
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();

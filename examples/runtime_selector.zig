@@ -7,12 +7,16 @@ pub fn run() !void {
     var doc = try options.parse(std.testing.allocator, &input);
     defer doc.deinit();
 
-    const one = try doc.queryOneRuntime(std.testing.allocator, "a.primary");
-    try std.testing.expect(one != null);
-
     var runtime_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer runtime_arena.deinit();
-    var it = try doc.queryAllRuntime(runtime_arena.allocator(), "a[href]");
+
+    const primary = try html.Selector.compileRuntime(runtime_arena.allocator(), "a.primary");
+    var primary_links = doc.queryRuntime(primary);
+    const one = primary_links.next();
+    try std.testing.expect(one != null);
+
+    const links = try html.Selector.compileRuntime(runtime_arena.allocator(), "a[href]");
+    var it = doc.queryRuntime(links);
     try std.testing.expect(it.next() != null);
     try std.testing.expect(it.next() != null);
     try std.testing.expect(it.next() == null);

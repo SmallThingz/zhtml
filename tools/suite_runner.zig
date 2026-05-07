@@ -95,13 +95,14 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
     defer parsed.deinit(alloc);
     var runtime_arena = std.heap.ArenaAllocator.init(alloc);
     defer runtime_arena.deinit();
+    const sel = try html.Selector.compileRuntime(runtime_arena.allocator(), selector);
 
     var out_ids = std.ArrayList([]const u8).empty;
     defer out_ids.deinit(alloc);
 
     switch (parsed) {
         .strictest => |*fixture| {
-            var it = try fixture.doc.queryAllRuntime(runtime_arena.allocator(), selector);
+            var it = fixture.doc.queryRuntime(sel);
             while (it.next()) |node| {
                 if ((try node.getAttributeValue(alloc, "id"))) |id| {
                     try out_ids.append(alloc, id.value);
@@ -109,7 +110,7 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
             }
         },
         .fastest => |*fixture| {
-            var it = try fixture.doc.queryAllRuntime(runtime_arena.allocator(), selector);
+            var it = fixture.doc.queryRuntime(sel);
             while (it.next()) |node| {
                 if ((try node.getAttributeValue(alloc, "id"))) |id| {
                     try out_ids.append(alloc, id.value);
@@ -130,15 +131,16 @@ fn runSelectorCount(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixtu
     defer parsed.deinit(alloc);
     var runtime_arena = std.heap.ArenaAllocator.init(alloc);
     defer runtime_arena.deinit();
+    const sel = try html.Selector.compileRuntime(runtime_arena.allocator(), selector);
 
     var count: usize = 0;
     switch (parsed) {
         .strictest => |*fixture| {
-            var it = try fixture.doc.queryAllRuntime(runtime_arena.allocator(), selector);
+            var it = fixture.doc.queryRuntime(sel);
             while (it.next()) |_| count += 1;
         },
         .fastest => |*fixture| {
-            var it = try fixture.doc.queryAllRuntime(runtime_arena.allocator(), selector);
+            var it = fixture.doc.queryRuntime(sel);
             while (it.next()) |_| count += 1;
         },
     }
@@ -154,18 +156,19 @@ fn runSelectorCountScopeTag(io: std.Io, alloc: std.mem.Allocator, mode: ParseMod
     defer parsed.deinit(alloc);
     var runtime_arena = std.heap.ArenaAllocator.init(alloc);
     defer runtime_arena.deinit();
+    const sel = try html.Selector.compileRuntime(runtime_arena.allocator(), selector);
 
     var count: usize = 0;
     switch (parsed) {
         .strictest => |*fixture| {
             if (fixture.doc.findFirstTag(scope_tag)) |scope| {
-                var it = try scope.queryAllRuntime(runtime_arena.allocator(), selector);
+                var it = scope.queryRuntime(sel);
                 while (it.next()) |_| count += 1;
             }
         },
         .fastest => |*fixture| {
             if (fixture.doc.findFirstTag(scope_tag)) |scope| {
-                var it = try scope.queryAllRuntime(runtime_arena.allocator(), selector);
+                var it = scope.queryRuntime(sel);
                 while (it.next()) |_| count += 1;
             }
         },

@@ -34,7 +34,8 @@ test "basic parse + query" {
     var doc = try options.parse(std.testing.allocator, &input);
     defer doc.deinit();
 
-    const a = doc.queryOne("div#app > a.nav") orelse return error.TestUnexpectedResult;
+    var links = doc.query("div#app > a.nav");
+    const a = links.next() orelse return error.TestUnexpectedResult;
     const href = (try a.getAttributeValue(std.testing.allocator, "href")) orelse return error.TestUnexpectedResult;
     defer href.free(&doc, std.testing.allocator);
     try std.testing.expectEqualStrings("/docs", href.value);
@@ -63,27 +64,22 @@ All examples are verified by running `zig build examples-check`
 ### Query APIs
 
 - Compile-time selectors:
-  - `doc.queryOne(comptime selector)`
-  - `doc.queryAll(comptime selector)`
+  - `var it = doc.query(comptime selector); it.next()`
+  - `doc.query(comptime selector)`
 - Runtime selectors:
-  - `try doc.queryOneRuntime(selector)`
-  - `try doc.queryAllRuntime(selector)`
+  - `var it = doc.queryRuntime(compiled_selector); it.next()`
+  - `doc.queryRuntime(compiled_selector)`
 - Cached runtime selectors:
-  - `doc.queryOneCached(selector)`
-  - `doc.queryAllCached(selector)`
+  - `var it = doc.queryRuntime(selector); it.next()`
+  - `doc.queryRuntime(selector)`
   - selector created via `try Selector.compileRuntime(allocator, source)`
-- Diagnostics:
-  - `doc.queryOneDebug(comptime selector)`
-  - `doc.queryOneRuntimeDebug(selector)`
-  - both return `{ node, report, err }`
 
 ### Node APIs
 
 - Navigation:
   - `tagName()`
   - `parentNode()`
-  - `firstChild()`
-  - `lastChild()`
+  - `children().last()`
   - `nextSibling()`
   - `prevSibling()`
   - `children()` (iterator of wrapped child nodes; `collect(allocator)` returns an owned `[]Node`)
@@ -98,7 +94,7 @@ All examples are verified by running `zig build examples-check`
   - `AttributeValueResult.free(doc, gpa)`
   - `getAttributeValueRaw(name)` returns the current raw value bytes; destructive documents may expose bytes mutated by prior decoded lookups
 - Scoped queries:
-  - same query family as `Document` (`queryOne/queryAll`, runtime, cached, debug)
+  - same iterator-first query family as `Document` (`query` and `queryRuntime`)
 
 ### Helpers
 
@@ -159,10 +155,8 @@ Use cases:
 
 ### Instrumentation wrappers
 
-- `queryOneRuntimeWithHooks(doc, selector, hooks)`
-- `queryOneCachedWithHooks(doc, selector, hooks)`
-- `queryAllRuntimeWithHooks(doc, selector, hooks)`
-- `queryAllCachedWithHooks(doc, selector, hooks)`
+- `queryWithHooks(doc, comptime_selector, hooks)`
+- `queryRuntimeWithHooks(doc, compiled_selector, hooks)`
 
 ## Selector Support
 
@@ -205,7 +199,7 @@ Fallback playbook:
 
 1. Start with `fastest` for bulk workloads.
 2. Move unstable domains to `strictest`.
-3. Use `queryOneRuntimeDebug` and `QueryDebugReport` before changing selectors.
+3. Compile runtime selectors once and reuse `queryRuntime` iterators for repeated queries.
 
 ## Performance and Benchmarks
 
@@ -335,9 +329,8 @@ Data model highlights:
 
 ### Query returns nothing
 
-- validate selector syntax (`queryOneRuntime` can return `error.InvalidSelector`)
+- validate selector syntax with `Selector.compileRuntime(allocator, source)`
 - check scope (`Document` vs scoped `Node`)
-- use `queryOneRuntimeDebug` and inspect `QueryDebugReport`
 
 ### Unexpected `innerText`
 
@@ -349,7 +342,7 @@ Data model highlights:
 
 ### Runtime iterator invalidation
 
-`queryAllRuntime` iterators are invalidated by newer `queryAllRuntime` calls on the same `Document`.
+Runtime selector memory must outlive any iterator returned by `queryRuntime`.
 
 ### Input buffer changed
 

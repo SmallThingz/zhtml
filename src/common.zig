@@ -168,11 +168,8 @@ pub fn parentElement(doc: anytype, node_index: IndexInt) ?IndexInt {
 
 /// Previous element sibling index for `node_index`.
 pub fn prevElementSibling(doc: anytype, node_index: IndexInt) ?IndexInt {
-    var prev = doc.nodes[node_index].prev_sibling;
-    while (prev != InvalidIndex) : (prev = doc.nodes[prev].prev_sibling) {
-        if (doc.nodes[prev].isElement(prev)) return prev;
-    }
-    return null;
+    const prev = doc.nodes[node_index].prev_sibling;
+    return if (prev == InvalidIndex) null else prev;
 }
 
 /// Next element sibling index for `node_index`.

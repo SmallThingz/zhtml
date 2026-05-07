@@ -7,7 +7,8 @@ pub fn run() !void {
     var doc = try options.parse(std.testing.allocator, &input);
     defer doc.deinit();
 
-    const a = doc.queryOne("div#app > a.nav") orelse return error.TestUnexpectedResult;
+    var links = doc.query("div#app > a.nav");
+    const a = links.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("/docs", (try a.getAttributeValue(std.testing.allocator, "href")).?.value);
 }
 

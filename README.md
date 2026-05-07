@@ -59,7 +59,8 @@ test "basic parse + query" {
     var doc = try options.parse(std.testing.allocator, &input);
     defer doc.deinit();
 
-    const a = doc.queryOne("div#app > a.nav") orelse return error.TestUnexpectedResult;
+    var links = doc.query("div#app > a.nav");
+    const a = links.next() orelse return error.TestUnexpectedResult;
     const href = (try a.getAttributeValue(std.testing.allocator, "href")) orelse return error.TestUnexpectedResult;
     defer href.free(&doc, std.testing.allocator);
     try std.testing.expectEqualStrings("/docs", href.value);

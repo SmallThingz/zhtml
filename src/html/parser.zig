@@ -3,6 +3,7 @@ const tables = @import("tables.zig");
 const tags = @import("tags.zig");
 const common = @import("../common.zig");
 const document = @import("document.zig");
+const ast = @import("../selector/ast.zig");
 
 const ParseOptions = document.ParseOptions;
 const RawNode = document.RawNode;
@@ -90,8 +91,10 @@ fn ParseState(comptime opts: ParseOptions) type {
             self.nodes.appendAssumeCapacity(.{
                 .name_or_text = .{ .start = 0, .end = 0 },
                 .attr_end = .text_node,
+                .first_child = InvalidIndex,
                 .last_child = InvalidIndex,
                 .prev_sibling = InvalidIndex,
+                .next_sibling = InvalidIndex,
                 .parent = InvalidIndex,
                 .subtree_end = 0,
             });
@@ -403,6 +406,8 @@ fn ParseState(comptime opts: ParseOptions) type {
             };
             const parent_idx: IndexInt = @intCast(if (@hasField(Overrides, "parent")) overrides.parent else self.currentParent());
             const idx: IndexInt = @intCast(self.nodes.items.len);
+            const is_element = attr_end != .text_node;
+            const prev_element = if (is_element) self.nodes.items[parent_idx].last_child else InvalidIndex;
 
             try self.nodes.append(self.doc.allocator, .{
                 .name_or_text = .{
@@ -410,12 +415,21 @@ fn ParseState(comptime opts: ParseOptions) type {
                     .end = @intCast(name_or_text[1]),
                 },
                 .attr_end = attr_end,
+                .first_child = InvalidIndex,
                 .last_child = InvalidIndex,
-                .prev_sibling = self.nodes.items[parent_idx].last_child,
+                .prev_sibling = prev_element,
+                .next_sibling = InvalidIndex,
                 .parent = parent_idx,
                 .subtree_end = idx,
             });
-            self.nodes.items[parent_idx].last_child = idx;
+            if (is_element) {
+                if (prev_element == InvalidIndex) {
+                    self.nodes.items[parent_idx].first_child = idx;
+                } else {
+                    self.nodes.items[prev_element].next_sibling = idx;
+                }
+                self.nodes.items[parent_idx].last_child = idx;
+            }
         }
 
         inline fn currentParent(noalias self: *Self) IndexInt {
@@ -678,7 +692,28 @@ fn expectDocumentStructureValid(doc: anytype) !void {
             const prev_idx: usize = @intCast(node.prev_sibling);
             try testing.expect(prev_idx < i);
             try testing.expectEqual(node.parent, nodes[prev_idx].parent);
+            try testing.expect(!node.isText(idx));
+            try testing.expect(!nodes[prev_idx].isText(node.prev_sibling));
             try testing.expect(@as(usize, @intCast(nodes[prev_idx].subtree_end)) < i);
+        }
+
+        if (node.next_sibling != InvalidIndex) {
+            const next_idx: usize = @intCast(node.next_sibling);
+            try testing.expect(next_idx > i);
+            try testing.expectEqual(node.parent, nodes[next_idx].parent);
+            try testing.expect(!node.isText(idx));
+            try testing.expect(!nodes[next_idx].isText(node.next_sibling));
+        }
+
+        if (node.first_child != InvalidIndex) {
+            const first_child_idx: usize = @intCast(node.first_child);
+            try testing.expect(!is_text);
+            try testing.expect(first_child_idx > i);
+            try testing.expect(first_child_idx <= @as(usize, @intCast(node.subtree_end)));
+            try testing.expectEqual(idx, nodes[first_child_idx].parent);
+            try testing.expect(!nodes[first_child_idx].isText(node.first_child));
+        } else if (is_text) {
+            try testing.expectEqual(InvalidIndex, node.first_child);
         }
 
         if (node.last_child != InvalidIndex) {
@@ -687,8 +722,7 @@ fn expectDocumentStructureValid(doc: anytype) !void {
             try testing.expect(last_child_idx > i);
             try testing.expect(last_child_idx <= @as(usize, @intCast(node.subtree_end)));
             try testing.expectEqual(idx, nodes[last_child_idx].parent);
-            try testing.expect(i + 1 < nodes.len);
-            try testing.expectEqual(idx, nodes[i + 1].parent);
+            try testing.expect(!nodes[last_child_idx].isText(node.last_child));
         } else if (is_text) {
             try testing.expectEqual(InvalidIndex, node.last_child);
         }
@@ -703,17 +737,34 @@ fn expectEquivalentStructures(a: *const TestDocument, b: *const NonDestructiveTe
         try testing.expectEqual(lhs.name_or_text.start, rhs.name_or_text.start);
         try testing.expectEqual(lhs.name_or_text.end, rhs.name_or_text.end);
         try testing.expectEqual(lhs.attr_end, rhs.attr_end);
+        try testing.expectEqual(lhs.first_child, rhs.first_child);
         try testing.expectEqual(lhs.last_child, rhs.last_child);
         try testing.expectEqual(lhs.prev_sibling, rhs.prev_sibling);
+        try testing.expectEqual(lhs.next_sibling, rhs.next_sibling);
         try testing.expectEqual(lhs.parent, rhs.parent);
         try testing.expectEqual(lhs.subtree_end, rhs.subtree_end);
     }
 }
 
+fn firstQuery(iter: anytype) @TypeOf(blk: {
+    var it = iter;
+    break :blk it.next();
+}) {
+    var it = iter;
+    return it.next();
+}
+
+fn runtimeFirst(scope: anytype, allocator: std.mem.Allocator, selector: []const u8) !@TypeOf(firstQuery(scope.query("*"))) {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const sel = try ast.Selector.compileRuntime(arena.allocator(), selector);
+    return firstQuery(scope.queryRuntime(sel));
+}
+
 fn expectRuntimeQueryParity(a: *TestDocument, b: *NonDestructiveTestDocument, selector: []const u8) !void {
     const testing = std.testing;
-    const lhs = try a.queryOneRuntime(testing.allocator, selector);
-    const rhs = try b.queryOneRuntime(testing.allocator, selector);
+    const lhs = try runtimeFirst(a, testing.allocator, selector);
+    const rhs = try runtimeFirst(b, testing.allocator, selector);
     try testing.expect((lhs == null) == (rhs == null));
     if (lhs) |left_node| {
         try testing.expectEqual(left_node.index, rhs.?.index);
@@ -736,7 +787,7 @@ fn exerciseRuntimeApis(doc: anytype, alloc: std.mem.Allocator) !void {
     };
 
     inline for (selectors) |selector| {
-        _ = try doc.queryOneRuntime(alloc, selector);
+        _ = try runtimeFirst(doc, alloc, selector);
     }
 
     var visited: usize = 0;
@@ -982,7 +1033,7 @@ test "non-destructive parse supports file-backed memory maps without changing by
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
+    const node = firstQuery(doc.query("div#x")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a&b", (try node.getAttributeValue(arena.allocator(), "data-v")).?.value);
     const text = try node.innerTextWithOptions(arena.allocator(), .{});
     defer text.free(&doc, arena.allocator());
@@ -1002,14 +1053,14 @@ test "raw text element metadata remains valid after child append growth" {
     var html = "<script>const x = 1;</script><div>ok</div>".*;
     try resetParsed(DefaultTestOptions, &doc, &html);
 
-    const script = doc.queryOne("script") orelse return error.TestUnexpectedResult;
+    const script = firstQuery(doc.query("script")) orelse return error.TestUnexpectedResult;
     try std.testing.expect(script.raw().subtree_end > script.index);
 
     const text_node = doc.nodes[script.index + 1];
     try std.testing.expect(text_node.attr_end == .text_node);
     try std.testing.expectEqualStrings("const x = 1;", text_node.name_or_text.slice(doc.source));
 
-    const div = doc.queryOne("div") orelse return error.TestUnexpectedResult;
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
     try std.testing.expect(div.index > script.raw().subtree_end);
 }
 
@@ -1021,8 +1072,8 @@ test "raw-text close handles mixed-case end tag and embedded < bytes" {
     var html = "<script>if (a < b) { x = \"<tag>\"; }</ScRiPt   ><div id='after'></div>".*;
     try resetParsed(DefaultTestOptions, &doc, &html);
 
-    const script = doc.queryOne("script") orelse return error.TestUnexpectedResult;
-    const after = doc.queryOne("div#after") orelse return error.TestUnexpectedResult;
+    const script = firstQuery(doc.query("script")) orelse return error.TestUnexpectedResult;
+    const after = firstQuery(doc.query("div#after")) orelse return error.TestUnexpectedResult;
     try std.testing.expect(script.raw().subtree_end < after.index);
 }
 
@@ -1034,9 +1085,9 @@ test "raw-text unterminated tail keeps element open to end of input" {
     var html = "<script>const a = 1; <div>still script".*;
     try resetParsed(DefaultTestOptions, &doc, &html);
 
-    const script = doc.queryOne("script") orelse return error.TestUnexpectedResult;
+    const script = firstQuery(doc.query("script")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(IndexInt, @intCast(doc.nodes.len - 1)), script.raw().subtree_end);
-    try std.testing.expect(doc.queryOne("div") == null);
+    try std.testing.expect(firstQuery(doc.query("div")) == null);
 }
 
 test "svg subtrees are skipped and stored as one text child payload" {
@@ -1047,20 +1098,20 @@ test "svg subtrees are skipped and stored as one text child payload" {
     var html = "<div id='before'></div><svg id='s'><g><svg id='inner'><rect id='r'/></svg><circle id='c'/></g></svg><div id='after'></div>".*;
     try resetParsed(DefaultTestOptions, &doc, &html);
 
-    const first_svg = doc.queryOne("svg") orelse return error.TestUnexpectedResult;
+    const first_svg = firstQuery(doc.query("svg")) orelse return error.TestUnexpectedResult;
     const svg_text = try first_svg.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
     defer svg_text.free(&doc, alloc);
     try std.testing.expectEqualStrings("<g><svg id='inner'><rect id='r'/></svg><circle id='c'/></g>", svg_text.value);
 
-    var svg_it = doc.queryAll("svg");
+    var svg_it = doc.query("svg");
     try std.testing.expect(svg_it.next() != null);
     try std.testing.expect(svg_it.next() == null);
 
-    try std.testing.expect(doc.queryOne("#before") != null);
-    try std.testing.expect(doc.queryOne("#after") != null);
-    try std.testing.expect(doc.queryOne("#inner") == null);
-    try std.testing.expect(doc.queryOne("#r") == null);
-    try std.testing.expect(doc.queryOne("#c") == null);
+    try std.testing.expect(firstQuery(doc.query("#before")) != null);
+    try std.testing.expect(firstQuery(doc.query("#after")) != null);
+    try std.testing.expect(firstQuery(doc.query("#inner")) == null);
+    try std.testing.expect(firstQuery(doc.query("#r")) == null);
+    try std.testing.expect(firstQuery(doc.query("#c")) == null);
 }
 
 test "svg skip scanner ignores <svg in quoted attributes" {
@@ -1071,10 +1122,10 @@ test "svg skip scanner ignores <svg in quoted attributes" {
     var html = "<div id='x' data-k=\"prefix <svg attr='x'> suffix\"></div><p id='after'></p>".*;
     try resetParsed(DefaultTestOptions, &doc, &html);
 
-    const x = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
+    const x = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const v = (try x.getAttributeValue(alloc, "data-k")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("prefix <svg attr='x'> suffix", v.value);
-    try std.testing.expect(doc.queryOne("#after") != null);
+    try std.testing.expect(firstQuery(doc.query("#after")) != null);
 }
 
 test "self-closing svg is stored as regular element with no text child" {
@@ -1085,14 +1136,15 @@ test "self-closing svg is stored as regular element with no text child" {
     var html = "<div id='before'></div><svg id='s' viewBox='0 0 1 1' /><div id='after'></div>".*;
     try resetParsed(DefaultTestOptions, &doc, &html);
 
-    const first_svg = doc.queryOne("svg") orelse return error.TestUnexpectedResult;
+    const first_svg = firstQuery(doc.query("svg")) orelse return error.TestUnexpectedResult;
     const svg_text = try first_svg.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
     defer svg_text.free(&doc, alloc);
     try std.testing.expectEqualStrings("", svg_text.value);
-    try std.testing.expect(first_svg.firstChild() == null);
+    var svg_children = first_svg.children();
+    try std.testing.expect(svg_children.next() == null);
 
-    try std.testing.expect(doc.queryOne("#before") != null);
-    try std.testing.expect(doc.queryOne("#after") != null);
+    try std.testing.expect(firstQuery(doc.query("#before")) != null);
+    try std.testing.expect(firstQuery(doc.query("#after")) != null);
 }
 
 test "optional-close p/li/td-th/dt-dd/head-body preserve expected query semantics" {
@@ -1108,13 +1160,13 @@ test "optional-close p/li/td-th/dt-dd/head-body preserve expected query semantic
         "</body></html>").*;
     try resetParsed(DefaultTestOptions, &doc, &html);
 
-    try std.testing.expect(doc.queryOne("#p1 + #d1") != null);
-    try std.testing.expect(doc.queryOne("#li1 + #li2") != null);
-    try std.testing.expect(doc.queryOne("#dt1 + #dd1") != null);
-    try std.testing.expect(doc.queryOne("#dd1 + #dt2") != null);
-    try std.testing.expect(doc.queryOne("#td1 + #th1") != null);
-    try std.testing.expect(doc.queryOne("#th1 + #td2") != null);
-    try std.testing.expect(doc.queryOne("head + body") != null);
+    try std.testing.expect(firstQuery(doc.query("#p1 + #d1")) != null);
+    try std.testing.expect(firstQuery(doc.query("#li1 + #li2")) != null);
+    try std.testing.expect(firstQuery(doc.query("#dt1 + #dd1")) != null);
+    try std.testing.expect(firstQuery(doc.query("#dd1 + #dt2")) != null);
+    try std.testing.expect(firstQuery(doc.query("#td1 + #th1")) != null);
+    try std.testing.expect(firstQuery(doc.query("#th1 + #td2")) != null);
+    try std.testing.expect(firstQuery(doc.query("head + body")) != null);
 }
 
 test "mismatched close with identical first8 prefix does not close long tag" {
@@ -1125,8 +1177,8 @@ test "mismatched close with identical first8 prefix does not close long tag" {
     var html = "<abcdefgh1 id='outer'><span id='inner'></span></abcdefgh2><p id='after'></p>".*;
     try resetParsed(DefaultTestOptions, &doc, &html);
 
-    const outer = doc.queryOne("abcdefgh1#outer") orelse return error.TestUnexpectedResult;
-    const after = doc.queryOne("p#after") orelse return error.TestUnexpectedResult;
+    const outer = firstQuery(doc.query("abcdefgh1#outer")) orelse return error.TestUnexpectedResult;
+    const after = firstQuery(doc.query("p#after")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(outer.index, after.parentNode().?.index);
 }
 
@@ -1138,8 +1190,8 @@ test "processing-instruction-like nodes end at the next >" {
     var html = "<?xml version='1.0'><div id='x'></div><p id='y'></p>".*;
     try resetParsed(DefaultTestOptions, &doc, &html);
 
-    const x = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
-    const y = doc.queryOne("p#y") orelse return error.TestUnexpectedResult;
+    const x = firstQuery(doc.query("div#x")) orelse return error.TestUnexpectedResult;
+    const y = firstQuery(doc.query("p#y")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("div", x.tagName());
     try std.testing.expectEqualStrings("p", y.tagName());
 }
@@ -1152,8 +1204,8 @@ test "bang nodes respect quoted > when skipping doctype-like declarations" {
     var html = "<!DOCTYPE html SYSTEM \"a>b\"><div id='x'></div><p id='y'></p>".*;
     try resetParsed(DefaultTestOptions, &doc, &html);
 
-    const x = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
-    const y = doc.queryOne("p#y") orelse return error.TestUnexpectedResult;
+    const x = firstQuery(doc.query("div#x")) orelse return error.TestUnexpectedResult;
+    const y = firstQuery(doc.query("p#y")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("div", x.tagName());
     try std.testing.expectEqualStrings("p", y.tagName());
 }
@@ -1181,12 +1233,12 @@ test "whitespace-only text nodes drop only in fastest mode" {
     try std.testing.expectEqual(@as(usize, 4), nodes_doc.nodes.len);
     try std.testing.expectEqual(@as(usize, 4), fast_doc.nodes.len);
 
-    const nodes_y = nodes_doc.queryOne("#y") orelse return error.TestUnexpectedResult;
+    const nodes_y = firstQuery(nodes_doc.query("#y")) orelse return error.TestUnexpectedResult;
     const nodes_text = try nodes_y.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
     defer nodes_text.free(&nodes_doc, alloc);
     try std.testing.expectEqualStrings(" hi ", nodes_text.value);
 
-    const y = fast_doc.queryOne("#y") orelse return error.TestUnexpectedResult;
+    const y = firstQuery(fast_doc.query("#y")) orelse return error.TestUnexpectedResult;
     const text = try y.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
     defer text.free(&fast_doc, alloc);
     try std.testing.expectEqualStrings("hi ", text.value);
@@ -1203,7 +1255,8 @@ test "fastest mode drops indentation-only runs between child elements" {
     try std.testing.expectEqual(@as(usize, 4), doc.nodes.len);
 
     const div = doc.nodeAt(1) orelse return error.TestUnexpectedResult;
-    const a = div.firstChild() orelse return error.TestUnexpectedResult;
+    var div_children = div.children();
+    const a = div_children.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a", doc.nodes[a.index].name_or_text.slice(doc.source));
 
     const b = a.nextSibling() orelse return error.TestUnexpectedResult;
@@ -1219,9 +1272,9 @@ test "attribute scanner handles quoted > and self-closing tails" {
     var html = "<div id='a' data-q='x>y' data-n=abc></div><img id='i' src='x' /><br id='b'>".*;
     try resetParsed(DefaultTestOptions, &doc, &html);
 
-    try std.testing.expect(doc.queryOne("div#a[data-q='x>y']") != null);
-    try std.testing.expect(doc.queryOne("img#i[src='x']") != null);
-    try std.testing.expect(doc.queryOne("br#b") != null);
+    try std.testing.expect(firstQuery(doc.query("div#a[data-q='x>y']")) != null);
+    try std.testing.expect(firstQuery(doc.query("img#i[src='x']")) != null);
+    try std.testing.expect(firstQuery(doc.query("br#b")) != null);
 }
 
 test "attribute parsing still builds the DOM" {
@@ -1233,8 +1286,8 @@ test "attribute parsing still builds the DOM" {
     try resetParsed(DefaultTestOptions, &doc, &html);
 
     try std.testing.expect(doc.nodes.len > 1);
-    try std.testing.expect(doc.queryOne("#x") != null);
-    try std.testing.expect(doc.queryOne("#y") != null);
+    try std.testing.expect(firstQuery(doc.query("#x")) != null);
+    try std.testing.expect(firstQuery(doc.query("#y")) != null);
 }
 
 test "parser randomized structural sweep" {

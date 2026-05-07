@@ -4,7 +4,6 @@ pub const cached_selector = @import("cached_selector.zig");
 pub const navigation_and_children = @import("navigation_and_children.zig");
 pub const inner_text_options = @import("inner_text_options.zig");
 pub const strict_vs_fastest_parse = @import("strict_vs_fastest_parse.zig");
-pub const debug_query_report = @import("debug_query_report.zig");
 pub const instrumentation_hooks = @import("instrumentation_hooks.zig");
 pub const query_time_decode = @import("query_time_decode.zig");
 pub const non_destructive_parse = @import("non_destructive_parse.zig");

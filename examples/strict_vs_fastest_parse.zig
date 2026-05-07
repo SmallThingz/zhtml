@@ -19,13 +19,13 @@ pub fn run() !void {
     defer fastest_doc.deinit();
 
     const strictest_count = blk: {
-        var it = strictest_doc.queryAll("li.item");
+        var it = strictest_doc.query("li.item");
         var n: usize = 0;
         while (it.next() != null) n += 1;
         break :blk n;
     };
     const fastest_count = blk: {
-        var it = fastest_doc.queryAll("li.item");
+        var it = fastest_doc.query("li.item");
         var n: usize = 0;
         while (it.next() != null) n += 1;
         break :blk n;

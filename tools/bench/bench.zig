@@ -12,6 +12,14 @@ fn nowNs(io: std.Io) i96 {
     return std.Io.Timestamp.now(io, .awake).toNanoseconds();
 }
 
+fn firstQuery(iter: anytype) @TypeOf(blk: {
+    var it = iter;
+    break :blk it.next();
+}) {
+    var it = iter;
+    return it.next();
+}
+
 /// Runs a built-in synthetic parse/query workload and prints elapsed ns.
 pub fn runSynthetic(io: std.Io) !void {
     const alloc = std.heap.smp_allocator;
@@ -31,7 +39,7 @@ pub fn runSynthetic(io: std.Io) !void {
     const query_start = nowNs(io);
     i = 0;
     while (i < 100_000) : (i += 1) {
-        _ = doc.queryOne("li.x");
+        _ = firstQuery(doc.query("li.x"));
     }
     const query_end = nowNs(io);
 
@@ -110,6 +118,10 @@ pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterati
     const working = try alloc.dupe(u8, input);
     defer alloc.free(working);
 
+    var sel_arena = std.heap.ArenaAllocator.init(alloc);
+    defer sel_arena.deinit();
+    const sel = try root.Selector.compileRuntime(sel_arena.allocator(), selector);
+
     return switch (mode) {
         .strictest => blk: {
             const options: root.ParseOptions = .{ .drop_whitespace_text_nodes = .none };
@@ -119,7 +131,7 @@ pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterati
             const start = nowNs(io);
             var i: usize = 0;
             while (i < iterations) : (i += 1) {
-                _ = doc.queryOneRuntime(alloc, selector) catch null;
+                _ = firstQuery(doc.queryRuntime(sel));
             }
             break :blk elapsedNs(start, nowNs(io));
         },
@@ -131,7 +143,7 @@ pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterati
             const start = nowNs(io);
             var i: usize = 0;
             while (i < iterations) : (i += 1) {
-                _ = doc.queryOneRuntime(alloc, selector) catch null;
+                _ = firstQuery(doc.queryRuntime(sel));
             }
             break :blk elapsedNs(start, nowNs(io));
         },
@@ -162,7 +174,7 @@ pub fn runQueryCached(io: std.Io, path: []const u8, selector: []const u8, iterat
             const start = nowNs(io);
             var i: usize = 0;
             while (i < iterations) : (i += 1) {
-                _ = doc.queryOneCached(sel);
+                _ = firstQuery(doc.queryRuntime(sel));
             }
             break :blk elapsedNs(start, nowNs(io));
         },
@@ -174,7 +186,7 @@ pub fn runQueryCached(io: std.Io, path: []const u8, selector: []const u8, iterat
             const start = nowNs(io);
             var i: usize = 0;
             while (i < iterations) : (i += 1) {
-                _ = doc.queryOneCached(sel);
+                _ = firstQuery(doc.queryRuntime(sel));
             }
             break :blk elapsedNs(start, nowNs(io));
         },
@@ -257,10 +269,10 @@ test "bench smoke uses parse_mode module for both parse modes" {
     var fastest_html = "<div><span id='x'>ok</span></div>".*;
     var fastest_doc = try fastest_options.parse(alloc, &fastest_html);
     defer fastest_doc.deinit();
-    try std.testing.expect(fastest_doc.queryOne("span#x") != null);
+    try std.testing.expect(firstQuery(fastest_doc.query("span#x")) != null);
 
     var strict_html = "<div>\n  <span id='y'>ok</span>\n</div>".*;
     var strict_doc = try strictest_options.parse(alloc, &strict_html);
     defer strict_doc.deinit();
-    try std.testing.expect(strict_doc.queryOne("span#y") != null);
+    try std.testing.expect(firstQuery(strict_doc.query("span#y")) != null);
 }

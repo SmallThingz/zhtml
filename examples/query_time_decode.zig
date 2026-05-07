@@ -7,7 +7,8 @@ pub fn run() !void {
     var doc = try options.parse(std.testing.allocator, &input);
     defer doc.deinit();
 
-    const a = doc.queryOne("a#x[data-k='a&b']") orelse return error.TestUnexpectedResult;
+    var links = doc.query("a#x[data-k='a&b']");
+    const a = links.next() orelse return error.TestUnexpectedResult;
     const href = (try a.getAttributeValue(std.testing.allocator, "href")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("https://example.test/?a=1&b=2", href.value);
 }

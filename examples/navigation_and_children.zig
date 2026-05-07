@@ -7,9 +7,11 @@ pub fn run() !void {
     var doc = try options.parse(std.testing.allocator, &input);
     defer doc.deinit();
 
-    const main = doc.queryOne("main#m") orelse return error.TestUnexpectedResult;
-    const first = main.firstChild() orelse return error.TestUnexpectedResult;
-    const last = main.lastChild() orelse return error.TestUnexpectedResult;
+    var mains = doc.query("main#m");
+    const main = mains.next() orelse return error.TestUnexpectedResult;
+    var first_child = main.children();
+    const first = first_child.next() orelse return error.TestUnexpectedResult;
+    const last = main.children().last() orelse return error.TestUnexpectedResult;
 
     try std.testing.expectEqualStrings("title", (try first.getAttributeValue(std.testing.allocator, "id")).?.value);
     try std.testing.expectEqualStrings("body", (try last.getAttributeValue(std.testing.allocator, "id")).?.value);

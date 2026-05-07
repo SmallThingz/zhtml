@@ -7,7 +7,8 @@ pub fn run() !void {
     var doc = try options.parse(std.testing.allocator, &input);
     defer doc.deinit();
 
-    const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
+    var divs = doc.query("div#x");
+    const node = divs.next() orelse return error.TestUnexpectedResult;
 
     const gpa = std.testing.allocator;
     const normalized = try node.innerTextWithOptions(gpa, .{});

@@ -12,7 +12,7 @@ pub const ParseOptions = document.ParseOptions;
 pub const TextOptions = document.TextOptions;
 /// Compiled selector representation shared by comptime/runtime query paths.
 pub const Selector = selector_ast.Selector;
-/// Structured query-debug output populated by `queryOneDebug` APIs.
+/// Structured query-debug output populated by debug query internals.
 pub const QueryDebugReport = common.QueryDebugReport;
 /// Enumerates first-failure categories recorded by debug query reporting.
 pub const DebugFailureKind = common.DebugFailureKind;
@@ -25,14 +25,25 @@ pub const QueryInstrumentationStats = instrumentation.QueryInstrumentationStats;
 /// Kind of query operation measured by instrumentation wrappers.
 pub const QueryInstrumentationKind = instrumentation.QueryInstrumentationKind;
 
-/// Executes `queryOneRuntime` and reports timing through hook callbacks.
-pub const queryOneRuntimeWithHooks = instrumentation.queryOneRuntimeWithHooks;
-/// Executes `queryOneCached` and reports timing through hook callbacks.
-pub const queryOneCachedWithHooks = instrumentation.queryOneCachedWithHooks;
-/// Executes `queryAllRuntime` and reports timing through hook callbacks.
-pub const queryAllRuntimeWithHooks = instrumentation.queryAllRuntimeWithHooks;
-/// Executes `queryAllCached` and reports timing through hook callbacks.
-pub const queryAllCachedWithHooks = instrumentation.queryAllCachedWithHooks;
+/// Executes `query` and reports timing through hook callbacks.
+pub const queryWithHooks = instrumentation.queryWithHooks;
+/// Executes `queryRuntime` and reports timing through hook callbacks.
+pub const queryRuntimeWithHooks = instrumentation.queryRuntimeWithHooks;
+
+fn firstQuery(iter: anytype) @TypeOf(blk: {
+    var it = iter;
+    break :blk it.next();
+}) {
+    var it = iter;
+    return it.next();
+}
+
+fn runtimeFirst(scope: anytype, allocator: std.mem.Allocator, selector: []const u8) !@TypeOf(firstQuery(scope.query("*"))) {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const sel = try Selector.compileRuntime(arena.allocator(), selector);
+    return firstQuery(scope.queryRuntime(sel));
+}
 
 test "smoke parse/query" {
     const alloc = std.testing.allocator;
@@ -41,12 +52,12 @@ test "smoke parse/query" {
     var doc = try opts.parse(alloc, &src);
     defer doc.deinit();
 
-    try std.testing.expect(doc.queryOne("div#a") != null);
-    try std.testing.expect((try doc.queryOneRuntime(alloc, "span")) != null);
-    const span = (try doc.queryOneRuntime(alloc, "span.k")) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(firstQuery(doc.query("div#a")) != null);
+    try std.testing.expect((try runtimeFirst(&doc, alloc, "span")) != null);
+    const span = (try runtimeFirst(&doc, alloc, "span.k")) orelse return error.TestUnexpectedResult;
     const parent = span.parentNode() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("div", parent.tagName());
-    try std.testing.expect(doc.queryOne("div > span.k") != null);
+    try std.testing.expect(firstQuery(doc.query("div > span.k")) != null);
 }
 
 test "parse options helper parses directly" {
@@ -58,7 +69,7 @@ test "parse options helper parses directly" {
         var doc = try opts.parse(alloc, &src);
         defer doc.deinit();
 
-        try std.testing.expect(doc.queryOne("div#a > span") != null);
+        try std.testing.expect(firstQuery(doc.query("div#a > span")) != null);
     }
 
     {
@@ -69,7 +80,7 @@ test "parse options helper parses directly" {
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
 
-        const div = doc.queryOne("div#b") orelse return error.TestUnexpectedResult;
+        const div = firstQuery(doc.query("div#b")) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqualStrings("x&y", (try div.getAttributeValue(arena.allocator(), "data-v")).?.value);
     }
 }
@@ -81,7 +92,7 @@ test "writeHtml serializes node subtree" {
     var doc = try opts.parse(alloc, &src);
     defer doc.deinit();
 
-    const div = doc.queryOne("div") orelse return error.TestUnexpectedResult;
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
@@ -96,7 +107,7 @@ test "writeHtml respects in-place attr parsing and void tags" {
     var doc = try opts.parse(alloc, &src);
     defer doc.deinit();
 
-    const img = doc.queryOne("img#i") orelse return error.TestUnexpectedResult;
+    const img = firstQuery(doc.query("img#i")) orelse return error.TestUnexpectedResult;
     _ = (try img.getAttributeValue(alloc, "class")) orelse return error.TestUnexpectedResult;
     _ = (try img.getAttributeValue(alloc, "data-q")) orelse return error.TestUnexpectedResult;
 
@@ -113,7 +124,7 @@ test "writeHtml reflects in-place text decoding" {
     var doc = try opts.parse(alloc, &src);
     defer doc.deinit();
 
-    const p = doc.queryOne("p") orelse return error.TestUnexpectedResult;
+    const p = firstQuery(doc.query("p")) orelse return error.TestUnexpectedResult;
     const text = try p.innerTextWithOptions(alloc, .{});
     defer text.free(&doc, alloc);
 
@@ -130,7 +141,7 @@ test "writeHtml drops whitespace-only text nodes when configured" {
     var doc = try opts.parse(alloc, &src);
     defer doc.deinit();
 
-    const div = doc.queryOne("div") orelse return error.TestUnexpectedResult;
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
@@ -194,7 +205,7 @@ test "writeHtmlSelf excludes children" {
     var doc = try opts.parse(alloc, &src);
     defer doc.deinit();
 
-    const div = doc.queryOne("div") orelse return error.TestUnexpectedResult;
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
