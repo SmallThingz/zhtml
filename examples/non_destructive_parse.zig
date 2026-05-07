@@ -17,7 +17,7 @@ fn runBufferCase() !void {
     defer arena.deinit();
 
     const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("a&b", node.getAttributeValueAlloc(arena.allocator(), "data-v").?);
+    try std.testing.expectEqualStrings("a&b", (try node.getAttributeValue(arena.allocator(), "data-v")).?.value);
     const text = try node.innerTextWithOptions(gpa, .{});
     defer text.free(&doc, gpa);
     try std.testing.expectEqualStrings("hi & bye", text.value);

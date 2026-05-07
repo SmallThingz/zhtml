@@ -19,14 +19,14 @@ See the [latest benchmark snapshot](./DOCUMENTATION.md#latest-benchmark-snapshot
 
 <!-- README_AUTO_SUMMARY:START -->
 
-Source: `bench/results/latest.json` (`stable` profile).
+Source: `bench/results/latest.json` (`quick` profile).
 
 ### Parse Throughput (Average Across Fixtures)
 
 ```text
-ours     │████████████████████│ 1597.21 MB/s (100.00%)
-lol-html │█████████████░░░░░░░│ 1017.27 MB/s (63.69%)
-lexbor   │███░░░░░░░░░░░░░░░░░│ 225.19 MB/s (14.10%)
+ours     │████████████████████│ 1567.53 MB/s (100.00%)
+lol-html │█████████████░░░░░░░│ 999.23 MB/s (63.75%)
+lexbor   │███░░░░░░░░░░░░░░░░░│ 212.94 MB/s (13.58%)
 ```
 
 ### Conformance Snapshot
@@ -60,7 +60,9 @@ test "basic parse + query" {
     defer doc.deinit();
 
     const a = doc.queryOne("div#app > a.nav") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("/docs", a.getAttributeValue("href").?);
+    const href = (try a.getAttributeValue(std.testing.allocator, "href")) orelse return error.TestUnexpectedResult;
+    defer href.free(&doc, std.testing.allocator);
+    try std.testing.expectEqualStrings("/docs", href.value);
 }
 ```
 

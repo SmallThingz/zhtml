@@ -120,7 +120,7 @@ fn classifyCompoundFailure(
 
     if (comp.hasId()) {
         const id = comp.id.slice(selector.source);
-        const value = attr.getAttrValue(doc, node, "id", allocator) orelse return .{
+        const value = (attr.getAttrValue(doc, node, "id", allocator) catch null) orelse return .{
             .kind = .id,
             .group_index = g,
             .compound_index = c,
@@ -133,7 +133,7 @@ fn classifyCompoundFailure(
     }
 
     if (comp.class_len != 0) {
-        const class_attr = attr.getAttrValue(doc, node, "class", allocator) orelse return .{
+        const class_attr = (attr.getAttrValue(doc, node, "class", allocator) catch null) orelse return .{
             .kind = .class,
             .group_index = g,
             .compound_index = c,

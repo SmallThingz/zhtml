@@ -747,15 +747,15 @@ fn exerciseRuntimeApis(doc: anytype, alloc: std.mem.Allocator) !void {
         defer arena.deinit();
         if (doc.nodes[idx].isElement(@intCast(idx))) {
             if (comptime @FieldType(@TypeOf(doc.*), "source") == []const u8) {
-                _ = node.getAttributeValueAlloc(arena.allocator(), "id");
-                _ = node.getAttributeValueAlloc(arena.allocator(), "class");
-                _ = node.getAttributeValueAlloc(arena.allocator(), "href");
-                _ = node.getAttributeValueAlloc(arena.allocator(), "data-v");
+                _ = try node.getAttributeValue(arena.allocator(), "id");
+                _ = try node.getAttributeValue(arena.allocator(), "class");
+                _ = try node.getAttributeValue(arena.allocator(), "href");
+                _ = try node.getAttributeValue(arena.allocator(), "data-v");
             } else {
-                _ = node.getAttributeValue("id");
-                _ = node.getAttributeValue("class");
-                _ = node.getAttributeValue("href");
-                _ = node.getAttributeValue("data-v");
+                _ = try node.getAttributeValue(alloc, "id");
+                _ = try node.getAttributeValue(alloc, "class");
+                _ = try node.getAttributeValue(alloc, "href");
+                _ = try node.getAttributeValue(alloc, "data-v");
             }
         }
         const text = try node.innerTextWithOptions(arena.allocator(), .{});
@@ -983,7 +983,7 @@ test "non-destructive parse supports file-backed memory maps without changing by
     defer arena.deinit();
 
     const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("a&b", node.getAttributeValueAlloc(arena.allocator(), "data-v").?);
+    try std.testing.expectEqualStrings("a&b", (try node.getAttributeValue(arena.allocator(), "data-v")).?.value);
     const text = try node.innerTextWithOptions(arena.allocator(), .{});
     defer text.free(&doc, arena.allocator());
     try std.testing.expectEqualStrings("hi & bye", text.value);
@@ -1072,8 +1072,8 @@ test "svg skip scanner ignores <svg in quoted attributes" {
     try resetParsed(DefaultTestOptions, &doc, &html);
 
     const x = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
-    const v = x.getAttributeValue("data-k") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("prefix <svg attr='x'> suffix", v);
+    const v = (try x.getAttributeValue(alloc, "data-k")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("prefix <svg attr='x'> suffix", v.value);
     try std.testing.expect(doc.queryOne("#after") != null);
 }
 

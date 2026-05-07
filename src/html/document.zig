@@ -206,6 +206,28 @@ fn GetNode(comptime options: ParseOptions) type {
             }
         };
 
+        /// Attribute lookup result. `value` may borrow document source or point
+        /// to an allocation made with the allocator passed to `getAttributeValue`.
+        pub const AttributeValueResult = struct {
+            /// Decoded attribute value bytes.
+            value: []const u8,
+
+            /// Returns true when `value` points inside `doc` source.
+            pub fn isBorrowed(self: @This(), doc: *const DocType) bool {
+                return sliceInBounds(doc.source, self.value);
+            }
+
+            /// Frees `value` only when it is not borrowed from `doc` source.
+            pub fn free(self: @This(), doc: *const DocType, gpa: std.mem.Allocator) void {
+                if (self.value.len == 0 or self.isBorrowed(doc)) return;
+                if (comptime options.non_destructive) {
+                    gpa.free(@constCast(self.value));
+                } else {
+                    unreachable; // Logic error in library
+                }
+            }
+        };
+
         /// Owning document pointer.
         doc: *DocType,
         /// Backing node index inside `doc.nodes`.
@@ -252,18 +274,15 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         /// Returns decoded attribute value for `name`, if present.
-        pub fn getAttributeValue(self: @This(), name: []const u8) ?[]const u8 {
-            if (comptime options.non_destructive) {
-                @compileError("Use getAttributeValueAlloc for non-destructive documents.");
-            }
-            const node_raw = &self.doc.nodes[self.index];
-            return attr.getAttrValue(self.doc, node_raw, name, self.doc.allocator);
+        pub fn getAttributeValue(self: @This(), allocator: std.mem.Allocator, name: []const u8) !?AttributeValueResult {
+            return .{ .value = try attr.getAttrValue(self.doc, &self.doc.nodes[self.index], name, allocator) orelse return null };
         }
 
-        /// Returns decoded attribute value for `name`, allocating from `allocator` when needed.
-        pub fn getAttributeValueAlloc(self: @This(), allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
-            const node_raw = &self.doc.nodes[self.index];
-            return attr.getAttrValue(self.doc, node_raw, name, allocator);
+        /// Returns raw attribute value bytes for `name`, if present.
+        /// Warning: when `options.non_destructive` is false this may point at
+        /// bytes already mutated by previous decoded attribute lookups.
+        pub fn getAttributeValueRaw(self: @This(), name: []const u8) ?[]const u8 {
+            return attr.getAttrValueRaw(self.doc, &self.doc.nodes[self.index], name);
         }
 
         /// Returns first element child.
@@ -1169,8 +1188,8 @@ fn expectIterIds(iter: anytype, expected_ids: []const []const u8) !void {
     var i: usize = 0;
     while (mut_iter.next()) |node| {
         if (i >= expected_ids.len) return error.TestUnexpectedResult;
-        const id = node.getAttributeValue("id") orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings(expected_ids[i], id);
+        const id = (try node.getAttributeValue(std.testing.allocator, "id")) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(expected_ids[i], id.value);
         i += 1;
     }
     try std.testing.expectEqual(expected_ids.len, i);
@@ -1185,8 +1204,8 @@ fn expectDocQueryComptime(doc: *const GetDocument(.{}), comptime selector: []con
         try std.testing.expect(first == null);
     } else {
         const node = first orelse return error.TestUnexpectedResult;
-        const id = node.getAttributeValue("id") orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings(expected_ids[0], id);
+        const id = (try node.getAttributeValue(std.testing.allocator, "id")) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(expected_ids[0], id.value);
     }
 }
 
@@ -1201,8 +1220,8 @@ fn expectDocQueryRuntime(doc: *const GetDocument(.{}), selector: []const u8, exp
         try std.testing.expect(first == null);
     } else {
         const node = first orelse return error.TestUnexpectedResult;
-        const id = node.getAttributeValue("id") orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings(expected_ids[0], id);
+        const id = (try node.getAttributeValue(std.testing.allocator, "id")) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(expected_ids[0], id.value);
     }
 }
 
@@ -1215,8 +1234,8 @@ fn expectNodeQueryComptime(scope: GetNode(.{}), comptime selector: []const u8, e
         try std.testing.expect(first == null);
     } else {
         const node = first orelse return error.TestUnexpectedResult;
-        const id = node.getAttributeValue("id") orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings(expected_ids[0], id);
+        const id = (try node.getAttributeValue(std.testing.allocator, "id")) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(expected_ids[0], id.value);
     }
 }
 
@@ -1231,8 +1250,8 @@ fn expectNodeQueryRuntime(scope: GetNode(.{}), selector: []const u8, expected_id
         try std.testing.expect(first == null);
     } else {
         const node = first orelse return error.TestUnexpectedResult;
-        const id = node.getAttributeValue("id") orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings(expected_ids[0], id);
+        const id = (try node.getAttributeValue(std.testing.allocator, "id")) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(expected_ids[0], id.value);
     }
 }
 
@@ -1286,8 +1305,8 @@ test "non-destructive parse preserves caller bytes and formats exact original so
     try resetParsed(.{ .non_destructive = true }, &doc, &html);
 
     const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
-    const attr_value = node.getAttributeValueAlloc(arena.allocator(), "data-v") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("a&b", attr_value);
+    const attr_value = (try node.getAttributeValue(arena.allocator(), "data-v")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a&b", attr_value.value);
 
     const text = try node.innerTextWithOptions(alloc, .{});
     defer text.free(&doc, alloc);
@@ -1312,13 +1331,81 @@ test "non-destructive attribute reads do not rewrite attribute bytes" {
     defer arena.deinit();
 
     const node = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
-    const value = node.getAttributeValueAlloc(arena.allocator(), "data-v") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("a&b", value);
+    const value = (try node.getAttributeValue(arena.allocator(), "data-v")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a&b", value.value);
 
     const attr_start: usize = @intCast(node.raw().name_or_text.end);
     const attr_end = node.raw().attrEnd();
     try std.testing.expect(std.mem.indexOf(u8, doc.source[attr_start..attr_end], "&amp;") != null);
     try std.testing.expectEqualSlices(u8, before[0..], html[0..]);
+}
+
+test "attribute value results distinguish borrowed and allocated non-destructive reads" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{ .non_destructive = true }).init(alloc);
+    defer doc.deinit();
+
+    var html = "<div id='x' plain='abc' data-v='a&amp;b'></div>".*;
+    try resetParsed(.{ .non_destructive = true }, &doc, &html);
+
+    const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
+    const plain = (try node.getAttributeValue(alloc, "plain")) orelse return error.TestUnexpectedResult;
+    defer plain.free(&doc, alloc);
+    try std.testing.expect(plain.isBorrowed(&doc));
+    try std.testing.expectEqualStrings("abc", plain.value);
+
+    const decoded = (try node.getAttributeValue(alloc, "data-v")) orelse return error.TestUnexpectedResult;
+    defer decoded.free(&doc, alloc);
+    try std.testing.expect(!decoded.isBorrowed(&doc));
+    try std.testing.expectEqualStrings("a&b", decoded.value);
+    try std.testing.expectEqualStrings("a&amp;b", node.getAttributeValueRaw("data-v") orelse return error.TestUnexpectedResult);
+}
+
+test "non-destructive attribute with undecodable ampersand does not allocate" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{ .non_destructive = true }).init(alloc);
+    defer doc.deinit();
+
+    var html = "<div id='x' data-v='a&bogus'></div>".*;
+    try resetParsed(.{ .non_destructive = true }, &doc, &html);
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
+    const value = (try node.getAttributeValue(failing.allocator(), "data-v")) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(value.isBorrowed(&doc));
+    try std.testing.expectEqualStrings("a&bogus", value.value);
+}
+
+test "non-destructive decoded attribute frees temporary allocation on resize failure" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{ .non_destructive = true }).init(alloc);
+    defer doc.deinit();
+
+    var html = "<div id='x' data-v='a&amp;b'></div>".*;
+    try resetParsed(.{ .non_destructive = true }, &doc, &html);
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{
+        .fail_index = 1,
+        .resize_fail_index = 0,
+    });
+    const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
+    try std.testing.expectError(error.OutOfMemory, node.getAttributeValue(failing.allocator(), "data-v"));
+}
+
+test "raw destructive attribute value reflects lazy decode mutation" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+
+    var html = "<div id='x' data-v='a&amp;b'></div>".*;
+    try resetParsed(.{}, &doc, &html);
+
+    const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a&amp;b", node.getAttributeValueRaw("data-v") orelse return error.TestUnexpectedResult);
+
+    const decoded = (try node.getAttributeValue(alloc, "data-v")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a&b", decoded.value);
+    try std.testing.expectEqualStrings("a&b", node.getAttributeValueRaw("data-v") orelse return error.TestUnexpectedResult);
 }
 
 test "non-destructive text reads do not rewrite text bytes" {
@@ -1538,8 +1625,8 @@ test "node-scoped queries return complete descendants only" {
     const it = sibs.queryAllCached(sel);
     try expectIterIds(it, &.{ "a1", "a2", "a3" });
     const first = sibs.queryOneCached(sel) orelse return error.TestUnexpectedResult;
-    const id = first.getAttributeValue("id") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("a1", id);
+    const id = (try first.getAttributeValue(std.testing.allocator, "id")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a1", id.value);
 }
 
 test "innerText normalizes whitespace by default" {
@@ -1640,8 +1727,8 @@ test "parse-time attribute decoding is off by default and query-time lookup deco
     const span = doc.source[attr_start..node.raw().attrEnd()];
     try std.testing.expect(std.mem.indexOf(u8, span, "&amp;") != null);
 
-    const value = node.getAttributeValue("data-v") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("a&b", value);
+    const value = (try node.getAttributeValue(alloc, "data-v")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a&b", value.value);
 }
 
 test "isOwned distinguishes borrowed single-text and allocated multi-text innerText" {
@@ -1701,11 +1788,11 @@ test "inplace attribute parser treats explicit empty assignment as name-only" {
     try resetParsed(.{}, &doc, &html);
 
     const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
-    const a = node.getAttributeValue("a") orelse return error.TestUnexpectedResult;
-    const b = node.getAttributeValue("b") orelse return error.TestUnexpectedResult;
-    const c = node.getAttributeValue("c");
-    try std.testing.expectEqual(@as(usize, 0), a.len);
-    try std.testing.expectEqual(@as(usize, 0), b.len);
+    const a = (try node.getAttributeValue(alloc, "a")) orelse return error.TestUnexpectedResult;
+    const b = (try node.getAttributeValue(alloc, "b")) orelse return error.TestUnexpectedResult;
+    const c = try node.getAttributeValue(alloc, "c");
+    try std.testing.expectEqual(@as(usize, 0), a.value.len);
+    try std.testing.expectEqual(@as(usize, 0), b.value.len);
     try std.testing.expect(c == null);
 
     try std.testing.expect(doc.queryOne("div[a]") != null);
@@ -1725,10 +1812,10 @@ test "inplace attr lazy parse updates state markers and supports selector-trigge
     try std.testing.expect(by_selector != null);
 
     const node = by_selector orelse return error.TestUnexpectedResult;
-    const q = node.getAttributeValue("q") orelse return error.TestUnexpectedResult;
-    const n = node.getAttributeValue("n") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("&z", q);
-    try std.testing.expectEqualStrings("a&b", n);
+    const q = (try node.getAttributeValue(alloc, "q")) orelse return error.TestUnexpectedResult;
+    const n = (try node.getAttributeValue(alloc, "n")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("&z", q.value);
+    try std.testing.expectEqualStrings("a&b", n.value);
 
     const attr_start: usize = node.raw().name_or_text.end;
     const span = doc.source[attr_start..node.raw().attrEnd()];
@@ -1790,12 +1877,12 @@ test "inplace extended skip metadata preserves traversal for following attribute
     try resetParsed(.{}, &doc, html);
 
     const node = doc.queryOne("#x") orelse return error.TestUnexpectedResult;
-    const a = node.getAttributeValue("a") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 320), a.len);
-    for (a) |c| try std.testing.expect(c == '&');
+    const a = (try node.getAttributeValue(alloc, "a")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 320), a.value.len);
+    for (a.value) |c| try std.testing.expect(c == '&');
 
-    const b = node.getAttributeValue("b") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("ok", b);
+    const b = (try node.getAttributeValue(alloc, "b")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("ok", b.value);
 }
 
 test "cached selector APIs are equivalent to runtime string wrappers" {
@@ -1830,8 +1917,8 @@ test "cached selector APIs are equivalent to runtime string wrappers" {
             try std.testing.expect(first == null);
         } else {
             const node = first orelse return error.TestUnexpectedResult;
-            const id = node.getAttributeValue("id") orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqualStrings(case.expected[0], id);
+            const id = (try node.getAttributeValue(std.testing.allocator, "id")) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings(case.expected[0], id.value);
         }
     }
 }
@@ -1866,12 +1953,12 @@ test "attr fast-path names are equivalent to generic lookup semantics" {
     try resetParsed(.{}, &doc, &html);
 
     const a = doc.queryOne("a") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("x", a.getAttributeValue("id").?);
-    try std.testing.expectEqualStrings("btn primary", a.getAttributeValue("class").?);
-    try std.testing.expectEqualStrings("https://example.com", a.getAttributeValue("href").?);
-    try std.testing.expectEqualStrings("v", a.getAttributeValue("data-k").?);
+    try std.testing.expectEqualStrings("x", (try a.getAttributeValue(std.testing.allocator, "id")).?.value);
+    try std.testing.expectEqualStrings("btn primary", (try a.getAttributeValue(alloc, "class")).?.value);
+    try std.testing.expectEqualStrings("https://example.com", (try a.getAttributeValue(alloc, "href")).?.value);
+    try std.testing.expectEqualStrings("v", (try a.getAttributeValue(alloc, "data-k")).?.value);
 
-    try std.testing.expect(a.getAttributeValue("missing") == null);
+    try std.testing.expect(try a.getAttributeValue(alloc, "missing") == null);
 }
 
 test "mixed-case tags and attrs are queryable via lowercase selectors" {
@@ -1886,7 +1973,7 @@ test "mixed-case tags and attrs are queryable via lowercase selectors" {
     try std.testing.expect((try doc.queryOneRuntime(alloc, "div > span#y")) != null);
 
     const div = doc.queryOne("div#x") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("A b", div.getAttributeValue("class").?);
+    try std.testing.expectEqualStrings("A b", (try div.getAttributeValue(alloc, "class")).?.value);
 }
 
 test "multiple class predicates in one compound match correctly" {
@@ -1932,7 +2019,7 @@ test "scoped query with duplicate ids respects scope and extra predicates" {
     const found_rt = (try scope.queryOneRuntime(alloc, "#dup.y")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(found_ct.index, found_rt.index);
     const parent = found_ct.parentNode() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("scope", parent.getAttributeValue("id").?);
+    try std.testing.expectEqualStrings("scope", (try parent.getAttributeValue(std.testing.allocator, "id")).?.value);
 }
 
 test "runtime selector rejects multiple ids in one compound" {
@@ -2057,9 +2144,9 @@ test "parse option bundles preserve selector/query behavior for representative i
         try std.testing.expect((a == null) == (b == null));
     }
 
-    const strict_empty = (strict_doc.queryOne("#e") orelse return error.TestUnexpectedResult).getAttributeValue("a") orelse return error.TestUnexpectedResult;
-    const fast_empty = (fast_doc.queryOne("#e") orelse return error.TestUnexpectedResult).getAttributeValue("a") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings(strict_empty, fast_empty);
+    const strict_empty = (try (strict_doc.queryOne("#e") orelse return error.TestUnexpectedResult).getAttributeValue(alloc, "a")) orelse return error.TestUnexpectedResult;
+    const fast_empty = (try (fast_doc.queryOne("#e") orelse return error.TestUnexpectedResult).getAttributeValue(alloc, "a")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(strict_empty.value, fast_empty.value);
 }
 
 test "children() iterator traverses sibling-chain nodes" {
@@ -2075,8 +2162,8 @@ test "children() iterator traverses sibling-chain nodes" {
     const nodes = try kids.collect(alloc);
     defer alloc.free(nodes);
     try std.testing.expectEqual(@as(usize, 2), nodes.len);
-    try std.testing.expectEqualStrings("a", nodes[0].getAttributeValue("id").?);
-    try std.testing.expectEqualStrings("b", nodes[1].getAttributeValue("id").?);
+    try std.testing.expectEqualStrings("a", (try nodes[0].getAttributeValue(std.testing.allocator, "id")).?.value);
+    try std.testing.expectEqualStrings("b", (try nodes[1].getAttributeValue(std.testing.allocator, "id")).?.value);
 
     var again = root.children();
     const nodes_again = try again.collect(alloc);
@@ -2095,13 +2182,13 @@ test "children() collect respects iterator progress" {
     const root = doc.queryOne("div#root") orelse return error.TestUnexpectedResult;
     var kids = root.children();
     const first = kids.next() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("a", first.getAttributeValue("id").?);
+    try std.testing.expectEqualStrings("a", (try first.getAttributeValue(std.testing.allocator, "id")).?.value);
 
     const rest = try kids.collect(alloc);
     defer alloc.free(rest);
     try std.testing.expectEqual(@as(usize, 2), rest.len);
-    try std.testing.expectEqualStrings("b", rest[0].getAttributeValue("id").?);
-    try std.testing.expectEqualStrings("c", rest[1].getAttributeValue("id").?);
+    try std.testing.expectEqualStrings("b", (try rest[0].getAttributeValue(std.testing.allocator, "id")).?.value);
+    try std.testing.expectEqualStrings("c", (try rest[1].getAttributeValue(std.testing.allocator, "id")).?.value);
 }
 
 test "unquoted attribute values preserve slash characters" {
@@ -2113,11 +2200,11 @@ test "unquoted attribute values preserve slash characters" {
     try resetParsed(.{}, &doc, &html);
 
     const node = doc.queryOne("a#x") orelse return error.TestUnexpectedResult;
-    const href = node.getAttributeValue("href") orelse return error.TestUnexpectedResult;
-    const data_path = node.getAttributeValue("data-path") orelse return error.TestUnexpectedResult;
+    const href = (try node.getAttributeValue(alloc, "href")) orelse return error.TestUnexpectedResult;
+    const data_path = (try node.getAttributeValue(alloc, "data-path")) orelse return error.TestUnexpectedResult;
 
-    try std.testing.expectEqualStrings("/docs/v1/api", href);
-    try std.testing.expectEqualStrings("assets/img/logo.svg", data_path);
+    try std.testing.expectEqualStrings("/docs/v1/api", href.value);
+    try std.testing.expectEqualStrings("assets/img/logo.svg", data_path.value);
     try std.testing.expect(doc.queryOne("a[href='/docs/v1/api'][data-path='assets/img/logo.svg']") != null);
 }
 

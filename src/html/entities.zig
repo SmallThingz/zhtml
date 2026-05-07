@@ -25,6 +25,29 @@ pub const Decoded = struct {
 /// Decodes entities in-place over entire slice and returns new length.
 pub fn decodeInPlace(slice: []u8) usize {
     const first = std.mem.indexOfScalar(u8, slice, '&') orelse return slice.len;
+    return decodeInPlaceFrom(slice, first);
+}
+
+/// Returns the first `&` offset that begins a decodable entity.
+pub fn firstDecodableEntity(slice: []const u8, start: usize) ?usize {
+    var i = start;
+    while (std.mem.indexOfScalarPos(u8, slice, i, '&')) |amp| {
+        if (decodeEntity(slice[amp + 1 ..]) != null) {
+            @branchHint(.likely);
+            return amp;
+        } else {
+            @branchHint(.cold);
+            i = amp + 1;
+        }
+    }
+    return null;
+}
+
+/// Decodes entities in-place starting at a known `&` offset.
+pub fn decodeInPlaceFrom(slice: []u8, first: usize) usize {
+    std.debug.assert(first < slice.len);
+    std.debug.assert(slice[first] == '&');
+
     var r: usize = first;
     var w: usize = first;
 
@@ -278,6 +301,14 @@ test "decode entities preserves literal run after shrinking first entity" {
     var buf = "a&amp;bc&amp;d".*;
     const n = decodeInPlace(&buf);
     try std.testing.expectEqualStrings("a&bc&d", buf[0..n]);
+}
+
+test "decode from first decodable entity skips invalid ampersands" {
+    var buf = "a&bogus&amp;b".*;
+    const first = firstDecodableEntity(&buf, 0) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 7), first);
+    const n = decodeInPlaceFrom(&buf, first);
+    try std.testing.expectEqualStrings("a&bogus&b", buf[0..n]);
 }
 
 test "decode decimal and uppercase hex entities" {

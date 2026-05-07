@@ -70,7 +70,7 @@ test "parse options helper parses directly" {
         defer arena.deinit();
 
         const div = doc.queryOne("div#b") orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings("x&y", div.getAttributeValueAlloc(arena.allocator(), "data-v").?);
+        try std.testing.expectEqualStrings("x&y", (try div.getAttributeValue(arena.allocator(), "data-v")).?.value);
     }
 }
 
@@ -97,8 +97,8 @@ test "writeHtml respects in-place attr parsing and void tags" {
     defer doc.deinit();
 
     const img = doc.queryOne("img#i") orelse return error.TestUnexpectedResult;
-    _ = img.getAttributeValue("class") orelse return error.TestUnexpectedResult;
-    _ = img.getAttributeValue("data-q") orelse return error.TestUnexpectedResult;
+    _ = (try img.getAttributeValue(alloc, "class")) orelse return error.TestUnexpectedResult;
+    _ = (try img.getAttributeValue(alloc, "data-q")) orelse return error.TestUnexpectedResult;
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
@@ -167,7 +167,7 @@ test "writeHtml parses and prints complex document" {
     // +3 = title
     //   +4 = `Title` [text node]
     // +5 = `\n` [text node]
-    try std.testing.expectEqualStrings("utf-8", doc.nodeAt(html.index + 6).?.getAttributeValue("charset").?);
+    try std.testing.expectEqualStrings("utf-8", (try doc.nodeAt(html.index + 6).?.getAttributeValue(alloc, "charset")).?.value);
     const rendered = try std.fmt.allocPrint(alloc, "{f}", .{html});
     defer alloc.free(rendered);
 

@@ -106,7 +106,7 @@ pub fn parseRawValue(source: []const u8, span_end: usize, eq_index: usize) RawVa
 }
 
 /// Parses parsed in-place attribute value span (after name delimiter).
-pub fn parseParsedValue(source: []u8, span_end: usize, name_end: usize) ParsedValue {
+pub fn parseParsedValue(source: []const u8, span_end: usize, name_end: usize) ParsedValue {
     std.debug.assert(span_end <= source.len);
     if (name_end + 1 >= span_end) return .{ .value = "", .next_start = span_end };
 
@@ -174,16 +174,19 @@ inline fn hasConstSource(comptime Doc: type) bool {
 }
 
 /// Returns attribute value by name from in-place attribute bytes, decoding lazily.
-pub fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) ?[]const u8 {
+pub inline fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
     const Doc = @TypeOf(doc_ptr.*);
     if (comptime hasConstSource(Doc)) {
         return getAttrValueNonDestructive(doc_ptr, node, name, allocator);
+    } else {
+        return getAttrValueDestructive(doc_ptr, node, name);
     }
+}
 
-    // Destructive mode does a single left-to-right pass over the raw attribute
-    // bytes and only materializes a value when the requested name matches.
-    const mut_doc = @constCast(doc_ptr);
-    const source: []u8 = mut_doc.source;
+/// Returns the current raw attribute value span for `name`.
+/// In destructive documents this may point at already-mutated decoded bytes.
+pub fn getAttrValueRaw(noalias doc_ptr: anytype, node: anytype, name: []const u8) ?[]const u8 {
+    const source = doc_ptr.source;
     const lookup_kind = classifyLookupName(name);
 
     var i: usize = node.name_or_text.end;
@@ -194,31 +197,18 @@ pub fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []const u8, a
         skipWhitespace(source, end, &i);
         if (i >= end) return null;
 
-        const c = source[i];
-        if (c == '>' or c == '/') return null;
-
-        const name_start = i;
-        while (i < end and tables.IdentCharTable[source[i]]) : (i += 1) {}
-        if (i == name_start) {
-            i += 1;
-            continue;
-        }
-
-        const name_end = i;
-        const attr_name = source[name_start..name_end];
+        const scanned = scanAttrNameOrSkip(source, end, i);
+        const attr_name = scanned.name orelse return null;
+        i = scanned.next_start;
+        if (attr_name.len == 0) continue;
         const is_target = matchesLookupName(attr_name, name, lookup_kind);
 
-        if (i >= end) {
-            if (is_target) return "";
-            return null;
-        }
+        if (i >= end) return if (is_target) "" else null;
 
         const delim = source[i];
         if (delim == '=') {
             const raw = parseRawValue(source, end, i);
-            if (is_target) {
-                return materializeRawValue(source, end, i, raw);
-            }
+            if (is_target) return source[raw.start..raw.end];
             i = raw.next_start;
             continue;
         }
@@ -231,14 +221,7 @@ pub fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []const u8, a
         }
 
         if (is_target) return "";
-
         if (delim == '>' or delim == '/') return null;
-
-        if (tables.WhitespaceTable[delim]) {
-            i += 1;
-            continue;
-        }
-
         i += 1;
     }
 
@@ -258,7 +241,7 @@ pub fn collectSelectedValues(
         var idx: usize = 0;
         while (idx < selected_names.len) : (idx += 1) {
             if (out_values[idx] != null) continue;
-            out_values[idx] = getAttrValueNonDestructive(doc_ptr, node, selected_names[idx], allocator);
+            out_values[idx] = getAttrValueNonDestructive(doc_ptr, node, selected_names[idx], allocator) catch null;
         }
         return;
     }
@@ -338,7 +321,73 @@ pub fn collectSelectedValues(
     }
 }
 
-fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) ?[]const u8 {
+inline fn getAttrValueDestructive(doc: anytype, node: anytype, name: []const u8) ?[]const u8 {
+    // Destructive mode does a single left-to-right pass over the raw attribute
+    // bytes and only materializes a value when the requested name matches.
+    const mut_doc = @constCast(doc);
+    const source: []u8 = mut_doc.source;
+    const lookup_kind = classifyLookupName(name);
+
+    var i: usize = node.name_or_text.end;
+    const end = node.attrEnd();
+    if (i >= end) return null;
+
+    while (i < end) {
+        skipWhitespace(source, end, &i);
+        if (i >= end) return null;
+
+        const c = source[i];
+        if (c == '>' or c == '/') return null;
+
+        const name_start = i;
+        while (i < end and tables.IdentCharTable[source[i]]) : (i += 1) {}
+        if (i == name_start) {
+            i += 1;
+            continue;
+        }
+
+        const name_end = i;
+        const attr_name = source[name_start..name_end];
+        const is_target = matchesLookupName(attr_name, name, lookup_kind);
+
+        if (i >= end) {
+            if (is_target) return "";
+            return null;
+        }
+
+        const delim = source[i];
+        if (delim == '=') {
+            const raw = parseRawValue(source, end, i);
+            if (is_target) {
+                return materializeRawValue(source, end, i, raw);
+            }
+            i = raw.next_start;
+            continue;
+        }
+
+        if (delim == 0) {
+            const parsed = parseParsedValue(source, end, i);
+            if (is_target) return parsed.value;
+            i = parsed.next_start;
+            continue;
+        }
+
+        if (is_target) return "";
+
+        if (delim == '>' or delim == '/') return null;
+
+        if (tables.WhitespaceTable[delim]) {
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    return null;
+}
+
+inline fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
     const source: []const u8 = doc.source;
     const lookup_kind = classifyLookupName(name);
 
@@ -367,7 +416,7 @@ fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8, all
         const delim = source[i];
         if (delim == '=') {
             const raw = parseRawValue(source, end, i);
-            if (is_target) return materializeRawValueOwned(allocator, source, raw);
+            if (is_target) return try materializeRawValueOwned(allocator, source, raw);
             i = raw.next_start;
             continue;
         }
@@ -380,15 +429,18 @@ fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8, all
     return null;
 }
 
-fn materializeRawValueOwned(allocator: std.mem.Allocator, source: []const u8, raw: RawValue) []const u8 {
+fn materializeRawValueOwned(allocator: std.mem.Allocator, source: []const u8, raw: RawValue) ![]const u8 {
     if (raw.kind == .empty) return "";
 
     const slice = source[raw.start..raw.end];
-    if (std.mem.indexOfScalar(u8, slice, '&') == null) return slice;
+    const first = entities.firstDecodableEntity(slice, 0) orelse return slice;
 
-    const copied = allocator.dupe(u8, slice) catch return slice;
-    const new_len = entities.decodeInPlace(copied);
-    return copied[0..new_len];
+    const copied = try allocator.dupe(u8, slice);
+    errdefer allocator.free(copied);
+
+    const new_len = entities.decodeInPlaceFrom(copied, first);
+    if (new_len == copied.len) return copied;
+    return try allocator.realloc(copied, new_len);
 }
 
 fn materializeRawValue(source: []u8, span_end: usize, eq_index: usize, raw: RawValue) []const u8 {

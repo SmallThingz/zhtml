@@ -67,7 +67,7 @@ pub fn matchesAttrSelectorDebug(
     sel: ast.AttrSelector,
 ) bool {
     const name = sel.name.slice(selector_source);
-    const raw = attr.getAttrValue(doc, node, name, allocator) orelse return false;
+    const raw = (attr.getAttrValue(doc, node, name, allocator) catch null) orelse return false;
     const value = sel.value.slice(selector_source);
     return evalAttrOp(raw, value, sel.op);
 }
@@ -124,11 +124,11 @@ pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
         }
 
         fn getAttrValue(self: @This(), name: []const u8) ?[]const u8 {
-            return attr.getAttrValue(self.doc, self.node, name, self.allocator);
+            return attr.getAttrValue(self.doc, self.node, name, self.allocator) catch null;
         }
 
         fn classMatches(self: @This(), class_name: []const u8) bool {
-            const class_attr = attr.getAttrValue(self.doc, self.node, "class", self.allocator) orelse return false;
+            const class_attr = (attr.getAttrValue(self.doc, self.node, "class", self.allocator) catch null) orelse return false;
             return tables.tokenIncludesAsciiWhitespace(class_attr, class_name);
         }
 
@@ -523,7 +523,7 @@ fn attrValueByName(doc: anytype, node: anytype, allocator: std.mem.Allocator, no
     }
 
     if (!probe.overflow and probe.count < MaxProbeEntries) {
-        const value = attr.getAttrValue(doc, node, name, allocator);
+        const value = attr.getAttrValue(doc, node, name, allocator) catch null;
         const idx = probe.count;
         probe.entries[idx] = .{
             .name = name,
@@ -536,7 +536,7 @@ fn attrValueByName(doc: anytype, node: anytype, allocator: std.mem.Allocator, no
     probe.overflow = true;
     // Fallback for very large compounds still stays allocation-free; we simply
     // bypass memoization once the fixed probe budget is exhausted.
-    return attr.getAttrValue(doc, node, name, allocator);
+    return attr.getAttrValue(doc, node, name, allocator) catch null;
 }
 
 const AttrProbeEntry = struct {

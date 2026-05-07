@@ -103,16 +103,16 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
         .strictest => |*fixture| {
             var it = try fixture.doc.queryAllRuntime(runtime_arena.allocator(), selector);
             while (it.next()) |node| {
-                if (node.getAttributeValue("id")) |id| {
-                    try out_ids.append(alloc, id);
+                if ((try node.getAttributeValue(alloc, "id"))) |id| {
+                    try out_ids.append(alloc, id.value);
                 }
             }
         },
         .fastest => |*fixture| {
             var it = try fixture.doc.queryAllRuntime(runtime_arena.allocator(), selector);
             while (it.next()) |node| {
-                if (node.getAttributeValue("id")) |id| {
-                    try out_ids.append(alloc, id);
+                if ((try node.getAttributeValue(alloc, "id"))) |id| {
+                    try out_ids.append(alloc, id.value);
                 }
             }
         },

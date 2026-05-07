@@ -29,7 +29,7 @@ test "parent navigation uses in-node parent indexes" {
 
     const child = doc.queryOne("span#child") orelse return error.TestUnexpectedResult;
     const parent = child.parentNode() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("root", parent.getAttributeValue("id").?);
+    try std.testing.expectEqualStrings("root", (try parent.getAttributeValue(std.testing.allocator, "id")).?.value);
     try std.testing.expectEqual(@as(u32, 1), child.raw().parent);
 
     const root = doc.queryOne("div#root") orelse return error.TestUnexpectedResult;
@@ -75,8 +75,8 @@ test "queryAll yields matches in document preorder" {
     var idx: usize = 0;
     while (it.next()) |node| {
         if (idx >= expected.len) return error.TestUnexpectedResult;
-        const id = node.getAttributeValue("id") orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings(expected[idx], id);
+        const id = (try node.getAttributeValue(std.testing.allocator, "id")) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(expected[idx], id.value);
         idx += 1;
     }
     try std.testing.expectEqual(expected.len, idx);
@@ -89,16 +89,16 @@ test "element navigation skips text nodes for sibling/child helpers" {
 
     const root = doc.queryOne("div#r") orelse return error.TestUnexpectedResult;
     const first = root.firstChild() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("s1", first.getAttributeValue("id").?);
+    try std.testing.expectEqualStrings("s1", (try first.getAttributeValue(std.testing.allocator, "id")).?.value);
 
     const next = first.nextSibling() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("b1", next.getAttributeValue("id").?);
+    try std.testing.expectEqualStrings("b1", (try next.getAttributeValue(std.testing.allocator, "id")).?.value);
 
     const last = root.lastChild() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("i1", last.getAttributeValue("id").?);
+    try std.testing.expectEqualStrings("i1", (try last.getAttributeValue(std.testing.allocator, "id")).?.value);
 
     const prev = last.prevSibling() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("b1", prev.getAttributeValue("id").?);
+    try std.testing.expectEqualStrings("b1", (try prev.getAttributeValue(std.testing.allocator, "id")).?.value);
 }
 
 test "parser remains permissive on malformed nesting" {

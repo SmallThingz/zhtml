@@ -8,7 +8,7 @@ pub fn run() !void {
     defer doc.deinit();
 
     const a = doc.queryOne("div#app > a.nav") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("/docs", a.getAttributeValue("href").?);
+    try std.testing.expectEqualStrings("/docs", (try a.getAttributeValue(std.testing.allocator, "href")).?.value);
 }
 
 test "basic parse + query" {

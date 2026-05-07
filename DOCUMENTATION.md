@@ -35,7 +35,9 @@ test "basic parse + query" {
     defer doc.deinit();
 
     const a = doc.queryOne("div#app > a.nav") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("/docs", a.getAttributeValue("href").?);
+    const href = (try a.getAttributeValue(std.testing.allocator, "href")) orelse return error.TestUnexpectedResult;
+    defer href.free(&doc, std.testing.allocator);
+    try std.testing.expectEqualStrings("/docs", href.value);
 }
 ```
 
@@ -91,7 +93,10 @@ All examples are verified by running `zig build examples-check`
   - `TextResult.free(doc, gpa)`
   - `innerTextOwnedWithOptions(gpa, TextOptions)` always allocates
 - Attributes:
-  - `getAttributeValue(name)`
+  - `getAttributeValue(gpa, name)` returns `!?AttributeValueResult`
+  - `AttributeValueResult.value`
+  - `AttributeValueResult.free(doc, gpa)`
+  - `getAttributeValueRaw(name)` returns the current raw value bytes; destructive documents may expose bytes mutated by prior decoded lookups
 - Scoped queries:
   - same query family as `Document` (`queryOne/queryAll`, runtime, cached, debug)
 
@@ -229,55 +234,55 @@ Warning: throughput numbers are not conformance claims. This parser is permissiv
 
 <!-- BENCHMARK_SNAPSHOT:START -->
 
-Source: `bench/results/latest.json` (`stable` profile).
+Source: `bench/results/latest.json` (`quick` profile).
 
 #### Parse Throughput Comparison (MB/s)
 
 | Fixture | ours | lol-html | lexbor |
 |---|---:|---:|---:|
-| `rust-lang.html` | 2246.29 | 1581.04 | 339.27 |
-| `wiki-html.html` | 1745.18 | 1263.73 | 266.79 |
-| `mdn-html.html` | 2833.82 | 1914.87 | 406.12 |
-| `w3-html52.html` | 1073.35 | 737.84 | 195.10 |
-| `hn.html` | 1653.40 | 904.20 | 222.43 |
-| `python-org.html` | 1939.68 | 1389.21 | 282.73 |
-| `kernel-org.html` | 1880.28 | 1372.10 | 288.99 |
-| `gnu-org.html` | 2553.60 | 1549.79 | 317.92 |
-| `ziglang-org.html` | 1938.67 | 1305.90 | 286.53 |
-| `ziglang-doc-master.html` | 1393.91 | 1050.26 | 223.05 |
-| `wikipedia-unicode-list.html` | 1654.57 | 1043.12 | 215.44 |
-| `whatwg-html-spec.html` | 1242.17 | 892.58 | 208.14 |
-| `synthetic-forms.html` | 1225.43 | 728.46 | 179.42 |
-| `synthetic-table-grid.html` | 1136.86 | 691.53 | 165.13 |
-| `synthetic-list-nested.html` | 1195.71 | 629.53 | 149.71 |
-| `synthetic-comments-doctype.html` | 1968.74 | 932.06 | 208.43 |
-| `synthetic-template-rich.html` | 924.20 | 458.74 | 139.28 |
-| `synthetic-whitespace-noise.html` | 1448.29 | 1007.30 | 174.20 |
-| `synthetic-news-feed.html` | 1169.04 | 627.57 | 142.73 |
-| `synthetic-ecommerce.html` | 1119.08 | 649.62 | 160.65 |
-| `synthetic-forum-thread.html` | 1199.07 | 633.25 | 156.89 |
+| `rust-lang.html` | 991.26 | 1541.03 | 304.98 |
+| `wiki-html.html` | 2000.33 | 1238.69 | 256.93 |
+| `mdn-html.html` | 2772.21 | 1800.43 | 359.56 |
+| `w3-html52.html` | 1044.14 | 730.04 | 190.70 |
+| `hn.html` | 1641.05 | 925.72 | 209.50 |
+| `python-org.html` | 1921.74 | 1224.54 | 245.77 |
+| `kernel-org.html` | 1785.39 | 1203.94 | 276.48 |
+| `gnu-org.html` | 2449.46 | 1376.59 | 279.20 |
+| `ziglang-org.html` | 1971.35 | 1168.66 | 250.83 |
+| `ziglang-doc-master.html` | 1419.24 | 1078.60 | 219.88 |
+| `wikipedia-unicode-list.html` | 1822.88 | 1138.08 | 220.27 |
+| `whatwg-html-spec.html` | 1375.97 | 940.61 | 215.42 |
+| `synthetic-forms.html` | 1357.72 | 770.19 | 186.13 |
+| `synthetic-table-grid.html` | 1242.97 | 762.03 | 167.85 |
+| `synthetic-list-nested.html` | 1256.48 | 634.10 | 153.19 |
+| `synthetic-comments-doctype.html` | 2185.89 | 970.71 | 198.46 |
+| `synthetic-template-rich.html` | 852.73 | 463.92 | 128.64 |
+| `synthetic-whitespace-noise.html` | 1517.18 | 1041.76 | 157.88 |
+| `synthetic-news-feed.html` | 1006.55 | 610.15 | 137.40 |
+| `synthetic-ecommerce.html` | 1112.62 | 695.77 | 156.36 |
+| `synthetic-forum-thread.html` | 1190.93 | 668.20 | 156.28 |
 
 #### Query Match Throughput (ours)
 
 | Case | ours ops/s | ours ns/op |
 |---|---:|---:|
-| `attr-heavy-button` | 166633.45 | 6001.20 |
-| `attr-heavy-nav` | 106743.60 | 9368.24 |
+| `attr-heavy-button` | 155965.11 | 6411.69 |
+| `attr-heavy-nav` | 101095.17 | 9891.67 |
 
 #### Cached Query Throughput (ours)
 
 | Case | ours ops/s | ours ns/op |
 |---|---:|---:|
-| `attr-heavy-button` | 181818.52 | 5499.99 |
-| `attr-heavy-nav` | 96677.40 | 10343.68 |
+| `attr-heavy-button` | 180108.48 | 5552.21 |
+| `attr-heavy-nav` | 122960.12 | 8132.72 |
 
 #### Query Parse Throughput (ours)
 
 | Selector case | Ops/s | ns/op |
 |---|---:|---:|
-| `simple` | 10692475.74 | 93.52 |
-| `complex` | 5677135.27 | 176.15 |
-| `grouped` | 7398977.64 | 135.15 |
+| `simple` | 10578401.61 | 94.53 |
+| `complex` | 5621120.46 | 177.90 |
+| `grouped` | 7264407.54 | 137.66 |
 
 For full per-parser, per-fixture tables and gate output:
 - `bench/results/latest.md`
