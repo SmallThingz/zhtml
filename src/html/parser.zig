@@ -793,7 +793,7 @@ fn exerciseRuntimeApis(doc: anytype, alloc: std.mem.Allocator) !void {
     var visited: usize = 0;
     var idx: usize = 0;
     while (idx < doc.nodes.len and visited < 16) : (idx += 1) {
-        const node = doc.nodeAt(@intCast(idx)) orelse continue;
+        const node = doc.nodeAt(@intCast(idx));
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
         if (doc.nodes[idx].isElement(@intCast(idx))) {
@@ -918,7 +918,7 @@ test "tag-name state keeps < inside malformed start tag name" {
     var src = "<div<div>".*;
     try resetParsed(DefaultTestOptions, &doc, &src);
 
-    const first = doc.nodeAt(1) orelse return error.TestUnexpectedResult;
+    const first = doc.nodeAt(1);
     try std.testing.expectEqualStrings("div<div", first.tagName());
 }
 
@@ -982,10 +982,10 @@ test "u64 parse accepts sparse 8 GiB plaintext input" {
     try resetParsed(NonDestructiveTestOptions, &doc, mapped.memory);
 
     try std.testing.expectEqual(@as(usize, 3), doc.nodes.len);
-    const plaintext = doc.nodeAt(1) orelse return error.TestUnexpectedResult;
+    const plaintext = doc.nodeAt(1);
     try std.testing.expectEqualStrings("plaintext", plaintext.tagName());
 
-    const text = doc.nodeAt(2) orelse return error.TestUnexpectedResult;
+    const text = doc.nodeAt(2);
     try std.testing.expectEqual(@as(IndexInt, @intCast(tag.len)), text.raw().name_or_text.start);
     try std.testing.expectEqual(@as(IndexInt, @intCast(len)), text.raw().name_or_text.end);
 }
@@ -1254,7 +1254,7 @@ test "fastest mode drops indentation-only runs between child elements" {
 
     try std.testing.expectEqual(@as(usize, 4), doc.nodes.len);
 
-    const div = doc.nodeAt(1) orelse return error.TestUnexpectedResult;
+    const div = doc.nodeAt(1);
     var div_children = div.children();
     const a = div_children.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a", doc.nodes[a.index].name_or_text.slice(doc.source));

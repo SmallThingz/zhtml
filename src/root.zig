@@ -178,7 +178,7 @@ test "writeHtml parses and prints complex document" {
     // +3 = title
     //   +4 = `Title` [text node]
     // +5 = `\n` [text node]
-    try std.testing.expectEqualStrings("utf-8", (try doc.nodeAt(html.index + 6).?.getAttributeValue(alloc, "charset")).?.value);
+    try std.testing.expectEqualStrings("utf-8", (try doc.nodeAt(html.index + 6).getAttributeValue(alloc, "charset")).?.value);
     const rendered = try std.fmt.allocPrint(alloc, "{f}", .{html});
     defer alloc.free(rendered);
 

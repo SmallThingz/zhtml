@@ -174,9 +174,8 @@ pub fn prevElementSibling(doc: anytype, node_index: IndexInt) ?IndexInt {
 
 /// Next element sibling index for `node_index`.
 pub fn nextElementSibling(doc: anytype, node_index: IndexInt) ?IndexInt {
-    const next = doc.nextElementSiblingIndex(node_index);
-    if (next == InvalidIndex) return null;
-    return next;
+    const next = doc.nodes[node_index].next_sibling;
+    return if (next == InvalidIndex) null else next;
 }
 
 /// Scope-anchor predicate shared by selector matcher and debug matcher.

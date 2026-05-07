@@ -22,7 +22,7 @@ pub fn run() !void {
     const owned = try node.innerTextOwnedWithOptions(gpa, .{});
     defer gpa.free(owned);
     try std.testing.expectEqualStrings("Hello world& team", owned);
-    try std.testing.expect(!doc.isOwned(owned));
+    try std.testing.expect(!doc.isOwnedSlice(owned));
 }
 
 test "innerText whitespace options" {

@@ -200,7 +200,7 @@ fn GetNode(comptime options: ParseOptions) type {
 
             /// Returns true when `value` points inside `doc` source.
             pub fn isBorrowed(self: @This(), doc: *const DocType) bool {
-                return sliceInBounds(doc.source, self.value);
+                return doc.isOwnedSlice(self.value);
             }
 
             /// Frees `value` only when it is not borrowed from `doc` source.
@@ -218,7 +218,7 @@ fn GetNode(comptime options: ParseOptions) type {
 
             /// Returns true when `value` points inside `doc` source.
             pub fn isBorrowed(self: @This(), doc: *const DocType) bool {
-                return sliceInBounds(doc.source, self.value);
+                return doc.isOwnedSlice(self.value);
             }
 
             /// Frees `value` only when it is not borrowed from `doc` source.
@@ -328,13 +328,15 @@ fn GetNode(comptime options: ParseOptions) type {
 
         /// Returns next element sibling.
         pub fn nextSibling(self: @This()) ?@This() {
-            const idx = self.doc.nextElementSiblingIndex(self.index);
-            if (idx == InvalidIndex) return null;
-            return self.doc.nodeAt(idx);
+            self.assertElement();
+            const next = self.doc.nodes[self.index].next_sibling;
+            if (next == InvalidIndex) return null;
+            return self.doc.nodeAt(next);
         }
 
         /// Returns previous element sibling.
         pub fn prevSibling(self: @This()) ?@This() {
+            self.assertElement();
             const node_raw = &self.doc.nodes[self.index];
             if (node_raw.prev_sibling == InvalidIndex) return null;
             return self.doc.nodeAt(node_raw.prev_sibling);
@@ -342,6 +344,7 @@ fn GetNode(comptime options: ParseOptions) type {
 
         /// Returns parent element node.
         pub fn parentNode(self: @This()) ?@This() {
+            self.assertValidNode();
             const parent = self.doc.parentIndex(self.index);
             if (parent == InvalidIndex or parent == 0) return null;
             return self.doc.nodeAt(parent);
@@ -612,7 +615,6 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Returns lazy descendant iterator for already compiled selector.
         pub fn queryRuntime(self: @This(), sel: ast.Selector) QueryIterType {
             self.assertContainer();
-            self.doc.ensureQueryPrereqs(sel);
             return self.doc.queryIter(sel, self.index);
         }
     };
@@ -632,22 +634,29 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         scope_root: IndexInt = InvalidIndex,
         /// Next node index to test.
         next_index: IndexInt = 1,
+        /// Exclusive traversal bound for `next_index`.
+        end_index: IndexInt = 1,
 
         /// Returns next matching node or `null` when exhausted.
-        pub fn next(noalias self: *@This()) ?NodeTypeWrapper {
-            while (self.next_index < self.doc.nodes.len) : (self.next_index += 1) {
+        pub inline fn next(noalias self: *@This()) ?NodeTypeWrapper {
+            if (self.end_index > self.doc.nodes.len) {
+                @branchHint(.cold);
+                self.next_index = self.end_index;
+                return null;
+            }
+
+            const nodes = self.doc.nodes;
+            while (self.next_index < self.end_index) : (self.next_index += 1) {
                 const idx = self.next_index;
 
-                if (self.scope_root != InvalidIndex) {
-                    const root = &self.doc.nodes[self.scope_root];
-                    if (idx <= self.scope_root or idx > root.subtree_end) continue;
-                }
-
-                if (!self.doc.nodes[idx].isElement(idx)) continue;
+                if (!nodes[idx].isElement(idx)) continue;
 
                 if (matcher.matchesSelectorAt(DocType, self.doc, self.selector, idx, self.scope_root)) {
                     self.next_index += 1;
-                    return self.doc.nodeAt(idx);
+                    return .{
+                        .doc = self.doc,
+                        .index = idx,
+                    };
                 }
             }
             return null;
@@ -663,15 +672,24 @@ fn GetQueryIter(comptime options: ParseOptions) type {
 
         /// Allocates and returns all remaining matches.
         pub fn collect(self: @This(), allocator: std.mem.Allocator) ![]NodeTypeWrapper {
-            var count_it = self;
-            var count: usize = 0;
-            while (count_it.next() != null) count += 1;
+            const upper_bound: usize = if (self.next_index < self.end_index and self.end_index <= self.doc.nodes.len)
+                @intCast(self.end_index - self.next_index)
+            else
+                0;
+            const out = try allocator.alloc(NodeTypeWrapper, upper_bound);
 
-            const out = try allocator.alloc(NodeTypeWrapper, count);
             var fill_it = self;
             var out_idx: usize = 0;
             while (fill_it.next()) |node| : (out_idx += 1) out[out_idx] = node;
-            return out;
+            if (out_idx == out.len) return out;
+            if (out_idx == 0) {
+                allocator.free(out);
+                return try allocator.alloc(NodeTypeWrapper, 0);
+            }
+            return allocator.realloc(out, out_idx) catch |err| {
+                allocator.free(out);
+                return err;
+            };
         }
     };
 }
@@ -699,11 +717,10 @@ fn GetChildrenIter(comptime options: ParseOptions) type {
         next_idx: IndexInt = InvalidIndex,
 
         /// Returns next wrapped child node or `null` when exhausted.
-        pub fn next(noalias self: *@This()) ?NodeTypeWrapper {
+        pub inline fn next(noalias self: *@This()) ?NodeTypeWrapper {
             if (self.next_idx == InvalidIndex) return null;
-            const idx = self.next_idx;
-            self.next_idx = self.doc.nextElementSiblingIndex(idx);
-            return self.doc.nodeAt(idx);
+            defer self.next_idx = self.doc.nodes[self.next_idx].next_sibling;
+            return self.doc.nodeAt(self.next_idx);
         }
 
         /// Returns last remaining wrapped child node without consuming it.
@@ -711,7 +728,9 @@ fn GetChildrenIter(comptime options: ParseOptions) type {
             if (self.next_idx == InvalidIndex) return null;
             const parent_idx = self.doc.nodes[self.next_idx].parent;
             if (parent_idx == InvalidIndex) return null;
-            return self.doc.nodeAt(self.doc.nodes[parent_idx].last_child);
+            const last_child = self.doc.nodes[parent_idx].last_child;
+            if (last_child == InvalidIndex) return null;
+            return self.doc.nodeAt(last_child);
         }
 
         /// Allocates and returns all remaining wrapped child nodes.
@@ -726,7 +745,10 @@ fn GetChildrenIter(comptime options: ParseOptions) type {
             idx = self.next_idx;
             var out_idx: usize = 0;
             while (idx != InvalidIndex) : (idx = self.doc.nextElementSiblingIndex(idx)) {
-                out[out_idx] = self.doc.nodeAt(idx).?;
+                out[out_idx] = .{
+                    .doc = @constCast(self.doc),
+                    .index = idx,
+                };
                 out_idx += 1;
             }
             self.next_idx = InvalidIndex;
@@ -764,21 +786,17 @@ fn GetDocument(comptime options: ParseOptions) type {
             };
         }
 
-        fn freeNodes(noalias self: *@This()) void {
+        /// Releases all document-owned memory.
+        pub fn deinit(noalias self: *@This()) void {
             if (self.nodes.len == 0) return;
             self.allocator.free(self.nodes);
             self.nodes = &[_]RawNode{};
         }
 
-        /// Releases all document-owned memory.
-        pub fn deinit(noalias self: *@This()) void {
-            self.freeNodes();
-        }
-
         /// Clears parsed state and releases parsed node storage.
         pub fn clear(noalias self: *@This()) void {
             self.source = emptySource();
-            self.freeNodes();
+            self.deinit(); // this just clears the nodes
         }
 
         fn emptySource() options.Input() {
@@ -796,17 +814,28 @@ fn GetDocument(comptime options: ParseOptions) type {
 
         /// Returns lazy iterator over matches for already compiled selector.
         pub fn queryRuntime(self: *const @This(), sel: ast.Selector) QueryIterType {
-            self.ensureQueryPrereqs(sel);
             return self.queryIter(sel, InvalidIndex);
         }
 
-        fn firstMatchFrom(self: *const @This(), sel: ast.Selector, scope_root: IndexInt) ?NodeTypeWrapper {
-            self.ensureQueryPrereqs(sel);
-            return if (matcher.firstMatchIndex(@This(), self, sel, scope_root)) |idx| self.nodeAt(idx) else null;
+        fn queryIter(self: *const @This(), sel: ast.Selector, scope_root: IndexInt) QueryIterType {
+            var start: IndexInt = 1;
+            var end: IndexInt = 1;
+            if (scope_root == InvalidIndex) {
+                end = @intCast(self.nodes.len);
+            } else if (scope_root < self.nodes.len) {
+                start = scope_root + 1;
+                end = self.nodes[scope_root].subtree_end + 1;
+            }
+            return .{
+                .doc = @constCast(self),
+                .selector = sel,
+                .scope_root = scope_root,
+                .next_index = start,
+                .end_index = end,
+            };
         }
 
         fn debugFirstMatchFrom(self: *const @This(), sel: ast.Selector, scope_root: IndexInt) DebugQueryResultType {
-            self.ensureQueryPrereqs(sel);
             var report: selector_debug.QueryDebugReport = .{};
             var scratch = std.heap.ArenaAllocator.init(self.allocator);
             defer scratch.deinit();
@@ -816,19 +845,6 @@ fn GetDocument(comptime options: ParseOptions) type {
             return .{
                 .node = self.nodeAt(idx),
                 .report = report,
-            };
-        }
-
-        fn ensureQueryPrereqs(self: *const @This(), selector: ast.Selector) void {
-            _ = .{ self, selector };
-        }
-
-        fn queryIter(self: *const @This(), sel: ast.Selector, scope_root: IndexInt) QueryIterType {
-            return .{
-                .doc = @constCast(self),
-                .selector = sel,
-                .scope_root = scope_root,
-                .next_index = if (scope_root == InvalidIndex) 1 else scope_root + 1,
             };
         }
 
@@ -844,8 +860,13 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Returns whether `bytes` points inside the document's source buffer.
-        pub fn isOwned(self: *const @This(), bytes: []const u8) bool {
-            return sliceInBounds(self.source, bytes);
+        pub fn isOwnedSlice(self: *const @This(), bytes: []const u8) bool {
+            if (self.source.len == 0 or bytes.len == 0) return false;
+            const source_start = @intFromPtr(self.source.ptr);
+            const source_end = source_start + self.source.len;
+            const bytes_start = @intFromPtr(bytes.ptr);
+            const bytes_end = bytes_start + bytes.len;
+            return bytes_start >= source_start and bytes_end <= source_end;
         }
 
         /// Returns first `<head>` element in the document.
@@ -869,9 +890,10 @@ fn GetDocument(comptime options: ParseOptions) type {
             return null;
         }
 
-        /// Wraps raw node index as public `Node` wrapper when valid.
-        pub inline fn nodeAt(self: *const @This(), idx: IndexInt) ?NodeTypeWrapper {
-            if (idx == InvalidIndex or idx >= self.nodes.len) return null;
+        /// Wraps a raw node index as a public `Node` wrapper.
+        pub inline fn nodeAt(self: *const @This(), idx: IndexInt) NodeTypeWrapper {
+            std.debug.assert(idx != InvalidIndex);
+            std.debug.assert(idx < self.nodes.len);
             return .{
                 .doc = @constCast(self),
                 .index = idx,
@@ -884,7 +906,7 @@ fn GetDocument(comptime options: ParseOptions) type {
                 try writer.writeAll(self.source);
                 return;
             }
-            return self.nodeAt(0).?.writeHtml(writer);
+            return self.nodeAt(0).writeHtml(writer);
         }
 
         /// Writes HTML serialization of this document root only, excluding its children.
@@ -897,15 +919,13 @@ fn GetDocument(comptime options: ParseOptions) type {
             return self.writeHtml(writer);
         }
 
-        /// Returns first direct element-like child index for `parent_idx`, if any.
-        pub fn firstElementChildIndex(self: *const @This(), parent_idx: IndexInt) IndexInt {
+        fn firstElementChildIndex(self: *const @This(), parent_idx: IndexInt) IndexInt {
             if (parent_idx >= self.nodes.len) return InvalidIndex;
             return self.nodes[parent_idx].first_child;
         }
 
-        /// Returns next direct element-like sibling index for `node_idx`, if any.
-        pub fn nextElementSiblingIndex(self: *const @This(), node_idx: IndexInt) IndexInt {
-            if (node_idx >= self.nodes.len) return InvalidIndex;
+        fn nextElementSiblingIndex(self: *const @This(), node_idx: IndexInt) IndexInt {
+            std.debug.assert(node_idx < self.nodes.len);
             return self.nodes[node_idx].next_sibling;
         }
 
@@ -921,16 +941,6 @@ fn GetDocument(comptime options: ParseOptions) type {
 
 /// Re-exported text extraction options used by node text APIs.
 pub const TextOptions = GetNode(.{}).TextOptions;
-const NodeRaw = RawNode;
-
-fn sliceInBounds(source: []const u8, bytes: []const u8) bool {
-    if (source.len == 0 or bytes.len == 0) return false;
-    const source_start = @intFromPtr(source.ptr);
-    const source_end = source_start + source.len;
-    const bytes_start = @intFromPtr(bytes.ptr);
-    const bytes_end = bytes_start + bytes.len;
-    return bytes_start >= source_start and bytes_end <= source_end;
-}
 
 fn resetParsed(comptime options: ParseOptions, doc: *options.Document(), input: options.Input()) !void {
     doc.deinit();
@@ -938,7 +948,7 @@ fn resetParsed(comptime options: ParseOptions, doc: *options.Document(), input: 
 }
 
 fn assertNodeTypeLayouts() void {
-    _ = @sizeOf(NodeRaw);
+    _ = @sizeOf(RawNode);
     _ = @sizeOf(GetNode(.{}));
 }
 
@@ -947,7 +957,7 @@ test "document type excludes parser-only and shadow-source state" {
     try std.testing.expect(!@hasField(GetDocument(.{}), "original_source"));
     try std.testing.expect(!@hasField(GetDocument(.{}), "owned_shadow_source"));
     try std.testing.expect(!@hasField(GetDocument(.{}), "mutable_source"));
-    try std.testing.expect(!@hasField(NodeRaw, "kind"));
+    try std.testing.expect(!@hasField(RawNode, "kind"));
     try std.testing.expect(!@hasDecl(ParseOptions, "GetOpenElem"));
 }
 
@@ -1568,7 +1578,7 @@ test "innerTextOwned always returns allocated output and does not mutate source 
     const owned = try node.innerTextOwnedWithOptions(alloc, .{});
     defer alloc.free(owned);
     try std.testing.expectEqualStrings("a & b", owned);
-    try std.testing.expect(!doc.isOwned(owned));
+    try std.testing.expect(!doc.isOwnedSlice(owned));
 
     const text_node_after = doc.nodes[node.index + 1];
     try std.testing.expectEqualStrings("a &amp; b", text_node_after.name_or_text.slice(doc.source));
@@ -2067,7 +2077,7 @@ test "clear resets parsed state and ownership tracking" {
     doc.clear();
     try std.testing.expectEqual(@as(usize, 0), doc.nodes.len);
     try std.testing.expectEqual(@as(usize, 0), doc.source.len);
-    try std.testing.expect(!doc.isOwned(text_before_clear.value));
+    try std.testing.expect(!doc.isOwnedSlice(text_before_clear.value));
     try std.testing.expect(firstQuery(doc.query("main")) == null);
 }
 
