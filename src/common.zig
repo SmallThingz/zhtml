@@ -161,7 +161,7 @@ pub const QueryDebugReport = struct {
 
 /// Parent element index for `node_index`, excluding root-document index 0.
 pub fn parentElement(doc: anytype, node_index: IndexInt) ?IndexInt {
-    const p = doc.parentIndex(node_index);
+    const p = doc.nodeAt(node_index).raw().parent;
     if (p == InvalidIndex or p == 0) return null;
     return p;
 }
@@ -185,15 +185,15 @@ pub fn matchesScopeAnchor(doc: anytype, combinator: anytype, node_index: IndexIn
     const anchor: IndexInt = if (scope_root == InvalidIndex) 0 else scope_root;
     switch (combinator) {
         .child => {
-            const p = doc.parentIndex(node_index);
+            const p = doc.nodeAt(node_index).raw().parent;
             return p != InvalidIndex and p == anchor;
         },
         .descendant => {
-            var p = doc.parentIndex(node_index);
+            var p = doc.nodeAt(node_index).raw().parent;
             while (p != InvalidIndex) {
                 if (p == anchor) return true;
                 if (p == 0) break;
-                p = doc.parentIndex(p);
+                p = doc.nodeAt(p).raw().parent;
             }
             return false;
         },

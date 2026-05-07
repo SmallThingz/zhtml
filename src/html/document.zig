@@ -431,7 +431,7 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Returns next element sibling.
         pub fn nextSibling(self: @This()) ?@This() {
             self.assertElement();
-            const next = self.doc.nodeAt(self.index).raw().next_sibling;
+            const next = self.raw().next_sibling;
             if (next == InvalidIndex) return null;
             return .{ .doc = self.doc, .index = next };
         }
@@ -447,7 +447,7 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Returns parent element node.
         pub fn parentNode(self: @This()) ?@This() {
             self.assertValidNode();
-            const parent = self.doc.parentIndex(self.index);
+            const parent = self.raw().parent;
             if (parent == InvalidIndex or parent == 0) return null;
             return .{ .doc = self.doc, .index = parent };
         }
@@ -455,7 +455,10 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Returns direct-child node iterator.
         pub fn children(self: @This()) ChildrenIterType {
             self.assertContainer();
-            return self.doc.childrenIter(self.index);
+            return .{
+                .doc = self.doc,
+                .next_idx = self.raw().first_child,
+            };
         }
 
         const InnerTextProbe = union(enum) {
@@ -811,14 +814,14 @@ fn GetChildrenIter(comptime options: ParseOptions) type {
         pub fn collect(noalias self: *@This(), allocator: std.mem.Allocator) ![]NodeTypeWrapper {
             var count: usize = 0;
             var idx = self.next_idx;
-            while (idx != InvalidIndex) : (idx = self.doc.nextElementSiblingIndex(idx)) {
+            while (idx != InvalidIndex) : (idx = self.doc.nodeAt(idx).raw().next_sibling) {
                 count += 1;
             }
 
             const out = try allocator.alloc(NodeTypeWrapper, count);
             idx = self.next_idx;
             var out_idx: usize = 0;
-            while (idx != InvalidIndex) : (idx = self.doc.nextElementSiblingIndex(idx)) {
+            while (idx != InvalidIndex) : (idx = self.doc.nodeAt(idx).raw().next_sibling) {
                 out[out_idx] = .{
                     .doc = self.doc,
                     .index = idx,
@@ -882,14 +885,28 @@ fn GetDocument(comptime options: ParseOptions) type {
             return @constCast(@as([]const u8, &[_]u8{}));
         }
 
+        /// Returns whether `bytes` points inside the document's source buffer.
+        pub fn isOwnedSlice(self: *const @This(), bytes: []const u8) bool {
+            if (self.source.len == 0 or bytes.len == 0) return false;
+            const source_start = @intFromPtr(self.source.ptr);
+            const source_end = source_start + self.source.len;
+            const bytes_start = @intFromPtr(bytes.ptr);
+            const bytes_end = bytes_start + bytes.len;
+            return bytes_start >= source_start and bytes_end <= source_end;
+        }
+
+        pub fn root(self: *const @This()) NodeTypeWrapper {
+            return self.nodeAt(0);
+        }
+
         /// Compiles selector at comptime and returns lazy iterator over matches.
         pub fn query(self: *const @This(), comptime selector: []const u8) QueryIterType {
-            return self.nodeAt(0).query(selector);
+            return self.root().query(selector);
         }
 
         /// Returns lazy iterator over matches for already compiled selector.
         pub fn queryRuntime(self: *const @This(), sel: ast.Selector) QueryIterType {
-            return self.nodeAt(0).queryIter(sel);
+            return self.root().queryIter(sel);
         }
 
         /// Runs debug selector matching from a document or node scope.
@@ -906,25 +923,9 @@ fn GetDocument(comptime options: ParseOptions) type {
             };
         }
 
-        /// Returns parent index for `idx`.
-        pub fn parentIndex(self: *const @This(), idx: IndexInt) IndexInt {
-            if (idx >= self.nodes.len) return InvalidIndex;
-            return self.nodes[idx].parent;
-        }
-
         /// Returns first `<html>` element in the document.
         pub fn html(self: *const @This()) ?NodeTypeWrapper {
             return self.findFirstTag("html");
-        }
-
-        /// Returns whether `bytes` points inside the document's source buffer.
-        pub fn isOwnedSlice(self: *const @This(), bytes: []const u8) bool {
-            if (self.source.len == 0 or bytes.len == 0) return false;
-            const source_start = @intFromPtr(self.source.ptr);
-            const source_end = source_start + self.source.len;
-            const bytes_start = @intFromPtr(bytes.ptr);
-            const bytes_end = bytes_start + bytes.len;
-            return bytes_start >= source_start and bytes_end <= source_end;
         }
 
         /// Returns first `<head>` element in the document.
@@ -964,37 +965,12 @@ fn GetDocument(comptime options: ParseOptions) type {
                 try writer.writeAll(self.source);
                 return;
             }
-            return (NodeTypeWrapper{ .doc = self, .index = 0 }).writeHtml(writer);
-        }
-
-        /// Writes HTML serialization of this document root only, excluding its children.
-        pub fn writeSelfHtml(self: *const @This(), writer: anytype) NodeTypeWrapper.WriterError(@TypeOf(writer))!void {
-            return self.writeHtml(writer);
+            return self.root().writeHtml(writer);
         }
 
         /// Default formatter uses HTML serialization for this node.
         pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
             return self.writeHtml(writer);
-        }
-
-        /// Returns the first direct element child index for `parent_idx`.
-        fn firstElementChildIndex(self: *const @This(), parent_idx: IndexInt) IndexInt {
-            if (parent_idx >= self.nodes.len) return InvalidIndex;
-            return self.nodes[parent_idx].first_child;
-        }
-
-        /// Returns the next direct element sibling index for `node_idx`.
-        fn nextElementSiblingIndex(self: *const @This(), node_idx: IndexInt) IndexInt {
-            std.debug.assert(node_idx < self.nodes.len);
-            return self.nodes[node_idx].next_sibling;
-        }
-
-        /// Returns direct-child node iterator for `parent_idx`.
-        pub fn childrenIter(self: *const @This(), parent_idx: IndexInt) ChildrenIterType {
-            return .{
-                .doc = self,
-                .next_idx = self.firstElementChildIndex(parent_idx),
-            };
         }
     };
 }
