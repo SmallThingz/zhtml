@@ -1,5 +1,6 @@
 const std = @import("std");
 const IndexInt = @import("../common.zig").IndexInt;
+const tables = @import("tables.zig");
 const InvalidDigit = 0xff;
 const ReplacementUtf8 = [3]u8{ 0xEF, 0xBF, 0xBD };
 
@@ -23,9 +24,11 @@ pub const Decoded = struct {
 };
 
 /// Decodes entities in-place over entire slice and returns new length.
-pub fn decodeInPlace(slice: []u8) usize {
-    const first = std.mem.indexOfScalar(u8, slice, '&') orelse return slice.len;
-    return decodeInPlaceFrom(slice, first);
+pub fn decodeInPlace(comptime normalize_whitespace: bool, slice: []u8) usize {
+    const first = std.mem.indexOfScalar(u8, slice, '&') orelse {
+        return if (comptime normalize_whitespace) normalizeWhitespaceInPlace(slice) else slice.len;
+    };
+    return decodeInPlaceFrom(normalize_whitespace, slice, first);
 }
 
 /// Returns the first `&` offset that begins a decodable entity.
@@ -44,9 +47,10 @@ pub fn firstDecodableEntity(slice: []const u8, start: usize) ?usize {
 }
 
 /// Decodes entities in-place starting at a known `&` offset.
-pub fn decodeInPlaceFrom(slice: []u8, first: usize) usize {
+pub fn decodeInPlaceFrom(comptime normalize_whitespace: bool, slice: []u8, first: usize) usize {
     std.debug.assert(first < slice.len);
     std.debug.assert(slice[first] == '&');
+    if (comptime normalize_whitespace) return decodeNormalizeInPlaceFrom(slice, first);
 
     var r: usize = first;
     var w: usize = first;
@@ -94,6 +98,67 @@ pub fn decodeInPlaceFrom(slice: []u8, first: usize) usize {
             w += 1;
         }
     }
+}
+
+/// Collapses HTML whitespace in-place and returns the new length.
+pub fn normalizeWhitespaceInPlace(bytes: []u8) usize {
+    var state: WhitespaceState = .{};
+    var w: usize = 0;
+    var r: usize = 0;
+    while (r < bytes.len) : (r += 1) appendNormalizedByte(bytes, &w, &state, bytes[r]);
+    return w;
+}
+
+const WhitespaceState = struct {
+    pending_space: bool = false,
+    wrote_any: bool = false,
+};
+
+fn decodeNormalizeInPlaceFrom(bytes: []u8, first: usize) usize {
+    var state: WhitespaceState = .{};
+    var r: usize = first;
+    var w: usize = 0;
+
+    appendNormalizedBytes(bytes, &w, &state, bytes[0..first]);
+
+    while (r < bytes.len) {
+        const c = bytes[r];
+        if (c != '&') {
+            appendNormalizedByte(bytes, &w, &state, c);
+            r += 1;
+            continue;
+        }
+
+        if (decodeEntity(bytes[r + 1 ..])) |decoded| {
+            appendNormalizedBytes(bytes, &w, &state, decoded.bytes[0..decoded.len]);
+            r += decoded.consumed;
+        } else {
+            appendNormalizedByte(bytes, &w, &state, '&');
+            r += 1;
+        }
+    }
+
+    return w;
+}
+
+fn appendNormalizedBytes(out: []u8, noalias w: *usize, noalias state: *WhitespaceState, bytes: []const u8) void {
+    for (bytes) |c| appendNormalizedByte(out, w, state, c);
+}
+
+fn appendNormalizedByte(out: []u8, noalias w: *usize, noalias state: *WhitespaceState, c: u8) void {
+    if (tables.WhitespaceTable[c]) {
+        state.pending_space = true;
+        return;
+    }
+
+    if (state.pending_space and state.wrote_any) {
+        out[w.*] = ' ';
+        w.* += 1;
+    }
+    out[w.*] = c;
+    w.* += 1;
+    state.pending_space = false;
+    state.wrote_any = true;
 }
 
 fn decodeReferenceAlloc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
@@ -286,20 +351,20 @@ fn expectDecodeMatchesReference(alloc: std.mem.Allocator, input: []const u8) !vo
     const buf = try alloc.dupe(u8, input);
     defer alloc.free(buf);
 
-    const actual_len = decodeInPlace(buf);
+    const actual_len = decodeInPlace(false, buf);
     try std.testing.expect(actual_len <= buf.len);
     try std.testing.expectEqualSlices(u8, expected, buf[0..actual_len]);
 }
 
 test "decode entities" {
     var buf = "a&amp;b&#x20;".*;
-    const n = decodeInPlace(&buf);
+    const n = decodeInPlace(false, &buf);
     try std.testing.expectEqualStrings("a&b ", buf[0..n]);
 }
 
 test "decode entities preserves literal run after shrinking first entity" {
     var buf = "a&amp;bc&amp;d".*;
-    const n = decodeInPlace(&buf);
+    const n = decodeInPlace(false, &buf);
     try std.testing.expectEqualStrings("a&bc&d", buf[0..n]);
 }
 
@@ -307,43 +372,57 @@ test "decode from first decodable entity skips invalid ampersands" {
     var buf = "a&bogus&amp;b".*;
     const first = firstDecodableEntity(&buf, 0) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 7), first);
-    const n = decodeInPlaceFrom(&buf, first);
+    const n = decodeInPlaceFrom(false, &buf, first);
     try std.testing.expectEqualStrings("a&bogus&b", buf[0..n]);
+}
+
+test "decode and normalize whitespace in one pass" {
+    var buf = "  a\t&amp;\n b  ".*;
+    const n = decodeInPlace(true, &buf);
+    try std.testing.expectEqualStrings("a & b", buf[0..n]);
+}
+
+test "decode from first entity and normalize earlier literal text" {
+    var buf = " a&bogus  &amp;\n b ".*;
+    const first = firstDecodableEntity(&buf, 0) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 10), first);
+    const n = decodeInPlaceFrom(true, &buf, first);
+    try std.testing.expectEqualStrings("a&bogus & b", buf[0..n]);
 }
 
 test "decode decimal and uppercase hex entities" {
     var buf = "&#32;&#X3E;".*;
-    const n = decodeInPlace(&buf);
+    const n = decodeInPlace(false, &buf);
     try std.testing.expectEqualStrings(" >", buf[0..n]);
 }
 
 test "decode two-byte numeric entity" {
     var buf = "a&#169;b".*;
-    const n = decodeInPlace(&buf);
+    const n = decodeInPlace(false, &buf);
     try std.testing.expectEqualStrings("a\xc2\xa9b", buf[0..n]);
 }
 
 test "decode numeric entities allows leading zeros and rejects oversized values" {
     var buf = "&#0000032;&#x00003E;&#1114112;&#x110000;".*;
-    const n = decodeInPlace(&buf);
+    const n = decodeInPlace(false, &buf);
     try std.testing.expectEqualSlices(u8, " >" ++ &ReplacementUtf8 ++ &ReplacementUtf8, buf[0..n]);
 }
 
 test "decode numeric entities rejects missing digits" {
     var buf = "&#;&#x;&#X;".*;
-    const n = decodeInPlace(&buf);
+    const n = decodeInPlace(false, &buf);
     try std.testing.expectEqualSlices(u8, &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8, buf[0..n]);
 }
 
 test "decode numeric entities rejects null codepoint" {
     var buf = "&#0;&#00;&#x0;&#X000;".*;
-    const n = decodeInPlace(&buf);
+    const n = decodeInPlace(false, &buf);
     try std.testing.expectEqualSlices(u8, &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8, buf[0..n]);
 }
 
 test "decode numeric entities rejects surrogate codepoints" {
     var buf = "&#55296;&#57343;&#xD800;&#xDFFF;&#xd800;&#xdfff;".*;
-    const n = decodeInPlace(&buf);
+    const n = decodeInPlace(false, &buf);
     try std.testing.expectEqualSlices(
         u8,
         &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8,
@@ -393,7 +472,7 @@ test "fuzz decodeInPlace matches reference decoder" {
 
 test "decode entities keeps plain text unchanged" {
     var buf = "plain text".*;
-    const n = decodeInPlace(&buf);
+    const n = decodeInPlace(false, &buf);
     try std.testing.expectEqualStrings("plain text", buf[0..n]);
 }
 

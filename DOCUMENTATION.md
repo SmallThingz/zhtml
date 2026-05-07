@@ -240,49 +240,49 @@ Source: `bench/results/latest.json` (`quick` profile).
 
 | Fixture | ours | lol-html | lexbor |
 |---|---:|---:|---:|
-| `rust-lang.html` | 1603.15 | 1405.65 | 274.49 |
-| `wiki-html.html` | 1823.11 | 1279.67 | 230.19 |
-| `mdn-html.html` | 3065.31 | 1900.95 | 384.43 |
-| `w3-html52.html` | 1070.27 | 700.00 | 191.14 |
-| `hn.html` | 1616.15 | 864.56 | 215.56 |
-| `python-org.html` | 2062.76 | 1172.48 | 239.11 |
-| `kernel-org.html` | 1765.88 | 1219.30 | 240.82 |
-| `gnu-org.html` | 2191.94 | 1441.32 | 286.25 |
-| `ziglang-org.html` | 1701.82 | 1164.81 | 266.74 |
-| `ziglang-doc-master.html` | 1362.14 | 1040.15 | 210.75 |
-| `wikipedia-unicode-list.html` | 1804.26 | 1089.31 | 212.48 |
-| `whatwg-html-spec.html` | 1235.93 | 968.71 | 209.47 |
-| `synthetic-forms.html` | 1343.54 | 786.33 | 186.46 |
-| `synthetic-table-grid.html` | 1270.74 | 760.93 | 169.12 |
-| `synthetic-list-nested.html` | 1236.84 | 673.96 | 159.45 |
-| `synthetic-comments-doctype.html` | 2113.43 | 975.58 | 221.55 |
-| `synthetic-template-rich.html` | 940.60 | 493.24 | 143.50 |
-| `synthetic-whitespace-noise.html` | 1678.40 | 1102.34 | 186.61 |
-| `synthetic-news-feed.html` | 1229.25 | 664.78 | 155.14 |
-| `synthetic-ecommerce.html` | 1142.71 | 698.89 | 162.76 |
-| `synthetic-forum-thread.html` | 1192.16 | 671.25 | 160.40 |
+| `rust-lang.html` | 1507.82 | 893.56 | 223.73 |
+| `wiki-html.html` | 1862.96 | 1128.74 | 257.74 |
+| `mdn-html.html` | 3007.36 | 1707.80 | 339.68 |
+| `w3-html52.html` | 977.10 | 619.00 | 159.49 |
+| `hn.html` | 1442.27 | 810.62 | 179.13 |
+| `python-org.html` | 1861.79 | 1268.89 | 226.33 |
+| `kernel-org.html` | 1630.62 | 1334.08 | 211.66 |
+| `gnu-org.html` | 2442.54 | 1399.10 | 255.83 |
+| `ziglang-org.html` | 1824.68 | 1140.93 | 218.24 |
+| `ziglang-doc-master.html` | 1421.91 | 1074.95 | 219.06 |
+| `wikipedia-unicode-list.html` | 1833.85 | 1134.88 | 221.71 |
+| `whatwg-html-spec.html` | 1359.87 | 892.57 | 210.37 |
+| `synthetic-forms.html` | 1330.62 | 744.42 | 170.85 |
+| `synthetic-table-grid.html` | 1184.33 | 767.60 | 155.90 |
+| `synthetic-list-nested.html` | 1268.15 | 713.66 | 157.57 |
+| `synthetic-comments-doctype.html` | 2189.25 | 991.72 | 223.19 |
+| `synthetic-template-rich.html` | 936.94 | 497.68 | 145.12 |
+| `synthetic-whitespace-noise.html` | 1679.13 | 1094.30 | 190.46 |
+| `synthetic-news-feed.html` | 1227.45 | 558.50 | 139.91 |
+| `synthetic-ecommerce.html` | 981.46 | 658.43 | 142.98 |
+| `synthetic-forum-thread.html` | 1171.23 | 631.64 | 151.98 |
 
 #### Query Match Throughput (ours)
 
 | Case | ours ops/s | ours ns/op |
 |---|---:|---:|
-| `attr-heavy-button` | 207835.17 | 4811.51 |
-| `attr-heavy-nav` | 108644.28 | 9204.35 |
+| `attr-heavy-button` | 176096.99 | 5678.69 |
+| `attr-heavy-nav` | 109092.16 | 9166.56 |
 
 #### Cached Query Throughput (ours)
 
 | Case | ours ops/s | ours ns/op |
 |---|---:|---:|
-| `attr-heavy-button` | 187795.55 | 5324.94 |
-| `attr-heavy-nav` | 112742.19 | 8869.79 |
+| `attr-heavy-button` | 213717.07 | 4679.08 |
+| `attr-heavy-nav` | 126827.69 | 7884.71 |
 
 #### Query Parse Throughput (ours)
 
 | Selector case | Ops/s | ns/op |
 |---|---:|---:|
-| `simple` | 10805788.75 | 92.54 |
-| `complex` | 5692362.80 | 175.67 |
-| `grouped` | 7683753.61 | 130.14 |
+| `simple` | 10392445.77 | 96.22 |
+| `complex` | 5592478.34 | 178.81 |
+| `grouped` | 7456484.89 | 134.11 |
 
 For full per-parser, per-fixture tables and gate output:
 - `bench/results/latest.md`

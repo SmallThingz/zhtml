@@ -438,7 +438,7 @@ fn materializeRawValueOwned(allocator: std.mem.Allocator, source: []const u8, ra
     const copied = try allocator.dupe(u8, slice);
     errdefer allocator.free(copied);
 
-    const new_len = entities.decodeInPlaceFrom(copied, first);
+    const new_len = entities.decodeInPlaceFrom(false, copied, first);
     if (new_len == copied.len) return copied;
     return try allocator.realloc(copied, new_len);
 }
@@ -454,7 +454,7 @@ fn materializeRawValue(source: []u8, span_end: usize, eq_index: usize, raw: RawV
     }
 
     var decoded_len: usize = raw.end - raw.start;
-    decoded_len = entities.decodeInPlace(source[raw.start..raw.end]);
+    decoded_len = entities.decodeInPlace(false, source[raw.start..raw.end]);
 
     if (raw.kind == .quoted) {
         source[eq_index] = 0;
