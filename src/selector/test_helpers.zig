@@ -16,6 +16,17 @@ pub fn expectAllAttributeOps(sel: anytype) !void {
     try std.testing.expect(sel.attrs[comp.attr_start + 6].op == .dash_match);
 }
 
+pub fn expectAttributeCaseFlags(sel: anytype) !void {
+    try std.testing.expectEqual(@as(usize, 1), sel.groups.len);
+    try std.testing.expectEqual(@as(usize, 1), sel.compounds.len);
+
+    const comp = sel.compounds[0];
+    try std.testing.expectEqual(@as(ast.Int, 3), comp.attr_len);
+    try std.testing.expect(sel.attrs[comp.attr_start + 0].case == .sensitive);
+    try std.testing.expect(sel.attrs[comp.attr_start + 1].case == .insensitive_ascii);
+    try std.testing.expect(sel.attrs[comp.attr_start + 2].case == .sensitive);
+}
+
 pub fn expectCombinatorChain(sel: anytype) !void {
     try std.testing.expectEqual(@as(usize, 2), sel.groups.len);
     try std.testing.expectEqual(@as(usize, 6), sel.compounds.len);

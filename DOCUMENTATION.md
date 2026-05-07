@@ -228,55 +228,55 @@ Warning: throughput numbers are not conformance claims. This parser is permissiv
 
 <!-- BENCHMARK_SNAPSHOT:START -->
 
-Source: `bench/results/latest.json` (`quick` profile).
+Source: `bench/results/latest.json` (`stable` profile).
 
 #### Parse Throughput Comparison (MB/s)
 
 | Fixture | ours | lol-html | lexbor |
 |---|---:|---:|---:|
-| `rust-lang.html` | 1507.82 | 893.56 | 223.73 |
-| `wiki-html.html` | 1862.96 | 1128.74 | 257.74 |
-| `mdn-html.html` | 3007.36 | 1707.80 | 339.68 |
-| `w3-html52.html` | 977.10 | 619.00 | 159.49 |
-| `hn.html` | 1442.27 | 810.62 | 179.13 |
-| `python-org.html` | 1861.79 | 1268.89 | 226.33 |
-| `kernel-org.html` | 1630.62 | 1334.08 | 211.66 |
-| `gnu-org.html` | 2442.54 | 1399.10 | 255.83 |
-| `ziglang-org.html` | 1824.68 | 1140.93 | 218.24 |
-| `ziglang-doc-master.html` | 1421.91 | 1074.95 | 219.06 |
-| `wikipedia-unicode-list.html` | 1833.85 | 1134.88 | 221.71 |
-| `whatwg-html-spec.html` | 1359.87 | 892.57 | 210.37 |
-| `synthetic-forms.html` | 1330.62 | 744.42 | 170.85 |
-| `synthetic-table-grid.html` | 1184.33 | 767.60 | 155.90 |
-| `synthetic-list-nested.html` | 1268.15 | 713.66 | 157.57 |
-| `synthetic-comments-doctype.html` | 2189.25 | 991.72 | 223.19 |
-| `synthetic-template-rich.html` | 936.94 | 497.68 | 145.12 |
-| `synthetic-whitespace-noise.html` | 1679.13 | 1094.30 | 190.46 |
-| `synthetic-news-feed.html` | 1227.45 | 558.50 | 139.91 |
-| `synthetic-ecommerce.html` | 981.46 | 658.43 | 142.98 |
-| `synthetic-forum-thread.html` | 1171.23 | 631.64 | 151.98 |
+| `rust-lang.html` | 2496.53 | 1577.58 | 336.85 |
+| `wiki-html.html` | 1970.90 | 1134.04 | 247.38 |
+| `mdn-html.html` | 2740.36 | 1693.47 | 366.43 |
+| `w3-html52.html` | 947.84 | 624.38 | 166.99 |
+| `hn.html` | 1672.93 | 891.30 | 219.87 |
+| `python-org.html` | 2167.17 | 1361.07 | 279.40 |
+| `kernel-org.html` | 2080.83 | 1361.66 | 289.98 |
+| `gnu-org.html` | 2644.08 | 1516.11 | 311.99 |
+| `ziglang-org.html` | 2147.93 | 1295.02 | 287.96 |
+| `ziglang-doc-master.html` | 1334.38 | 994.83 | 213.19 |
+| `wikipedia-unicode-list.html` | 1747.29 | 1049.54 | 213.95 |
+| `whatwg-html-spec.html` | 1291.37 | 913.00 | 220.01 |
+| `synthetic-forms.html` | 1270.50 | 721.05 | 177.35 |
+| `synthetic-table-grid.html` | 1293.61 | 725.32 | 163.66 |
+| `synthetic-list-nested.html` | 1310.95 | 680.57 | 162.42 |
+| `synthetic-comments-doctype.html` | 2211.92 | 959.96 | 222.45 |
+| `synthetic-template-rich.html` | 935.67 | 459.06 | 142.21 |
+| `synthetic-whitespace-noise.html` | 1668.69 | 1072.92 | 184.84 |
+| `synthetic-news-feed.html` | 1190.92 | 632.65 | 157.82 |
+| `synthetic-ecommerce.html` | 1168.72 | 656.87 | 163.63 |
+| `synthetic-forum-thread.html` | 1212.89 | 643.43 | 159.65 |
 
 #### Query Match Throughput (ours)
 
 | Case | ours ops/s | ours ns/op |
 |---|---:|---:|
-| `attr-heavy-button` | 176096.99 | 5678.69 |
-| `attr-heavy-nav` | 109092.16 | 9166.56 |
+| `attr-heavy-button` | 172820.93 | 5786.34 |
+| `attr-heavy-nav` | 106357.75 | 9402.23 |
 
 #### Cached Query Throughput (ours)
 
 | Case | ours ops/s | ours ns/op |
 |---|---:|---:|
-| `attr-heavy-button` | 213717.07 | 4679.08 |
-| `attr-heavy-nav` | 126827.69 | 7884.71 |
+| `attr-heavy-button` | 161101.92 | 6207.25 |
+| `attr-heavy-nav` | 114289.61 | 8749.70 |
 
 #### Query Parse Throughput (ours)
 
 | Selector case | Ops/s | ns/op |
 |---|---:|---:|
-| `simple` | 10392445.77 | 96.22 |
-| `complex` | 5592478.34 | 178.81 |
-| `grouped` | 7456484.89 | 134.11 |
+| `simple` | 10764106.23 | 92.90 |
+| `complex` | 5780178.43 | 173.01 |
+| `grouped` | 7576618.70 | 131.98 |
 
 For full per-parser, per-fixture tables and gate output:
 - `bench/results/latest.md`

@@ -235,36 +235,51 @@ const Parser = struct {
                                 return .{ .name = name, .op = .exists, .value = .{} };
                             }
                             if (!self.consumeIf('=')) return error.InvalidSelector;
-                            const v = try self.parseAttrValueThenClose();
-                            return .{ .name = name, .op = .dash_match, .value = v };
+                            const parsed = try self.parseAttrValueThenClose();
+                            return .{ .name = name, .op = .dash_match, .case = parsed.case, .value = parsed.value };
                         }
                         if (!self.consumeIf('=')) return error.InvalidSelector;
-                        const v = try self.parseAttrValueThenClose();
-                        return .{ .name = name, .op = .includes, .value = v };
+                        const parsed = try self.parseAttrValueThenClose();
+                        return .{ .name = name, .op = .includes, .case = parsed.case, .value = parsed.value };
                     }
                     if (!self.consumeIf('=')) return error.InvalidSelector;
-                    const v = try self.parseAttrValueThenClose();
-                    return .{ .name = name, .op = .contains, .value = v };
+                    const parsed = try self.parseAttrValueThenClose();
+                    return .{ .name = name, .op = .contains, .case = parsed.case, .value = parsed.value };
                 }
                 if (!self.consumeIf('=')) return error.InvalidSelector;
-                const v = try self.parseAttrValueThenClose();
-                return .{ .name = name, .op = .suffix, .value = v };
+                const parsed = try self.parseAttrValueThenClose();
+                return .{ .name = name, .op = .suffix, .case = parsed.case, .value = parsed.value };
             }
             if (!self.consumeIf('=')) return error.InvalidSelector;
-            const v = try self.parseAttrValueThenClose();
-            return .{ .name = name, .op = .prefix, .value = v };
+            const parsed = try self.parseAttrValueThenClose();
+            return .{ .name = name, .op = .prefix, .case = parsed.case, .value = parsed.value };
         }
 
-        const v = try self.parseAttrValueThenClose();
-        return .{ .name = name, .op = .eq, .value = v };
+        const parsed = try self.parseAttrValueThenClose();
+        return .{ .name = name, .op = .eq, .case = parsed.case, .value = parsed.value };
     }
 
-    fn parseAttrValueThenClose(noalias self: *Parser) Error!ast.Range {
+    const ParsedAttrValue = struct {
+        value: ast.Range,
+        case: ast.AttrCase = .sensitive,
+    };
+
+    fn parseAttrValueThenClose(noalias self: *Parser) Error!ParsedAttrValue {
         self.skipWs();
         const v = self.parseValueToken() orelse return error.InvalidSelector;
         self.skipWs();
+        const case: ast.AttrCase = if (self.i < self.source.len and self.source[self.i] != ']') blk: {
+            const flag = self.source[self.i];
+            self.i += 1;
+            self.skipWs();
+            break :blk switch (flag) {
+                'i', 'I' => .insensitive_ascii,
+                's', 'S' => .sensitive,
+                else => return error.InvalidSelector,
+            };
+        } else .sensitive;
         if (!self.consumeIf(']')) return error.InvalidSelector;
-        return v;
+        return .{ .value = v, .case = case };
     }
 
     fn parsePseudo(noalias self: *Parser) Error!void {
@@ -503,6 +518,13 @@ test "runtime selector parser covers all attribute operators" {
     try test_helpers.expectAllAttributeOps(sel);
 }
 
+test "runtime selector parser accepts attribute case flags" {
+    const alloc = std.testing.allocator;
+    var sel = try compileRuntimeImpl(alloc, "div[a=x][b=y i][c='Z' s]");
+    defer sel.deinit(alloc);
+    try test_helpers.expectAttributeCaseFlags(sel);
+}
+
 test "runtime selector parser tracks combinator chain and grouping" {
     const alloc = std.testing.allocator;
     var sel = try compileRuntimeImpl(alloc, "a b > c + d ~ e, #x");
@@ -562,6 +584,8 @@ test "runtime selector parser rejects invalid selectors" {
         "div:unknown",
         "[attr",
         "div[attr^]",
+        "div[attr i]",
+        "div[attr=value q]",
     };
 
     for (invalid) |source| {

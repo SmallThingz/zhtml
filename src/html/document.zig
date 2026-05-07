@@ -1842,6 +1842,24 @@ test "mixed-case tags and attrs are queryable via lowercase selectors" {
     try std.testing.expectEqualStrings("A b", (try div.getAttributeValue(alloc, "class")).?.value);
 }
 
+test "attribute selectors support case-sensitivity flags" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+
+    var html = "<a id='a' data-k='Hello-World' rel='Tag BLUE'></a><a id='b' data-k='hello-world' rel='tag blue'></a>".*;
+    try resetParsed(.{}, &doc, &html);
+
+    try expectDocQueryComptime(&doc, "a[data-k=hello-world]", &.{"b"});
+    try expectDocQueryComptime(&doc, "a[data-k=hello-world i]", &.{ "a", "b" });
+    try expectDocQueryComptime(&doc, "a[data-k=hello-world s]", &.{"b"});
+    try expectDocQueryComptime(&doc, "a[data-k^=hello i][data-k$=WORLD i][data-k*=LO-WO i]", &.{ "a", "b" });
+    try expectDocQueryComptime(&doc, "a[rel~=blue i]", &.{ "a", "b" });
+    try expectDocQueryComptime(&doc, "a[rel~=blue s]", &.{"b"});
+    try expectDocQueryRuntime(&doc, "a[data-k|=HELLO i]", &.{ "a", "b" });
+    try expectDocQueryRuntime(&doc, "a:not([data-k=hello-world i])", &.{});
+}
+
 test "multiple class predicates in one compound match correctly" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);

@@ -93,6 +93,11 @@ test "compile-time parser covers all attribute operators" {
     try test_helpers.expectAllAttributeOps(sel);
 }
 
+test "compile-time parser accepts attribute case flags" {
+    const sel = comptime compileImpl("div[a=x][b=y i][c='Z' s]");
+    try test_helpers.expectAttributeCaseFlags(sel);
+}
+
 test "compile-time parser tracks combinator chain and grouping" {
     const sel = comptime compileImpl("a b > c + d ~ e, #x");
     try test_helpers.expectCombinatorChain(sel);

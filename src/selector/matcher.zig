@@ -47,7 +47,8 @@ pub fn tagMatches(selector_source: []const u8, comp: ast.Compound, node_name: []
     return tags.equalByLenAndKeyIgnoreCase(node_name, node_key, tag, tag_key);
 }
 
-pub fn evalAttrOp(raw: []const u8, value: []const u8, op: ast.AttrOp) bool {
+pub fn evalAttrOp(raw: []const u8, value: []const u8, op: ast.AttrOp, case: ast.AttrCase) bool {
+    if (case == .insensitive_ascii) return evalAttrOpIgnoreCase(raw, value, op);
     return switch (op) {
         .exists => true,
         .eq => std.mem.eql(u8, raw, value),
@@ -57,6 +58,49 @@ pub fn evalAttrOp(raw: []const u8, value: []const u8, op: ast.AttrOp) bool {
         .includes => tables.tokenIncludesAsciiWhitespace(raw, value),
         .dash_match => std.mem.eql(u8, raw, value) or (raw.len > value.len and std.mem.startsWith(u8, raw, value) and raw[value.len] == '-'),
     };
+}
+
+fn evalAttrOpIgnoreCase(raw: []const u8, value: []const u8, op: ast.AttrOp) bool {
+    return switch (op) {
+        .exists => true,
+        .eq => tables.eqlIgnoreCaseAscii(raw, value),
+        .prefix => startsWithIgnoreCaseAscii(raw, value),
+        .suffix => endsWithIgnoreCaseAscii(raw, value),
+        .contains => indexOfIgnoreCaseAscii(raw, value) != null,
+        .includes => tokenIncludesIgnoreCaseAscii(raw, value),
+        .dash_match => tables.eqlIgnoreCaseAscii(raw, value) or (raw.len > value.len and startsWithIgnoreCaseAscii(raw, value) and raw[value.len] == '-'),
+    };
+}
+
+fn startsWithIgnoreCaseAscii(haystack: []const u8, needle: []const u8) bool {
+    return haystack.len >= needle.len and tables.eqlIgnoreCaseAscii(haystack[0..needle.len], needle);
+}
+
+fn endsWithIgnoreCaseAscii(haystack: []const u8, needle: []const u8) bool {
+    return haystack.len >= needle.len and tables.eqlIgnoreCaseAscii(haystack[haystack.len - needle.len ..], needle);
+}
+
+fn indexOfIgnoreCaseAscii(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len == 0) return 0;
+    if (needle.len > haystack.len) return null;
+    var i: usize = 0;
+    const end = haystack.len - needle.len;
+    while (i <= end) : (i += 1) {
+        if (tables.lower(haystack[i]) != tables.lower(needle[0])) continue;
+        if (tables.eqlIgnoreCaseAscii(haystack[i .. i + needle.len], needle)) return i;
+    }
+    return null;
+}
+
+fn tokenIncludesIgnoreCaseAscii(raw: []const u8, value: []const u8) bool {
+    var i: usize = 0;
+    while (i < raw.len) {
+        while (i < raw.len and tables.WhitespaceTable[raw[i]]) : (i += 1) {}
+        const start = i;
+        while (i < raw.len and !tables.WhitespaceTable[raw[i]]) : (i += 1) {}
+        if (tables.eqlIgnoreCaseAscii(raw[start..i], value)) return true;
+    }
+    return false;
 }
 
 pub fn matchesAttrSelectorDebug(
@@ -69,7 +113,7 @@ pub fn matchesAttrSelectorDebug(
     const name = sel.name.slice(selector_source);
     const raw = (attr.getAttrValue(doc, node, name, allocator) catch null) orelse return false;
     const value = sel.value.slice(selector_source);
-    return evalAttrOp(raw, value, sel.op);
+    return evalAttrOp(raw, value, sel.op, sel.case);
 }
 
 pub fn matchesNotSimpleCommon(ctx: anytype, item: ast.NotSimple) bool {
@@ -428,7 +472,7 @@ fn matchesAttrSelector(
     const name = sel.name.slice(selector_source);
     const raw = attrValueByNameFrom(doc, node, allocator, probe, collected, name) orelse return false;
     const value = sel.value.slice(selector_source);
-    return evalAttrOp(raw, value, sel.op);
+    return evalAttrOp(raw, value, sel.op, sel.case);
 }
 
 fn hasClass(

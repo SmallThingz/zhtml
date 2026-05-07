@@ -33,6 +33,19 @@ pub const AttrOp = enum(u8) {
     }
 };
 
+/// Attribute value comparison case-sensitivity.
+pub const AttrCase = enum(u8) {
+    /// Existing behavior: compare value bytes exactly.
+    sensitive,
+    /// CSS `[i]` flag: compare value bytes ASCII-case-insensitively.
+    insensitive_ascii,
+
+    /// Formats this case mode for human-readable output.
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.writeAll(@tagName(self));
+    }
+};
+
 /// Source byte range pointing into selector text.
 pub const Range = extern struct {
     /// Starting byte offset into selector source.
@@ -77,6 +90,8 @@ pub const AttrSelector = extern struct {
     name: Range,
     /// Comparison operator for this attribute predicate.
     op: AttrOp = .exists,
+    /// Value comparison mode. Only meaningful for non-`exists` operators.
+    case: AttrCase = .sensitive,
     /// Optional attribute value span used by non-`exists` operators.
     value: Range = .{},
 
@@ -84,7 +99,7 @@ pub const AttrSelector = extern struct {
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.writeAll("AttrSelector{name=");
         try self.name.format(writer);
-        try writer.print(", op={s}, value=", .{@tagName(self.op)});
+        try writer.print(", op={s}, case={s}, value=", .{ @tagName(self.op), @tagName(self.case) });
         try self.value.format(writer);
         try writer.writeAll("}");
     }
@@ -327,10 +342,7 @@ test "format selector AST types" {
     };
     const attr_out = try std.fmt.allocPrint(alloc, "{f}", .{attr_sel});
     defer alloc.free(attr_out);
-    try std.testing.expectEqualStrings(
-        "AttrSelector{name=Range{start=2, len=3}, op=prefix, value=Range{start=6, len=3}}",
-        attr_out,
-    );
+    try std.testing.expectEqualStrings("AttrSelector{name=Range{start=2, len=3}, op=prefix, case=sensitive, value=Range{start=6, len=3}}", attr_out);
 
     const nth: NthExpr = .{ .a = 2, .b = 1 };
     const nth_out = try std.fmt.allocPrint(alloc, "{f}", .{nth});
@@ -358,7 +370,7 @@ test "format selector AST types" {
     const not_out = try std.fmt.allocPrint(alloc, "{f}", .{not_simple});
     defer alloc.free(not_out);
     try std.testing.expectEqualStrings(
-        "NotSimple{kind=class, text=Range{start=1, len=3}, attr=AttrSelector{name=Range{start=2, len=3}, op=prefix, value=Range{start=6, len=3}}}",
+        "NotSimple{kind=class, text=Range{start=1, len=3}, attr=AttrSelector{name=Range{start=2, len=3}, op=prefix, case=sensitive, value=Range{start=6, len=3}}}",
         not_out,
     );
 
