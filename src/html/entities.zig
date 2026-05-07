@@ -44,12 +44,23 @@ pub fn decodeInPlace(slice: []u8) usize {
             w += 1;
         }
 
-        const next_amp = std.mem.indexOfScalarPos(u8, slice, r, '&') orelse return;
+        const next_amp = std.mem.indexOfScalarPos(u8, slice, r, '&') orelse return slice.len;
         r = next_amp;
         w = next_amp;
     }
 
     while (true) {
+        const next_amp = std.mem.indexOfScalarPos(u8, slice, r, '&') orelse {
+            std.mem.copyForwards(u8, slice[w .. w + (slice.len - r)], slice[r..]);
+            return w + (slice.len - r);
+        };
+        const chunk_len = next_amp - r;
+        if (chunk_len != 0) {
+            std.mem.copyForwards(u8, slice[w .. w + chunk_len], slice[r..next_amp]);
+            w += chunk_len;
+        }
+
+        r = next_amp;
         if (decodeEntity(slice[r + 1 ..])) |decoded| {
             @memcpy(slice[w..][0..decoded.len], decoded.bytes[0..decoded.len]);
             r += decoded.consumed;
@@ -58,18 +69,6 @@ pub fn decodeInPlace(slice: []u8) usize {
             slice[w] = '&';
             r += 1;
             w += 1;
-        }
-
-        const next_amp = std.mem.indexOfScalarPos(u8, slice, r, '&') orelse {
-            std.mem.copyForwards(u8, slice[w .. w + (slice.len - r)], slice[r..]);
-            return w + (slice.len - r);
-        };
-
-        const chunk_len = next_amp - r;
-        if (chunk_len != 0) {
-            std.mem.copyForwards(u8, slice[w .. w + chunk_len], slice[r..next_amp]);
-            w += chunk_len;
-            r = next_amp;
         }
     }
 }
@@ -198,7 +197,7 @@ fn parseNumericHex(rem: []const u8) ?Decoded {
 
 inline fn finishNumeric(value: u32, consumed: usize) Decoded {
     var out: [4]u8 = undefined;
-    const codepoint = std.math.cast(u21, value) catch {
+    const codepoint = std.math.cast(u21, value) orelse {
         @branchHint(.unlikely);
         return replacementDecoded(consumed);
     };
@@ -273,6 +272,12 @@ test "decode entities" {
     var buf = "a&amp;b&#x20;".*;
     const n = decodeInPlace(&buf);
     try std.testing.expectEqualStrings("a&b ", buf[0..n]);
+}
+
+test "decode entities preserves literal run after shrinking first entity" {
+    var buf = "a&amp;bc&amp;d".*;
+    const n = decodeInPlace(&buf);
+    try std.testing.expectEqualStrings("a&bc&d", buf[0..n]);
 }
 
 test "decode decimal and uppercase hex entities" {
