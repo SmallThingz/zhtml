@@ -194,7 +194,7 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         /// Writes HTML serialization of this node only, excluding its children.
-        pub fn writeHtmlSelf(self: @This(), writer: anytype) WriterError(@TypeOf(writer))!void {
+        pub fn writeSelfHtml(self: @This(), writer: anytype) WriterError(@TypeOf(writer))!void {
             try writeNodeHtml(self.doc, self.index, self.raw(), writer, false);
         }
 
@@ -203,28 +203,28 @@ fn GetNode(comptime options: ParseOptions) type {
             return self.writeHtml(writer);
         }
 
-        /// Returns text content of this subtree; may borrow or allocate in `arena_alloc`.
+        /// Returns text content of this subtree; may borrow or allocate in `arena`.
         pub fn innerText(self: @This(), arena: std.mem.Allocator) ![]const u8 {
             return self.innerTextWithOptions(arena, .{});
         }
 
         /// Same as `innerText` but with explicit text-normalization options.
-        pub fn innerTextWithOptions(self: @This(), arena_alloc: std.mem.Allocator, opts: Self.TextOptions) ![]const u8 {
-            return self.tryBorrowInnerText(opts) orelse try self.innerTextOwnedWithOptions(arena_alloc, opts);
+        pub fn innerTextWithOptions(self: @This(), arena: std.mem.Allocator, opts: Self.TextOptions) ![]const u8 {
+            return self.tryBorrowInnerText(opts) orelse try self.innerTextOwnedWithOptions(arena, opts);
         }
 
         /// Always materializes subtree text into newly allocated output.
-        pub fn innerTextOwned(self: @This(), arena_alloc: std.mem.Allocator) ![]const u8 {
-            return self.innerTextOwnedWithOptions(arena_alloc, .{});
+        pub fn innerTextOwned(self: @This(), arena: std.mem.Allocator) ![]const u8 {
+            return self.innerTextOwnedWithOptions(arena, .{});
         }
 
         /// Owned variant of `innerTextWithOptions`.
-        pub fn innerTextOwnedWithOptions(self: @This(), arena_alloc: std.mem.Allocator, opts: Self.TextOptions) ![]const u8 {
+        pub fn innerTextOwnedWithOptions(self: @This(), arena: std.mem.Allocator, opts: Self.TextOptions) ![]const u8 {
             var out = std.ArrayList(u8).empty;
-            defer out.deinit(arena_alloc);
+            defer out.deinit(arena);
             var state: WhitespaceNormState = .{};
-            try self.appendInnerText(&out, arena_alloc, opts, &state);
-            return try out.toOwnedSlice(arena_alloc);
+            try self.appendInnerText(&out, arena, opts, &state);
+            return try out.toOwnedSlice(arena);
         }
 
         /// Returns decoded attribute value for `name`, if present.
@@ -333,7 +333,7 @@ fn GetNode(comptime options: ParseOptions) type {
         fn appendInnerText(
             self: @This(),
             noalias out: *std.ArrayList(u8),
-            arena_alloc: std.mem.Allocator,
+            arena: std.mem.Allocator,
             opts: Self.TextOptions,
             noalias state: *WhitespaceNormState,
         ) !void {
@@ -341,13 +341,13 @@ fn GetNode(comptime options: ParseOptions) type {
             const node_raw = self.raw();
 
             if (node_raw.isText(self.index)) {
-                return appendTextSegment(out, arena_alloc, node_raw.name_or_text.slice(doc.source), opts.normalize_whitespace, state);
+                return appendTextSegment(out, arena, node_raw.name_or_text.slice(doc.source), opts.normalize_whitespace, state);
             }
 
             var idx = self.index + 1;
             while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
                 if (!doc.nodes[idx].isText(idx)) continue;
-                try appendTextSegment(out, arena_alloc, doc.nodes[idx].name_or_text.slice(doc.source), opts.normalize_whitespace, state);
+                try appendTextSegment(out, arena, doc.nodes[idx].name_or_text.slice(doc.source), opts.normalize_whitespace, state);
             }
         }
 
@@ -810,7 +810,6 @@ fn GetChildrenIter(comptime options: ParseOptions) type {
 fn GetDocument(comptime options: ParseOptions) type {
     return struct {
         //! Parsed document owner and query entrypoint container.
-        const DocSelf = @This();
         const DebugQueryResultType = options.QueryDebugResult();
         const ChildrenIterType = options.ChildrenIter();
         const NodeTypeWrapper = options.Node();
@@ -825,26 +824,26 @@ fn GetDocument(comptime options: ParseOptions) type {
         nodes: []RawNode = &[_]RawNode{},
 
         /// Initializes an empty document using `allocator` for internal storage.
-        pub fn init(allocator: std.mem.Allocator) DocSelf {
+        pub fn init(allocator: std.mem.Allocator) @This() {
             return .{
                 .allocator = allocator,
                 .source = emptySource(),
             };
         }
 
-        fn freeNodes(noalias self: *DocSelf) void {
+        fn freeNodes(noalias self: *@This()) void {
             if (self.nodes.len == 0) return;
             self.allocator.free(self.nodes);
             self.nodes = &[_]RawNode{};
         }
 
         /// Releases all document-owned memory.
-        pub fn deinit(noalias self: *DocSelf) void {
+        pub fn deinit(noalias self: *@This()) void {
             self.freeNodes();
         }
 
         /// Clears parsed state and releases parsed node storage.
-        pub fn clear(noalias self: *DocSelf) void {
+        pub fn clear(noalias self: *@This()) void {
             self.source = emptySource();
             self.freeNodes();
         }
@@ -857,34 +856,34 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Returns first matching element for comptime selector.
-        pub fn queryOne(self: *const DocSelf, comptime selector: []const u8) ?NodeTypeWrapper {
+        pub fn queryOne(self: *const @This(), comptime selector: []const u8) ?NodeTypeWrapper {
             const sel = comptime ast.Selector.compile(selector);
             return self.queryOneCached(sel);
         }
 
         /// Returns first matching element for precompiled selector.
-        pub fn queryOneCached(self: *const DocSelf, sel: ast.Selector) ?NodeTypeWrapper {
+        pub fn queryOneCached(self: *const @This(), sel: ast.Selector) ?NodeTypeWrapper {
             return self.queryOneCachedFrom(sel, InvalidIndex);
         }
 
         /// Debug variant of `queryOne` that records mismatch details.
-        pub fn queryOneDebug(self: *const DocSelf, comptime selector: []const u8) DebugQueryResultType {
+        pub fn queryOneDebug(self: *const @This(), comptime selector: []const u8) DebugQueryResultType {
             const sel = comptime ast.Selector.compile(selector);
             return self.queryOneCachedDebugFrom(sel, InvalidIndex);
         }
 
         /// Parses selector at runtime and returns first match.
-        pub fn queryOneRuntime(self: *const DocSelf, allocator: std.mem.Allocator, selector: []const u8) runtime_selector.Error!?NodeTypeWrapper {
+        pub fn queryOneRuntime(self: *const @This(), allocator: std.mem.Allocator, selector: []const u8) runtime_selector.Error!?NodeTypeWrapper {
             return self.queryOneRuntimeFrom(allocator, selector, InvalidIndex);
         }
 
         /// Runtime debug query returning first match, diagnostics report, and parse error if any.
-        pub fn queryOneRuntimeDebug(self: *const DocSelf, allocator: std.mem.Allocator, selector: []const u8) DebugQueryResultType {
+        pub fn queryOneRuntimeDebug(self: *const @This(), allocator: std.mem.Allocator, selector: []const u8) DebugQueryResultType {
             return self.queryOneRuntimeDebugFrom(allocator, selector, InvalidIndex);
         }
 
         fn queryOneRuntimeFrom(
-            self: *const DocSelf,
+            self: *const @This(),
             allocator: std.mem.Allocator,
             selector: []const u8,
             scope_root: IndexInt,
@@ -896,7 +895,7 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         fn queryOneRuntimeDebugFrom(
-            self: *const DocSelf,
+            self: *const @This(),
             allocator: std.mem.Allocator,
             selector: []const u8,
             scope_root: IndexInt,
@@ -915,17 +914,17 @@ fn GetDocument(comptime options: ParseOptions) type {
             return self.queryOneCachedDebugFrom(sel, scope_root);
         }
 
-        fn queryOneCachedFrom(self: *const DocSelf, sel: ast.Selector, scope_root: IndexInt) ?NodeTypeWrapper {
+        fn queryOneCachedFrom(self: *const @This(), sel: ast.Selector, scope_root: IndexInt) ?NodeTypeWrapper {
             self.ensureQueryPrereqs(sel);
-            return if (matcher.queryOneIndex(DocSelf, self, sel, scope_root)) |idx| self.nodeAt(idx) else null;
+            return if (matcher.queryOneIndex(@This(), self, sel, scope_root)) |idx| self.nodeAt(idx) else null;
         }
 
-        fn queryOneCachedDebugFrom(self: *const DocSelf, sel: ast.Selector, scope_root: IndexInt) DebugQueryResultType {
+        fn queryOneCachedDebugFrom(self: *const @This(), sel: ast.Selector, scope_root: IndexInt) DebugQueryResultType {
             self.ensureQueryPrereqs(sel);
             var report: selector_debug.QueryDebugReport = .{};
             var scratch = std.heap.ArenaAllocator.init(self.allocator);
             defer scratch.deinit();
-            const idx = matcher_debug.explainFirstMatch(DocSelf, self, scratch.allocator(), sel, scope_root, &report) orelse {
+            const idx = matcher_debug.explainFirstMatch(@This(), self, scratch.allocator(), sel, scope_root, &report) orelse {
                 return .{ .report = report };
             };
             return .{
@@ -935,24 +934,24 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Returns lazy iterator over matches for comptime selector.
-        pub fn queryAll(self: *const DocSelf, comptime selector: []const u8) QueryIterType {
+        pub fn queryAll(self: *const @This(), comptime selector: []const u8) QueryIterType {
             const sel = comptime ast.Selector.compile(selector);
             return self.queryAllCached(sel);
         }
 
         /// Returns lazy iterator over matches for precompiled selector.
-        pub fn queryAllCached(self: *const DocSelf, sel: ast.Selector) QueryIterType {
+        pub fn queryAllCached(self: *const @This(), sel: ast.Selector) QueryIterType {
             self.ensureQueryPrereqs(sel);
             return self.queryIter(sel, InvalidIndex);
         }
 
         /// Parses selector at runtime and returns lazy iterator.
-        pub fn queryAllRuntime(self: *const DocSelf, allocator: std.mem.Allocator, selector: []const u8) runtime_selector.Error!QueryIterType {
+        pub fn queryAllRuntime(self: *const @This(), allocator: std.mem.Allocator, selector: []const u8) runtime_selector.Error!QueryIterType {
             return self.queryAllRuntimeFrom(allocator, selector, InvalidIndex);
         }
 
         fn queryAllRuntimeFrom(
-            self: *const DocSelf,
+            self: *const @This(),
             allocator: std.mem.Allocator,
             selector: []const u8,
             scope_root: IndexInt,
@@ -962,11 +961,11 @@ fn GetDocument(comptime options: ParseOptions) type {
             return self.queryIter(sel, scope_root);
         }
 
-        fn ensureQueryPrereqs(self: *const DocSelf, selector: ast.Selector) void {
+        fn ensureQueryPrereqs(self: *const @This(), selector: ast.Selector) void {
             _ = .{ self, selector };
         }
 
-        fn queryIter(self: *const DocSelf, sel: ast.Selector, scope_root: IndexInt) QueryIterType {
+        fn queryIter(self: *const @This(), sel: ast.Selector, scope_root: IndexInt) QueryIterType {
             return .{
                 .doc = @constCast(self),
                 .selector = sel,
@@ -976,18 +975,18 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Returns parent index for `idx`.
-        pub fn parentIndex(self: *const DocSelf, idx: IndexInt) IndexInt {
+        pub fn parentIndex(self: *const @This(), idx: IndexInt) IndexInt {
             if (idx >= self.nodes.len) return InvalidIndex;
             return self.nodes[idx].parent;
         }
 
         /// Returns first `<html>` element in the document.
-        pub fn html(self: *const DocSelf) ?NodeTypeWrapper {
+        pub fn html(self: *const @This()) ?NodeTypeWrapper {
             return self.findFirstTag("html");
         }
 
         /// Returns whether `bytes` points inside the document's source buffer.
-        pub fn isOwned(self: *const DocSelf, bytes: []const u8) bool {
+        pub fn isOwned(self: *const @This(), bytes: []const u8) bool {
             if (self.source.len == 0 or bytes.len == 0) return false;
             const src_start = @intFromPtr(self.source.ptr);
             const src_end = src_start + self.source.len;
@@ -997,17 +996,17 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Returns first `<head>` element in the document.
-        pub fn head(self: *const DocSelf) ?NodeTypeWrapper {
+        pub fn head(self: *const @This()) ?NodeTypeWrapper {
             return self.findFirstTag("head");
         }
 
         /// Returns first `<body>` element in the document.
-        pub fn body(self: *const DocSelf) ?NodeTypeWrapper {
+        pub fn body(self: *const @This()) ?NodeTypeWrapper {
             return self.findFirstTag("body");
         }
 
         /// Returns first element whose tag name equals `name` (ASCII-insensitive).
-        pub fn findFirstTag(self: *const DocSelf, name: []const u8) ?NodeTypeWrapper {
+        pub fn findFirstTag(self: *const @This(), name: []const u8) ?NodeTypeWrapper {
             var i: usize = 1;
             while (i < self.nodes.len) : (i += 1) {
                 const n = &self.nodes[i];
@@ -1018,7 +1017,7 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Wraps raw node index as public `Node` wrapper when valid.
-        pub inline fn nodeAt(self: *const DocSelf, idx: IndexInt) ?NodeTypeWrapper {
+        pub inline fn nodeAt(self: *const @This(), idx: IndexInt) ?NodeTypeWrapper {
             if (idx == InvalidIndex or idx >= self.nodes.len) return null;
             return .{
                 .doc = @constCast(self),
@@ -1036,7 +1035,7 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Writes HTML serialization of this document root only, excluding its children.
-        pub fn writeHtmlSelf(self: @This(), writer: anytype) NodeTypeWrapper.WriterError(@TypeOf(writer))!void {
+        pub fn writeSelfHtml(self: @This(), writer: anytype) NodeTypeWrapper.WriterError(@TypeOf(writer))!void {
             return self.writeHtml(writer);
         }
 
@@ -1046,7 +1045,7 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Returns first direct element-like child index for `parent_idx`, if any.
-        pub fn firstElementChildIndex(self: *const DocSelf, parent_idx: IndexInt) IndexInt {
+        pub fn firstElementChildIndex(self: *const @This(), parent_idx: IndexInt) IndexInt {
             if (parent_idx >= self.nodes.len) return InvalidIndex;
 
             const candidate1: IndexInt = parent_idx + 1;
@@ -1076,7 +1075,7 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Returns next direct element-like sibling index for `node_idx`, if any.
-        pub fn nextElementSiblingIndex(self: *const DocSelf, node_idx: IndexInt) IndexInt {
+        pub fn nextElementSiblingIndex(self: *const @This(), node_idx: IndexInt) IndexInt {
             if (node_idx >= self.nodes.len) return InvalidIndex;
             const node = &self.nodes[node_idx];
             if (!node.isElement(node_idx)) return InvalidIndex;
@@ -1094,7 +1093,7 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Returns direct-child node iterator for `parent_idx`.
-        pub fn childrenIter(self: *const DocSelf, parent_idx: IndexInt) ChildrenIterType {
+        pub fn childrenIter(self: *const @This(), parent_idx: IndexInt) ChildrenIterType {
             return .{
                 .doc = self,
                 .next_idx = self.firstElementChildIndex(parent_idx),
