@@ -211,7 +211,7 @@ pub fn getAttrValueRaw(noalias doc_ptr: anytype, node: anytype, name: []const u8
     const lookup_kind = classifyLookupName(name);
 
     var i: usize = node.name_or_text.end;
-    const end = node.attrEnd();
+    const end = node.attrEnd(source);
     if (i >= end) return null;
 
     while (i < end) {
@@ -275,7 +275,7 @@ pub fn collectSelectedValues(
     // Selector matching often probes a few attribute names repeatedly; this
     // helper resolves all requested names in one traversal of the attr span.
     var i: usize = node.name_or_text.end;
-    const end = node.attrEnd();
+    const end = node.attrEnd(source);
     var remaining: usize = 0;
     for (out_values) |v| {
         if (v == null) remaining += 1;
@@ -349,7 +349,7 @@ inline fn getAttrValueDestructive(doc: anytype, node: anytype, name: []const u8)
     const lookup_kind = classifyLookupName(name);
 
     var i: usize = node.name_or_text.end;
-    const end = node.attrEnd();
+    const end = node.attrEnd(source);
     if (i >= end) return null;
 
     while (i < end) {
@@ -413,7 +413,7 @@ inline fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const 
     const lookup_kind = classifyLookupName(name);
 
     var i: usize = node.name_or_text.end;
-    const end = node.attrEnd();
+    const end = node.attrEnd(source);
     if (i >= end) return null;
 
     while (i < end) {

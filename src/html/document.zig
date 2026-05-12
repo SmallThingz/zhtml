@@ -53,11 +53,6 @@ pub const RawNode = struct {
     /// Tag-name span for elements or text span for text nodes.
     name_or_text: Span,
 
-    /// End of the raw attribute byte span for element nodes.
-    /// Attribute bytes begin at `name_or_text.end`.
-    /// `0` marks non-element nodes (document root at index 0, or text).
-    attr_end: AttrEnd = .invalid_1,
-
     /// Last direct element child index.
     last_child: IndexInt,
     /// Previous element sibling index.
@@ -65,18 +60,9 @@ pub const RawNode = struct {
     /// Parent node index.
     parent: IndexInt,
 
-    /// Inclusive subtree tail index for fast descendant skipping.
+    /// Inclusive subtree tail index for elements and document root.
+    /// `0` marks text nodes because text nodes cannot have descendants.
     subtree_end: IndexInt,
-
-    /// It is not possible for attr end to be < 2; here is the reasoning.
-    /// `<x>` is the shortest possible tag that starts at very start of the data
-    ///  ^^!
-    ///  So the very first attr can only start at 2nd index and nothing lower
-    pub const AttrEnd = enum(IndexInt) {
-        text_node = 0,
-        invalid_1 = 1,
-        _,
-    };
 
     /// Returns whether `idx` designates the synthetic document root.
     pub inline fn isDocument(_: *const @This(), idx: IndexInt) bool {
@@ -85,17 +71,42 @@ pub const RawNode = struct {
 
     /// Returns whether this node is a text node.
     pub inline fn isText(self: *const @This(), idx: IndexInt) bool {
-        return idx != 0 and self.attr_end == .text_node;
+        return idx != 0 and self.subtree_end == 0;
     }
 
     /// Returns whether this node is an element node.
     pub inline fn isElement(self: *const @This(), idx: IndexInt) bool {
-        return idx != 0 and self.attr_end != .text_node;
+        return idx != 0 and self.subtree_end != 0;
     }
 
-    /// Returns the raw attribute span end as a host-size index.
-    pub inline fn attrEnd(self: *const @This()) usize {
-        return @intCast(@intFromEnum(self.attr_end));
+    /// Computes the raw attribute span end as a host-size index.
+    pub fn attrEnd(self: *const @This(), source: []const u8) usize {
+        var i: usize = @intCast(self.name_or_text.end);
+        while (i < source.len) : (i += 1) {
+            switch (source[i]) {
+                '>' => return i,
+                '\'', '"' => |q| {
+                    i += 1;
+                    i = std.mem.indexOfScalarPos(u8, source, i, q) orelse return source.len;
+                },
+                0 => {
+                    const quoted = i + 1 < source.len and source[i + 1] == 0;
+                    var value_end = i + @as(usize, if (quoted) 2 else 1);
+                    while (value_end < source.len) : (value_end += 1) {
+                        if (source[value_end] == 0) break;
+                        if (!quoted and source[value_end] == '>') return value_end;
+                    }
+                    if (value_end >= source.len) return source.len;
+
+                    const next = attr.nextAfterValue(source, value_end, source.len);
+                    if (next > i) {
+                        i = next - 1;
+                    }
+                },
+                else => {},
+            }
+        }
+        return source.len;
     }
 };
 
@@ -560,7 +571,7 @@ fn GetNode(comptime options: ParseOptions) type {
         fn writeAttrsHtml(doc: anytype, noalias node_raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
             const source: []const u8 = doc.source;
             var i: usize = @intCast(node_raw.name_or_text.end);
-            const end = node_raw.attrEnd();
+            const end = node_raw.attrEnd(source);
 
             while (i < end) {
                 while (i < end and tables.WhitespaceTable[source[i]]) : (i += 1) {}
@@ -1008,6 +1019,7 @@ test "document type excludes parser-only and shadow-source state" {
     try std.testing.expect(!@hasField(GetDocument(.{}), "owned_shadow_source"));
     try std.testing.expect(!@hasField(GetDocument(.{}), "mutable_source"));
     try std.testing.expect(!@hasField(RawNode, "kind"));
+    try std.testing.expect(!@hasField(RawNode, "attr_end"));
     try std.testing.expect(!@hasField(RawNode, "first_child"));
     try std.testing.expect(!@hasField(RawNode, "next_sibling"));
     try std.testing.expect(!@hasDecl(ParseOptions, "GetOpenElem"));
@@ -1201,7 +1213,7 @@ test "non-destructive attribute reads do not rewrite attribute bytes" {
     try std.testing.expectEqualStrings("a&b", value.value);
 
     const attr_start: usize = @intCast(node.raw().name_or_text.end);
-    const attr_end = node.raw().attrEnd();
+    const attr_end = node.raw().attrEnd(doc.source);
     try std.testing.expect(std.mem.indexOf(u8, doc.source[attr_start..attr_end], "&amp;") != null);
     try std.testing.expectEqualSlices(u8, before[0..], html[0..]);
 }
@@ -1569,7 +1581,7 @@ test "parse-time text whitespace trimming is on by default and query-time normal
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const text_node = doc.nodes[node.index + 1];
-    try std.testing.expect(text_node.attr_end == .text_node);
+    try std.testing.expect(text_node.isText(@intCast(node.index + 1)));
     try std.testing.expectEqualStrings("alpha  &amp;   beta  ", text_node.name_or_text.slice(doc.source));
 
     const escaped = try node.innerTextWithOptions(alloc, .{ .normalize_whitespace = false, .unescape = false });
@@ -1604,7 +1616,7 @@ test "parse-time attribute decoding is off by default and query-time lookup deco
 
     const node = doc.findFirstTag("div") orelse return error.TestUnexpectedResult;
     const attr_start: usize = node.raw().name_or_text.end;
-    const span = doc.source[attr_start..node.raw().attrEnd()];
+    const span = doc.source[attr_start..node.raw().attrEnd(doc.source)];
     try std.testing.expect(std.mem.indexOf(u8, span, "&amp;") != null);
 
     const value = (try node.getAttributeValue(alloc, "data-v")) orelse return error.TestUnexpectedResult;
@@ -1647,7 +1659,7 @@ test "innerTextOwned always returns allocated output and does not mutate source 
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const text_node_before = doc.nodes[node.index + 1];
-    try std.testing.expect(text_node_before.attr_end == .text_node);
+    try std.testing.expect(text_node_before.isText(@intCast(node.index + 1)));
     try std.testing.expectEqualStrings("a &amp; b", text_node_before.name_or_text.slice(doc.source));
 
     const owned = try node.innerTextOwnedWithOptions(alloc, .{});
@@ -1698,7 +1710,7 @@ test "inplace attr lazy parse updates state markers and supports selector-trigge
     try std.testing.expectEqualStrings("a&b", n.value);
 
     const attr_start: usize = node.raw().name_or_text.end;
-    const span = doc.source[attr_start..node.raw().attrEnd()];
+    const span = doc.source[attr_start..node.raw().attrEnd(doc.source)];
     const q_marker = [_]u8{ 'q', 0, 0 };
     const q_pos = std.mem.indexOf(u8, span, &q_marker) orelse return error.TestUnexpectedResult;
     try std.testing.expect(q_pos < span.len);
@@ -1726,7 +1738,7 @@ test "attribute matching short-circuits and does not parse later attrs on early 
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const attr_start: usize = node.raw().name_or_text.end;
-    const span = doc.source[attr_start..node.raw().attrEnd()];
+    const span = doc.source[attr_start..node.raw().attrEnd(doc.source)];
     const class_pos = std.mem.indexOf(u8, span, "class") orelse return error.TestUnexpectedResult;
     const marker_pos = class_pos + "class".len;
     try std.testing.expect(marker_pos < span.len);
