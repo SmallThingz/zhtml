@@ -19,14 +19,14 @@ See the [latest benchmark snapshot](./DOCUMENTATION.md#latest-benchmark-snapshot
 
 <!-- README_AUTO_SUMMARY:START -->
 
-Source: `bench/results/latest.json` (`quick` profile).
+Source: `bench/results/latest.json` (`stable` profile).
 
 ### Parse Throughput (Average Across Fixtures)
 
 ```text
-ours-compact │████████████████████│ 1721.69 MB/s (100.00%)
-ours-full    │███████████████████░│ 1671.59 MB/s (97.09%)
-lol-html     │███████████░░░░░░░░░│ 971.92 MB/s (56.45%)
+ours-compact │████████████████████│ 1696.49 MB/s (100.00%)
+ours-full    │███████████████████░│ 1640.61 MB/s (96.71%)
+lol-html     │███████████░░░░░░░░░│ 954.14 MB/s (56.24%)
 ```
 
 ### Conformance Snapshot
