@@ -92,7 +92,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             // Seed the synthetic document root so every parsed node has a stable
             // parent chain and the open-element stack always has a sentinel.
             self.nodes.appendAssumeCapacity(.{
-                .name_or_text = .{ .start = 0, .end = 0 },
+                .name_or_text = .{ .start = 0, .len = 0 },
                 .last_child = if (comptime opts.store_last_child) InvalidIndex else {},
                 .prev_sibling = if (comptime opts.store_prev_sibling) InvalidIndex else {},
                 .parent = InvalidIndex,
@@ -139,8 +139,8 @@ fn ParseState(comptime opts: ParseOptions) type {
                 const parent_idx = self.currentParent();
                 const last_idx = self.nodes.items.len - 1;
                 const last = &self.nodes.items[last_idx];
-                if (last.isText(@intCast(last_idx)) and last.parent == parent_idx and last.name_or_text.end == self.i) {
-                    last.name_or_text.end = @intCast(self.input.len);
+                if (last.isText(@intCast(last_idx)) and last.parent == parent_idx and last.name_or_text.end() == self.i) {
+                    last.name_or_text.setEnd(@intCast(self.input.len));
                 } else {
                     if ((comptime opts.drop_whitespace_text_nodes == .none) or !tables.WhitespaceTable[self.input[self.i]]) {
                         try self.addNode(.{ self.i, self.input.len }, false, .{});
@@ -183,8 +183,8 @@ fn ParseState(comptime opts: ParseOptions) type {
             const parent_idx = self.currentParent();
             const last = &self.nodes.items[self.nodes.items.len - 1];
             self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '<') orelse self.input.len;
-            if (last.isText(@intCast(self.nodes.items.len - 1)) and last.parent == parent_idx and last.name_or_text.end == start) { // Merge the node if the last node is text already
-                last.name_or_text.end = @intCast(self.i);
+            if (last.isText(@intCast(self.nodes.items.len - 1)) and last.parent == parent_idx and last.name_or_text.end() == start) { // Merge the node if the last node is text already
+                last.name_or_text.setEnd(@intCast(self.i));
             } else { // append new node if last node was not text
                 try self.addNode(.{ start, self.i }, false, .{});
             }
@@ -422,7 +422,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             try self.nodes.append(self.doc.allocator, .{
                 .name_or_text = .{
                     .start = @intCast(name_or_text[0]),
-                    .end = @intCast(name_or_text[1]),
+                    .len = @intCast(name_or_text[1] - name_or_text[0]),
                 },
                 .last_child = if (comptime opts.store_last_child) InvalidIndex else {},
                 .prev_sibling = if (comptime opts.store_prev_sibling) prev_element else {},
@@ -670,7 +670,7 @@ fn expectDocumentStructureValid(doc: anytype) !void {
         const is_text = node.isText(idx);
         const is_element = node.isElement(idx);
         const span_start: usize = @intCast(node.name_or_text.start);
-        const span_end: usize = @intCast(node.name_or_text.end);
+        const span_end: usize = @intCast(node.name_or_text.end());
 
         try testing.expect(span_start <= span_end);
         try testing.expect(span_end <= doc.source.len);
@@ -729,7 +729,7 @@ fn expectEquivalentStructures(a: *const TestDocument, b: *const NonDestructiveTe
 
     for (a.nodes, b.nodes) |lhs, rhs| {
         try testing.expectEqual(lhs.name_or_text.start, rhs.name_or_text.start);
-        try testing.expectEqual(lhs.name_or_text.end, rhs.name_or_text.end);
+        try testing.expectEqual(lhs.name_or_text.end(), rhs.name_or_text.end());
         if (comptime @FieldType(@TypeOf(lhs), "prev_sibling") != void) try testing.expectEqual(lhs.prev_sibling, rhs.prev_sibling);
         if (comptime @FieldType(@TypeOf(lhs), "last_child") != void) try testing.expectEqual(lhs.last_child, rhs.last_child);
         try testing.expectEqual(lhs.parent, rhs.parent);
@@ -978,7 +978,7 @@ test "u64 parse accepts sparse 8 GiB plaintext input" {
 
     const text = doc.nodeAt(2);
     try std.testing.expectEqual(@as(IndexInt, @intCast(tag.len)), text.raw().name_or_text.start);
-    try std.testing.expectEqual(@as(IndexInt, @intCast(len)), text.raw().name_or_text.end);
+    try std.testing.expectEqual(@as(IndexInt, @intCast(len - tag.len)), text.raw().name_or_text.len);
 }
 
 test "non-destructive parse supports file-backed memory maps without changing bytes" {

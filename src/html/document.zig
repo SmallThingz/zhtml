@@ -24,27 +24,33 @@ pub const InvalidIndex: IndexInt = common.InvalidIndex;
 pub const Span = struct {
     /// Inclusive start byte offset in the document source.
     start: IndexInt,
-    /// Exclusive end byte offset in the document source.
-    end: IndexInt,
+    /// Number of bytes in the span.
+    len: IndexInt,
 
-    /// Returns the span length in bytes.
-    pub fn len(self: @This()) IndexInt {
-        return self.end - self.start;
+    /// Returns the exclusive end byte offset in the document source.
+    pub fn end(self: @This()) IndexInt {
+        return self.start + self.len;
+    }
+
+    /// Updates span length from an exclusive end offset.
+    pub fn setEnd(self: *@This(), end_offset: IndexInt) void {
+        std.debug.assert(end_offset >= self.start);
+        self.len = end_offset - self.start;
     }
 
     /// Borrows immutable bytes referenced by this span.
     pub fn slice(self: @This(), source: []const u8) []const u8 {
-        return source[self.start..self.end];
+        return source[self.start..self.end()];
     }
 
     /// Borrows mutable bytes referenced by this span.
     pub fn sliceMut(self: @This(), source: []u8) []u8 {
-        return source[self.start..self.end];
+        return source[self.start..self.end()];
     }
 
     /// Formats this span for human-readable output.
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("Span{{start={}, end={}}}", .{ self.start, self.end });
+        try writer.print("Span{{start={}, len={}}}", .{ self.start, self.len });
     }
 };
 
@@ -132,6 +138,12 @@ fn OptionalIndex(comptime enabled: bool) type {
 /// Builds the backing node storage record for a parse option set.
 pub fn GetRawNode(comptime options: ParseOptions) type {
     return struct {
+        /// Parent node index.
+        parent: IndexInt,
+        /// Inclusive subtree tail index for elements and document root.
+        /// `0` marks text nodes because text nodes cannot have descendants.
+        subtree_end: IndexInt,
+
         /// Tag-name span for elements or text span for text nodes.
         name_or_text: Span,
 
@@ -139,12 +151,6 @@ pub fn GetRawNode(comptime options: ParseOptions) type {
         last_child: OptionalIndex(options.store_last_child),
         /// Previous element sibling index when `store_prev_sibling` is enabled.
         prev_sibling: OptionalIndex(options.store_prev_sibling),
-        /// Parent node index.
-        parent: IndexInt,
-
-        /// Inclusive subtree tail index for elements and document root.
-        /// `0` marks text nodes because text nodes cannot have descendants.
-        subtree_end: IndexInt,
 
         /// Returns whether `idx` designates the synthetic document root.
         pub inline fn isDocument(_: *const @This(), idx: IndexInt) bool {
@@ -349,10 +355,10 @@ fn GetNode(comptime options: ParseOptions) type {
 
             if (comptime opts.unescape) {
                 const new_len = entities.decodeInPlace(opts.normalize_whitespace, node.name_or_text.sliceMut(doc.source));
-                node.name_or_text.end = node.name_or_text.start + @as(IndexInt, @intCast(new_len));
+                node.name_or_text.len = @intCast(new_len);
             } else if (comptime opts.normalize_whitespace) {
                 const new_len = entities.normalizeWhitespaceInPlace(node.name_or_text.sliceMut(doc.source));
-                node.name_or_text.end = node.name_or_text.start + @as(IndexInt, @intCast(new_len));
+                node.name_or_text.len = @intCast(new_len);
             }
 
             return .{ .value = node.name_or_text.slice(self.doc.source) };
@@ -562,7 +568,7 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Writes serialized attributes from raw or destructively parsed attr bytes.
         fn writeAttrsHtml(doc: anytype, noalias node_raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
             const source: []const u8 = doc.source;
-            var i: usize = @intCast(node_raw.name_or_text.end);
+            var i: usize = @intCast(node_raw.name_or_text.end());
             const end = source.len;
 
             while (i < end) {
@@ -1230,7 +1236,7 @@ test "non-destructive attribute reads do not rewrite attribute bytes" {
     const value = (try node.getAttributeValue(arena.allocator(), "data-v")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a&b", value.value);
 
-    const attr_start: usize = @intCast(node.raw().name_or_text.end);
+    const attr_start: usize = @intCast(node.raw().name_or_text.end());
     const attr_end = std.mem.indexOfScalarPos(u8, doc.source, attr_start, '>') orelse doc.source.len;
     try std.testing.expect(std.mem.indexOf(u8, doc.source[attr_start..attr_end], "&amp;") != null);
     try std.testing.expectEqualSlices(u8, before[0..], html[0..]);
@@ -1633,7 +1639,7 @@ test "parse-time attribute decoding is off by default and query-time lookup deco
     try resetParsed(.{}, &doc, &html);
 
     const node = doc.findFirstTag("div") orelse return error.TestUnexpectedResult;
-    const attr_start: usize = node.raw().name_or_text.end;
+    const attr_start: usize = node.raw().name_or_text.end();
     const attr_end = std.mem.indexOfScalarPos(u8, doc.source, attr_start, '>') orelse doc.source.len;
     const span = doc.source[attr_start..attr_end];
     try std.testing.expect(std.mem.indexOf(u8, span, "&amp;") != null);
@@ -1728,7 +1734,7 @@ test "inplace attr lazy parse updates state markers and supports selector-trigge
     try std.testing.expectEqualStrings("&z", q.value);
     try std.testing.expectEqualStrings("a&b", n.value);
 
-    const attr_start: usize = node.raw().name_or_text.end;
+    const attr_start: usize = node.raw().name_or_text.end();
     const attr_end = std.mem.indexOfScalarPos(u8, doc.source, attr_start, '>') orelse doc.source.len;
     const span = doc.source[attr_start..attr_end];
     const q_marker = [_]u8{ 'q', 0, 0 };
@@ -1757,7 +1763,7 @@ test "attribute matching short-circuits and does not parse later attrs on early 
     try std.testing.expect((try runtimeFirst(&doc, alloc, "div[href^=https][class*=button]")) == null);
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
-    const attr_start: usize = node.raw().name_or_text.end;
+    const attr_start: usize = node.raw().name_or_text.end();
     const attr_end = std.mem.indexOfScalarPos(u8, doc.source, attr_start, '>') orelse doc.source.len;
     const span = doc.source[attr_start..attr_end];
     const class_pos = std.mem.indexOf(u8, span, "class") orelse return error.TestUnexpectedResult;
@@ -2489,10 +2495,10 @@ test "format document types" {
     defer alloc.free(opts_out);
     try std.testing.expectEqualStrings("ParseOptions{drop_whitespace_text_nodes=none, non_destructive=false, store_last_child=false, store_prev_sibling=false}", opts_out);
 
-    const span: Span = .{ .start = 2, .end = 5 };
+    const span: Span = .{ .start = 2, .len = 3 };
     const span_out = try std.fmt.allocPrint(alloc, "{f}", .{span});
     defer alloc.free(span_out);
-    try std.testing.expectEqualStrings("Span{start=2, end=5}", span_out);
+    try std.testing.expectEqualStrings("Span{start=2, len=3}", span_out);
 
     var doc = GetDocument(.{}).init(alloc);
     defer doc.deinit();
