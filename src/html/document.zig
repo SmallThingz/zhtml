@@ -682,13 +682,22 @@ fn firstElementChild(doc: anytype, parent_idx: IndexInt) IndexInt {
     const parent = &doc.nodes[parent_idx];
     if (parent.last_child == InvalidIndex) return InvalidIndex;
 
-    const end: usize = @intCast(parent.subtree_end);
-    var idx: usize = @as(usize, @intCast(parent_idx)) + 1;
-    while (idx <= end and idx < doc.nodes.len) : (idx += 1) {
-        const idx_int: IndexInt = @intCast(idx);
-        const node = &doc.nodes[idx];
-        if (node.parent == parent_idx and node.isElement(idx_int)) return idx_int;
+    const first_idx: usize = @as(usize, @intCast(parent_idx)) + 1;
+    const end: usize = @min(@as(usize, @intCast(parent.subtree_end)), doc.nodes.len - 1);
+    if (first_idx <= end) {
+        const first_int: IndexInt = @intCast(first_idx);
+        const first = &doc.nodes[first_idx];
+        if (first.parent == parent_idx and first.isElement(first_int)) return first_int;
     }
+
+    const second_idx = first_idx + 1;
+    if (second_idx <= end) {
+        const second_int: IndexInt = @intCast(second_idx);
+        const second = &doc.nodes[second_idx];
+        if (second.parent == parent_idx and second.isElement(second_int)) return second_int;
+    }
+
+    std.debug.assert(false);
     return InvalidIndex;
 }
 
