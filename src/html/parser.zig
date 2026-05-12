@@ -251,7 +251,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 if (self.input[self.i] == '>') {
                     defer self.i += 1;
                     break :blk self.i;
-                } else if (self.findTagEndRespectQuotes()) |v| {
+                } else if (self.findTagEndRespectAttrQuotes()) |v| {
                     break :blk v;
                 } else {
                     @branchHint(.cold);
@@ -476,12 +476,37 @@ fn ParseState(comptime opts: ParseOptions) type {
         fn skipBangNode(noalias self: *Self) void {
             self.i += 2;
             // Doctype-like nodes are skipped as opaque declarations.
-            if (self.findTagEndRespectQuotes()) |_| {} else {
+            if (self.findTagEndRespectAnyQuotes()) |_| {} else {
                 self.i = self.input.len;
             }
         }
 
-        inline fn findTagEndRespectQuotes(noalias self: *Self) ?usize {
+        inline fn findTagEndRespectAttrQuotes(noalias self: *Self) ?usize {
+            std.debug.assert(self.i <= self.input.len);
+            while (self.i < self.input.len) {
+                const j = std.mem.indexOfAnyPos(u8, self.input, self.i, ">=") orelse return null;
+                switch (self.input[j]) {
+                    '>' => {
+                        self.i = j + 1;
+                        return j;
+                    },
+                    '=' => {
+                        if (j + 1 < self.input.len and (self.input[j + 1] == '\'' or self.input[j + 1] == '"')) {
+                            const q = self.input[j + 1];
+                            self.i = j + 2;
+                            const end_quote = std.mem.indexOfScalarPos(u8, self.input, self.i, q) orelse return null;
+                            self.i = end_quote + 1;
+                        } else {
+                            self.i = j + 1;
+                        }
+                    },
+                    else => unreachable,
+                }
+            }
+            return null;
+        }
+
+        inline fn findTagEndRespectAnyQuotes(noalias self: *Self) ?usize {
             std.debug.assert(self.i <= self.input.len);
             while (self.i < self.input.len) : (self.i += 1) {
                 switch (self.input[self.i]) {
@@ -574,7 +599,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                             continue;
                         }
 
-                        const tag_end = self.findTagEndRespectQuotes() orelse return null;
+                        const tag_end = self.findTagEndRespectAttrQuotes() orelse return null;
                         if (name_end - name_start == 3 and isSvgTag(self.input[name_start..name_end]) and self.input[tag_end - 1] != '/') {
                             depth += 1;
                         }
@@ -630,7 +655,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                     continue;
                 }
 
-                const tag_end = self.findTagEndRespectQuotes() orelse self.input.len;
+                const tag_end = self.findTagEndRespectAttrQuotes() orelse self.input.len;
                 if (tag_end >= self.input.len or self.input[tag_end] != '>') {
                     j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
                     continue;
