@@ -168,7 +168,28 @@ pub fn parentElement(doc: anytype, node_index: IndexInt) ?IndexInt {
 
 /// Previous element sibling index for `node_index`.
 pub fn prevElementSibling(doc: anytype, node_index: IndexInt) ?IndexInt {
-    const prev = doc.nodes[node_index].prev_sibling;
+    const RawNodeType = @TypeOf(doc.nodes[node_index]);
+    if (comptime @FieldType(RawNodeType, "prev_sibling") != void) {
+        const prev = doc.nodes[node_index].prev_sibling;
+        return if (prev == InvalidIndex) null else prev;
+    }
+
+    const parent = doc.nodes[node_index].parent;
+    if (parent == InvalidIndex) return null;
+
+    const parent_end: usize = @intCast(doc.nodes[parent].subtree_end);
+    var idx: usize = @as(usize, @intCast(parent)) + 1;
+    var prev: IndexInt = InvalidIndex;
+    while (idx < node_index and idx <= parent_end and idx < doc.nodes.len) {
+        const idx_int: IndexInt = @intCast(idx);
+        const node = &doc.nodes[idx];
+        if (node.parent == parent and node.isElement(idx_int)) {
+            prev = idx_int;
+            idx = @as(usize, @intCast(node.subtree_end)) + 1;
+        } else {
+            idx += 1;
+        }
+    }
     return if (prev == InvalidIndex) null else prev;
 }
 
@@ -178,11 +199,18 @@ pub fn nextElementSibling(doc: anytype, node_index: IndexInt) ?IndexInt {
     if (parent == InvalidIndex) return null;
 
     const parent_end: usize = @intCast(doc.nodes[parent].subtree_end);
-    var idx: usize = @as(usize, @intCast(doc.nodes[node_index].subtree_end)) + 1;
-    while (idx <= parent_end and idx < doc.nodes.len) : (idx += 1) {
-        const idx_int: IndexInt = @intCast(idx);
-        const node = &doc.nodes[idx];
-        if (node.parent == parent and node.isElement(idx_int)) return idx_int;
+    const first_idx: usize = @as(usize, @intCast(doc.nodes[node_index].subtree_end)) + 1;
+    if (first_idx <= parent_end and first_idx < doc.nodes.len) {
+        const first_int: IndexInt = @intCast(first_idx);
+        const first = &doc.nodes[first_idx];
+        if (first.parent == parent and first.isElement(first_int)) return first_int;
+    }
+
+    const second_idx = first_idx + 1;
+    if (second_idx <= parent_end and second_idx < doc.nodes.len) {
+        const second_int: IndexInt = @intCast(second_idx);
+        const second = &doc.nodes[second_idx];
+        if (second.parent == parent and second.isElement(second_int)) return second_int;
     }
     return null;
 }

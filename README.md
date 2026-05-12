@@ -19,13 +19,14 @@ See the [latest benchmark snapshot](./DOCUMENTATION.md#latest-benchmark-snapshot
 
 <!-- README_AUTO_SUMMARY:START -->
 
-Source: `bench/results/latest.json` (`stable` profile).
+Source: `bench/results/latest.json` (`quick` profile).
 
 ### Parse Throughput (Average Across Fixtures)
 
 ```text
-ours     │████████████████████│ 1690.76 MB/s (100.00%)
-lol-html │████████████░░░░░░░░│ 975.00 MB/s (57.67%)
+ours-compact │████████████████████│ 1721.69 MB/s (100.00%)
+ours-full    │███████████████████░│ 1671.59 MB/s (97.09%)
+lol-html     │███████████░░░░░░░░░│ 971.92 MB/s (56.45%)
 ```
 
 ### Conformance Snapshot
@@ -67,6 +68,8 @@ test "basic parse + query" {
 ```
 
 Parsing goes through `options.parse(...)`. Use `const options: html.ParseOptions = .{ .non_destructive = true };` when the caller bytes must remain unchanged, including file-backed memory maps. This mode reads the original source directly and does not make a full-source copy.
+
+Raw nodes are compact by default. `store_last_child` enables O(1) `children().last()`, while `store_prev_sibling` enables O(1) previous-sibling traversal instead of fallback scans.
 
 ## ⚙️ Build Configuration
 

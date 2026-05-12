@@ -6,7 +6,6 @@ const document = @import("document.zig");
 const ast = @import("../selector/ast.zig");
 
 const ParseOptions = document.ParseOptions;
-const RawNode = document.RawNode;
 
 const InvalidIndex: IndexInt = common.InvalidIndex;
 const IndexInt = common.IndexInt;
@@ -23,6 +22,7 @@ pub fn parse(comptime opts: ParseOptions, allocator: std.mem.Allocator, input: o
     if (input.len == 0) return error.InvalidInput;
 
     const Doc = opts.Document();
+    const RawNode = opts.RawNode();
     var doc = Doc.init(allocator);
     errdefer doc.deinit();
     doc.source = input;
@@ -56,6 +56,7 @@ fn ParseState(comptime opts: ParseOptions) type {
         parse_stack: std.ArrayListUnmanaged(OpenElem) = .empty,
 
         const Self = @This();
+        const RawNode = opts.RawNode();
         const OpenElem = struct {
             /// First-8-bytes lowercase key for the open tag name.
             tag_key: u64 = 0,
@@ -63,6 +64,8 @@ fn ParseState(comptime opts: ParseOptions) type {
             idx: IndexInt,
             /// Original tag-name length for close matching and optional-close logic.
             tag_len: u16 = 0,
+            /// Last direct element child seen while this element is open.
+            last_child: IndexInt = InvalidIndex,
         };
 
         /// Reserve capacities + add initial values to containers
@@ -90,8 +93,8 @@ fn ParseState(comptime opts: ParseOptions) type {
             // parent chain and the open-element stack always has a sentinel.
             self.nodes.appendAssumeCapacity(.{
                 .name_or_text = .{ .start = 0, .end = 0 },
-                .last_child = InvalidIndex,
-                .prev_sibling = InvalidIndex,
+                .last_child = if (comptime opts.store_last_child) InvalidIndex else {},
+                .prev_sibling = if (comptime opts.store_prev_sibling) InvalidIndex else {},
                 .parent = InvalidIndex,
                 .subtree_end = 0,
             });
@@ -99,6 +102,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 .idx = 0,
                 .tag_key = 0,
                 .tag_len = 0,
+                .last_child = InvalidIndex,
             });
         }
 
@@ -310,7 +314,12 @@ fn ParseState(comptime opts: ParseOptions) type {
 
             // Non-void, non-raw elements stay on the open stack until an
             // explicit close, an optional-close rule, or EOF pops them.
-            try self.parse_stack.append(self.doc.allocator, .{ .idx = @intCast(node_idx), .tag_key = tag_name_key, .tag_len = @intCast(tag_name.len) });
+            try self.parse_stack.append(self.doc.allocator, .{
+                .idx = @intCast(node_idx),
+                .tag_key = tag_name_key,
+                .tag_len = @intCast(tag_name.len),
+                .last_child = InvalidIndex,
+            });
         }
 
         inline fn parseClosingTag(noalias self: *Self) void {
@@ -403,20 +412,26 @@ fn ParseState(comptime opts: ParseOptions) type {
             };
             const parent_idx: IndexInt = @intCast(if (@hasField(Overrides, "parent")) overrides.parent else self.currentParent());
             const idx: IndexInt = @intCast(self.nodes.items.len);
-            const prev_element = if (is_element) self.nodes.items[parent_idx].last_child else InvalidIndex;
+            const parent_stack_idx = self.parse_stack.items.len - 1;
+            var prev_element = InvalidIndex;
+            if (is_element) {
+                std.debug.assert(parent_idx == self.currentParent());
+                prev_element = self.parse_stack.items[parent_stack_idx].last_child;
+            }
 
             try self.nodes.append(self.doc.allocator, .{
                 .name_or_text = .{
                     .start = @intCast(name_or_text[0]),
                     .end = @intCast(name_or_text[1]),
                 },
-                .last_child = InvalidIndex,
-                .prev_sibling = prev_element,
+                .last_child = if (comptime opts.store_last_child) InvalidIndex else {},
+                .prev_sibling = if (comptime opts.store_prev_sibling) prev_element else {},
                 .parent = parent_idx,
                 .subtree_end = if (is_element) idx else 0,
             });
             if (is_element) {
-                self.nodes.items[parent_idx].last_child = idx;
+                self.parse_stack.items[parent_stack_idx].last_child = idx;
+                if (comptime opts.store_last_child) self.nodes.items[parent_idx].last_child = idx;
             }
         }
 
@@ -681,24 +696,29 @@ fn expectDocumentStructureValid(doc: anytype) !void {
             try testing.expect(nodes[parent_idx].subtree_end >= idx);
         }
 
-        if (node.prev_sibling != InvalidIndex) {
-            const prev_idx: usize = @intCast(node.prev_sibling);
-            try testing.expect(prev_idx < i);
-            try testing.expectEqual(node.parent, nodes[prev_idx].parent);
-            try testing.expect(!node.isText(idx));
-            try testing.expect(!nodes[prev_idx].isText(node.prev_sibling));
-            try testing.expect(@as(usize, @intCast(nodes[prev_idx].subtree_end)) < i);
+        const RawNode = @TypeOf(node);
+        if (comptime @FieldType(RawNode, "prev_sibling") != void) {
+            if (node.prev_sibling != InvalidIndex) {
+                const prev_idx: usize = @intCast(node.prev_sibling);
+                try testing.expect(prev_idx < i);
+                try testing.expectEqual(node.parent, nodes[prev_idx].parent);
+                try testing.expect(!node.isText(idx));
+                try testing.expect(!nodes[prev_idx].isText(node.prev_sibling));
+                try testing.expect(@as(usize, @intCast(nodes[prev_idx].subtree_end)) < i);
+            }
         }
 
-        if (node.last_child != InvalidIndex) {
-            const last_child_idx: usize = @intCast(node.last_child);
-            try testing.expect(!is_text);
-            try testing.expect(last_child_idx > i);
-            try testing.expect(last_child_idx <= @as(usize, @intCast(node.subtree_end)));
-            try testing.expectEqual(idx, nodes[last_child_idx].parent);
-            try testing.expect(!nodes[last_child_idx].isText(node.last_child));
-        } else if (is_text) {
-            try testing.expectEqual(InvalidIndex, node.last_child);
+        if (comptime @FieldType(RawNode, "last_child") != void) {
+            if (node.last_child != InvalidIndex) {
+                const last_child_idx: usize = @intCast(node.last_child);
+                try testing.expect(!is_text);
+                try testing.expect(last_child_idx > i);
+                try testing.expect(last_child_idx <= @as(usize, @intCast(node.subtree_end)));
+                try testing.expectEqual(idx, nodes[last_child_idx].parent);
+                try testing.expect(!nodes[last_child_idx].isText(node.last_child));
+            } else if (is_text) {
+                try testing.expectEqual(InvalidIndex, node.last_child);
+            }
         }
     }
 }
@@ -710,8 +730,8 @@ fn expectEquivalentStructures(a: *const TestDocument, b: *const NonDestructiveTe
     for (a.nodes, b.nodes) |lhs, rhs| {
         try testing.expectEqual(lhs.name_or_text.start, rhs.name_or_text.start);
         try testing.expectEqual(lhs.name_or_text.end, rhs.name_or_text.end);
-        try testing.expectEqual(lhs.last_child, rhs.last_child);
-        try testing.expectEqual(lhs.prev_sibling, rhs.prev_sibling);
+        if (comptime @FieldType(@TypeOf(lhs), "prev_sibling") != void) try testing.expectEqual(lhs.prev_sibling, rhs.prev_sibling);
+        if (comptime @FieldType(@TypeOf(lhs), "last_child") != void) try testing.expectEqual(lhs.last_child, rhs.last_child);
         try testing.expectEqual(lhs.parent, rhs.parent);
         try testing.expectEqual(lhs.subtree_end, rhs.subtree_end);
     }

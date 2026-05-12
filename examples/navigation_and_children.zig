@@ -11,16 +11,15 @@ pub fn run() !void {
     const main = mains.next() orelse return error.TestUnexpectedResult;
     var first_child = main.children();
     const first = first_child.next() orelse return error.TestUnexpectedResult;
-    const last = main.children().last() orelse return error.TestUnexpectedResult;
 
     try std.testing.expectEqualStrings("title", (try first.getAttributeValue(std.testing.allocator, "id")).?.value);
-    try std.testing.expectEqualStrings("body", (try last.getAttributeValue(std.testing.allocator, "id")).?.value);
 
     var children = main.children();
     const child_nodes = try children.collect(std.testing.allocator);
     defer std.testing.allocator.free(child_nodes);
     try std.testing.expectEqual(@as(usize, 3), child_nodes.len);
     try std.testing.expectEqualStrings("title", (try child_nodes[0].getAttributeValue(std.testing.allocator, "id")).?.value);
+    try std.testing.expectEqualStrings("body", (try child_nodes[2].getAttributeValue(std.testing.allocator, "id")).?.value);
 }
 
 test "navigation and children iterator" {

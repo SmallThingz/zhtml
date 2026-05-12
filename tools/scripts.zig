@@ -25,14 +25,16 @@ const ParserCapability = struct {
 };
 
 const parser_capabilities = [_]ParserCapability{
-    .{ .parser = "ours", .capability = "dom" },
+    .{ .parser = "ours-compact", .capability = "dom" },
+    .{ .parser = "ours-full", .capability = "dom" },
     .{ .parser = "strlen", .capability = "scan" },
     .{ .parser = "lol-html", .capability = "streaming" },
     .{ .parser = "lexbor", .capability = "dom" },
 };
 
 const default_parse_parsers = [_][]const u8{
-    "ours",
+    "ours-compact",
+    "ours-full",
     "strlen",
     "lol-html",
 };
@@ -373,11 +375,20 @@ const ExternalSuiteReport = struct {
 
 fn runnerCmdParse(alloc: std.mem.Allocator, parser_name: []const u8, fixture: []const u8, iterations: usize) ![]const []const u8 {
     const iter_s = try std.fmt.allocPrint(alloc, "{d}", .{iterations});
-    if (std.mem.eql(u8, parser_name, "ours")) {
+    if (std.mem.eql(u8, parser_name, "ours-compact") or std.mem.eql(u8, parser_name, "ours")) {
         const argv = try alloc.alloc([]const u8, 5);
         argv[0] = "zig-out/bin/html-bench";
         argv[1] = "parse";
         argv[2] = "fastest";
+        argv[3] = fixture;
+        argv[4] = iter_s;
+        return argv;
+    }
+    if (std.mem.eql(u8, parser_name, "ours-full")) {
+        const argv = try alloc.alloc([]const u8, 5);
+        argv[0] = "zig-out/bin/html-bench";
+        argv[1] = "parse";
+        argv[2] = "full";
         argv[3] = fixture;
         argv[4] = iter_s;
         return argv;
@@ -1140,7 +1151,7 @@ fn evaluateGateRows(alloc: std.mem.Allocator, profile: Profile, parse_results: [
     var rows = std.ArrayList(GateRow).empty;
     errdefer rows.deinit(alloc);
     for (profile.fixtures) |fx| {
-        const ours = findParseThroughput(parse_results, "ours", fx.name) orelse continue;
+        const ours = findParseThroughput(parse_results, "ours-compact", fx.name) orelse continue;
         const lol = findParseThroughput(parse_results, "lol-html", fx.name) orelse continue;
         try rows.append(alloc, .{
             .fixture = fx.name,
@@ -1171,7 +1182,7 @@ fn rerunFailedGateRows(io: std.Io, alloc: std.mem.Allocator, profile: Profile, g
 
         std.debug.print("re-running flaky gate fixture {s} at {d} iters\n", .{ row.fixture, iters });
 
-        const ours = try benchParseOne(io, alloc, "ours", row.fixture, iters);
+        const ours = try benchParseOne(io, alloc, "ours-compact", row.fixture, iters);
         defer alloc.free(ours.samples_ns);
         const lol = try benchParseOne(io, alloc, "lol-html", row.fixture, iters);
         defer alloc.free(lol.samples_ns);

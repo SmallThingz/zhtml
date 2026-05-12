@@ -104,7 +104,8 @@ test "element navigation skips text nodes for sibling/child helpers" {
     const next = first.nextSibling() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("b1", (try next.getAttributeValue(std.testing.allocator, "id")).?.value);
 
-    const last = root.children().last() orelse return error.TestUnexpectedResult;
+    _ = root_children.next() orelse return error.TestUnexpectedResult;
+    const last = root_children.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("i1", (try last.getAttributeValue(std.testing.allocator, "id")).?.value);
 
     const prev = last.prevSibling() orelse return error.TestUnexpectedResult;

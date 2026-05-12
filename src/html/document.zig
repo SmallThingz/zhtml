@@ -48,38 +48,6 @@ pub const Span = struct {
     }
 };
 
-/// Backing node storage record for parsed DOM state.
-pub const RawNode = struct {
-    /// Tag-name span for elements or text span for text nodes.
-    name_or_text: Span,
-
-    /// Last direct element child index.
-    last_child: IndexInt,
-    /// Previous element sibling index.
-    prev_sibling: IndexInt,
-    /// Parent node index.
-    parent: IndexInt,
-
-    /// Inclusive subtree tail index for elements and document root.
-    /// `0` marks text nodes because text nodes cannot have descendants.
-    subtree_end: IndexInt,
-
-    /// Returns whether `idx` designates the synthetic document root.
-    pub inline fn isDocument(_: *const @This(), idx: IndexInt) bool {
-        return idx == 0;
-    }
-
-    /// Returns whether this node is a text node.
-    pub inline fn isText(self: *const @This(), idx: IndexInt) bool {
-        return idx != 0 and self.subtree_end == 0;
-    }
-
-    /// Returns whether this node is an element node.
-    pub inline fn isElement(self: *const @This(), idx: IndexInt) bool {
-        return idx != 0 and self.subtree_end != 0;
-    }
-};
-
 /// Compile-time parser options and type factory for generated public API types.
 pub const ParseOptions = struct {
     /// Parse-time whitespace text handling.
@@ -99,6 +67,11 @@ pub const ParseOptions = struct {
     /// keeping lazy attr/text decoding out of the input buffer.
     /// This is off by default so the destructive hot path stays unchanged.
     non_destructive: bool = false,
+    /// Persist direct last-child links for O(1) `children().last()`.
+    /// Off by default because first child and next sibling are already bounded.
+    store_last_child: bool = false,
+    /// Persist previous-sibling links for O(1) `prevSibling()` and sibling selectors.
+    store_prev_sibling: bool = false,
 
     /// Returns the accepted parse input slice type for this option set.
     pub fn Input(options: @This()) type {
@@ -135,19 +108,69 @@ pub const ParseOptions = struct {
         return GetDocument(options);
     }
 
+    /// Returns the raw node storage type for this option set.
+    pub fn RawNode(options: @This()) type {
+        return GetRawNode(options);
+    }
+
     /// Formats parse options for human-readable output.
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("ParseOptions{{drop_whitespace_text_nodes={s}, non_destructive={}}}", .{
+        try writer.print("ParseOptions{{drop_whitespace_text_nodes={s}, non_destructive={}, store_last_child={}, store_prev_sibling={}}}", .{
             @tagName(self.drop_whitespace_text_nodes),
             self.non_destructive,
+            self.store_last_child,
+            self.store_prev_sibling,
         });
     }
 };
+
+/// Returns an `IndexInt` field when enabled, otherwise a zero-sized field.
+fn OptionalIndex(comptime enabled: bool) type {
+    return if (enabled) IndexInt else void;
+}
+
+/// Builds the backing node storage record for a parse option set.
+pub fn GetRawNode(comptime options: ParseOptions) type {
+    return struct {
+        /// Tag-name span for elements or text span for text nodes.
+        name_or_text: Span,
+
+        /// Last direct element child index when `store_last_child` is enabled.
+        last_child: OptionalIndex(options.store_last_child),
+        /// Previous element sibling index when `store_prev_sibling` is enabled.
+        prev_sibling: OptionalIndex(options.store_prev_sibling),
+        /// Parent node index.
+        parent: IndexInt,
+
+        /// Inclusive subtree tail index for elements and document root.
+        /// `0` marks text nodes because text nodes cannot have descendants.
+        subtree_end: IndexInt,
+
+        /// Returns whether `idx` designates the synthetic document root.
+        pub inline fn isDocument(_: *const @This(), idx: IndexInt) bool {
+            return idx == 0;
+        }
+
+        /// Returns whether this node is a text node.
+        pub inline fn isText(self: *const @This(), idx: IndexInt) bool {
+            return idx != 0 and self.subtree_end == 0;
+        }
+
+        /// Returns whether this node is an element node.
+        pub inline fn isElement(self: *const @This(), idx: IndexInt) bool {
+            return idx != 0 and self.subtree_end != 0;
+        }
+    };
+}
+
+/// Default raw node layout used by type-level tests and external inspection.
+pub const RawNode = GetRawNode(.{});
 
 /// Builds the concrete node wrapper type for a parse option set.
 fn GetNode(comptime options: ParseOptions) type {
     return struct {
         //! Public node wrapper that carries document pointer + node index.
+        const RawNodeType = options.RawNode();
         const DocType = options.Document();
         const ChildrenIterType = options.ChildrenIter();
         const DebugQueryResultType = options.QueryDebugResult();
@@ -247,7 +270,7 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         /// Returns the underlying raw node record.
-        pub fn raw(self: @This()) *const RawNode {
+        pub fn raw(self: @This()) *const RawNodeType {
             self.assertValidNode();
             return &self.doc.nodes[self.index];
         }
@@ -415,9 +438,8 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Returns previous element sibling.
         pub fn prevSibling(self: @This()) ?@This() {
             self.assertElement();
-            const node_raw = &self.doc.nodes[self.index];
-            if (node_raw.prev_sibling == InvalidIndex) return null;
-            return .{ .doc = self.doc, .index = node_raw.prev_sibling };
+            if (common.prevElementSibling(self.doc, self.index)) |prev| return .{ .doc = self.doc, .index = prev };
+            return null;
         }
 
         /// Returns parent element node.
@@ -680,7 +702,12 @@ fn GetNode(comptime options: ParseOptions) type {
 /// Computes the first direct element child from preorder storage.
 fn firstElementChild(doc: anytype, parent_idx: IndexInt) IndexInt {
     const parent = &doc.nodes[parent_idx];
-    if (parent.last_child == InvalidIndex) return InvalidIndex;
+    const RawNodeType = @TypeOf(parent.*);
+    if (comptime @FieldType(RawNodeType, "last_child") != void) {
+        if (parent.last_child == InvalidIndex) return InvalidIndex;
+    } else if (parent.subtree_end == parent_idx) {
+        return InvalidIndex;
+    }
 
     const first_idx: usize = @as(usize, @intCast(parent_idx)) + 1;
     const end: usize = @min(@as(usize, @intCast(parent.subtree_end)), doc.nodes.len - 1);
@@ -697,7 +724,6 @@ fn firstElementChild(doc: anytype, parent_idx: IndexInt) IndexInt {
         if (second.parent == parent_idx and second.isElement(second_int)) return second_int;
     }
 
-    std.debug.assert(false);
     return InvalidIndex;
 }
 
@@ -805,8 +831,10 @@ fn GetChildrenIter(comptime options: ParseOptions) type {
 
         /// Returns last remaining wrapped child node without consuming it.
         pub fn last(self: @This()) ?NodeTypeWrapper {
-            if (self.next_idx == InvalidIndex) return null;
-            if (self.parent_idx == InvalidIndex) return null;
+            if (comptime !options.store_last_child) {
+                @compileError("children().last() requires .store_last_child = true");
+            }
+            if (self.next_idx == InvalidIndex or self.parent_idx == InvalidIndex) return null;
             const last_child = self.doc.nodes[self.parent_idx].last_child;
             if (last_child == InvalidIndex) return null;
             return .{ .doc = self.doc, .index = last_child };
@@ -845,6 +873,7 @@ fn GetChildrenIter(comptime options: ParseOptions) type {
 fn GetDocument(comptime options: ParseOptions) type {
     return struct {
         //! Parsed document owner and query entrypoint container.
+        const RawNodeType = options.RawNode();
         const DebugQueryResultType = options.QueryDebugResult();
         const ChildrenIterType = options.ChildrenIter();
         const NodeTypeWrapper = options.Node();
@@ -856,7 +885,7 @@ fn GetDocument(comptime options: ParseOptions) type {
         source: options.Input(),
 
         /// Parsed node storage.
-        nodes: []RawNode = &[_]RawNode{},
+        nodes: []RawNodeType = &[_]RawNodeType{},
 
         /// Initializes an empty document using `allocator` for internal storage.
         pub fn init(allocator: std.mem.Allocator) @This() {
@@ -870,7 +899,7 @@ fn GetDocument(comptime options: ParseOptions) type {
         pub fn deinit(noalias self: *@This()) void {
             if (self.nodes.len == 0) return;
             self.allocator.free(self.nodes);
-            self.nodes = &[_]RawNode{};
+            self.nodes = &[_]RawNodeType{};
         }
 
         /// Clears parsed state and releases parsed node storage.
@@ -1002,6 +1031,16 @@ test "document type excludes parser-only and shadow-source state" {
     try std.testing.expect(!@hasField(RawNode, "first_child"));
     try std.testing.expect(!@hasField(RawNode, "next_sibling"));
     try std.testing.expect(!@hasDecl(ParseOptions, "GetOpenElem"));
+}
+
+test "raw node optional metadata follows parse options" {
+    const CompactRaw = GetRawNode(.{ .store_last_child = false, .store_prev_sibling = false });
+    const FullRaw = GetRawNode(.{ .store_last_child = true, .store_prev_sibling = true });
+
+    try std.testing.expect(@FieldType(CompactRaw, "last_child") == void);
+    try std.testing.expect(@FieldType(CompactRaw, "prev_sibling") == void);
+    try std.testing.expect(@FieldType(FullRaw, "last_child") == IndexInt);
+    try std.testing.expect(@FieldType(FullRaw, "prev_sibling") == IndexInt);
 }
 
 test "document source type follows parse mode" {
@@ -2085,7 +2124,7 @@ test "children() collect respects iterator progress" {
     try std.testing.expectEqualStrings("c", (try rest[1].getAttributeValue(std.testing.allocator, "id")).?.value);
 }
 
-test "children() iterator next and last use element links across text nodes" {
+test "children() iterator next uses element links across text nodes" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{ .drop_whitespace_text_nodes = .none }).init(alloc);
     defer doc.deinit();
@@ -2095,22 +2134,51 @@ test "children() iterator next and last use element links across text nodes" {
 
     const root = firstQuery(doc.query("div#root")) orelse return error.TestUnexpectedResult;
     var kids = root.children();
-    const last = kids.last() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("c", (try last.getAttributeValue(alloc, "id")).?.value);
 
     const a = kids.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a", (try a.getAttributeValue(alloc, "id")).?.value);
 
     const b = kids.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("b", (try b.getAttributeValue(alloc, "id")).?.value);
-    try std.testing.expectEqual(a.index, doc.nodes[b.index].prev_sibling);
+    try std.testing.expectEqual(a.index, (b.prevSibling() orelse return error.TestUnexpectedResult).index);
 
     const rest = try kids.collect(alloc);
     defer alloc.free(rest);
     try std.testing.expectEqual(@as(usize, 1), rest.len);
     try std.testing.expectEqualStrings("c", (try rest[0].getAttributeValue(alloc, "id")).?.value);
-    try std.testing.expectEqual(rest[0].index, doc.nodes[root.index].last_child);
-    try std.testing.expect(kids.last() == null);
+}
+
+test "optional last_child enables children last without changing iteration" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{ .store_last_child = true }).init(alloc);
+    defer doc.deinit();
+
+    var html = "<div id='root'><span id='a'></span> text <span id='b'></span><em id='c'></em></div>".*;
+    try resetParsed(.{ .store_last_child = true }, &doc, &html);
+
+    const root = firstQuery(doc.query("div#root")) orelse return error.TestUnexpectedResult;
+    const last = root.children().last() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("c", (try last.getAttributeValue(alloc, "id")).?.value);
+    try std.testing.expectEqual(last.index, doc.nodes[root.index].last_child);
+}
+
+test "disabled prev_sibling keeps navigation and sibling selectors correct" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{ .store_prev_sibling = false }).init(alloc);
+    defer doc.deinit();
+
+    var html = "<div id='root'><span id='a'></span> text <span id='b'></span><em id='c'></em></div>".*;
+    try resetParsed(.{ .store_prev_sibling = false }, &doc, &html);
+
+    const b = firstQuery(doc.query("span#b")) orelse return error.TestUnexpectedResult;
+    const a = b.prevSibling() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a", (try a.getAttributeValue(alloc, "id")).?.value);
+
+    const adjacent = firstQuery(doc.query("span#b + em")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("c", (try adjacent.getAttributeValue(alloc, "id")).?.value);
+
+    const nth = firstQuery(doc.query("em:nth-child(3)")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("c", (try nth.getAttributeValue(alloc, "id")).?.value);
 }
 
 test "unquoted attribute values preserve slash characters" {
@@ -2419,7 +2487,7 @@ test "format document types" {
     const opts: ParseOptions = .{ .drop_whitespace_text_nodes = .none };
     const opts_out = try std.fmt.allocPrint(alloc, "{f}", .{opts});
     defer alloc.free(opts_out);
-    try std.testing.expectEqualStrings("ParseOptions{drop_whitespace_text_nodes=none, non_destructive=false}", opts_out);
+    try std.testing.expectEqualStrings("ParseOptions{drop_whitespace_text_nodes=none, non_destructive=false, store_last_child=false, store_prev_sibling=false}", opts_out);
 
     const span: Span = .{ .start = 2, .end = 5 };
     const span_out = try std.fmt.allocPrint(alloc, "{f}", .{span});

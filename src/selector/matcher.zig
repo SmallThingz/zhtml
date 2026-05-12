@@ -451,8 +451,8 @@ pub fn matchesPseudo(doc: anytype, node_index: IndexInt, pseudo: ast.Pseudo) boo
         .nth_child => blk: {
             _ = parentElement(doc, node_index) orelse break :blk false;
             var position: usize = 1;
-            var prev = doc.nodes[node_index].prev_sibling;
-            while (prev != InvalidIndex) : (prev = doc.nodes[prev].prev_sibling) {
+            var prev = prevElementSibling(doc, node_index);
+            while (prev) |idx| : (prev = prevElementSibling(doc, idx)) {
                 position += 1;
             }
             break :blk pseudo.nth.matches(position);

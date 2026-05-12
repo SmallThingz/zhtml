@@ -81,6 +81,14 @@ pub fn runParseFile(io: std.Io, path: []const u8, iterations: usize, mode: Parse
                     var doc = try options.parse(iter_alloc, input);
                     defer doc.deinit();
                 },
+                .full => {
+                    const options: root.ParseOptions = .{
+                        .store_last_child = true,
+                        .store_prev_sibling = true,
+                    };
+                    var doc = try options.parse(iter_alloc, input);
+                    defer doc.deinit();
+                },
             }
         }
         _ = parse_arena.reset(.retain_capacity);
@@ -147,6 +155,21 @@ pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterati
             }
             break :blk elapsedNs(start, nowNs(io));
         },
+        .full => blk: {
+            const options: root.ParseOptions = .{
+                .store_last_child = true,
+                .store_prev_sibling = true,
+            };
+            var doc = try options.parse(alloc, working);
+            defer doc.deinit();
+
+            const start = nowNs(io);
+            var i: usize = 0;
+            while (i < iterations) : (i += 1) {
+                _ = firstQuery(doc.queryRuntime(sel));
+            }
+            break :blk elapsedNs(start, nowNs(io));
+        },
     };
 }
 
@@ -180,6 +203,21 @@ pub fn runQueryCached(io: std.Io, path: []const u8, selector: []const u8, iterat
         },
         .fastest => blk: {
             const options: root.ParseOptions = .{};
+            var doc = try options.parse(alloc, working);
+            defer doc.deinit();
+
+            const start = nowNs(io);
+            var i: usize = 0;
+            while (i < iterations) : (i += 1) {
+                _ = firstQuery(doc.queryRuntime(sel));
+            }
+            break :blk elapsedNs(start, nowNs(io));
+        },
+        .full => blk: {
+            const options: root.ParseOptions = .{
+                .store_last_child = true,
+                .store_prev_sibling = true,
+            };
             var doc = try options.parse(alloc, working);
             defer doc.deinit();
 
@@ -250,7 +288,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len != 3) {
         std.debug.print(
-            "usage:\n  {s} <html-file> <iterations>\n  {s} parse <strictest|fastest> <html-file> <iterations>\n  {s} query-parse <selector> <iterations>\n  {s} query-match <html-file> <selector> <iterations>\n  {s} query-match <strictest|fastest> <html-file> <selector> <iterations>\n  {s} query-cached <html-file> <selector> <iterations>\n  {s} query-cached <strictest|fastest> <html-file> <selector> <iterations>\n",
+            "usage:\n  {s} <html-file> <iterations>\n  {s} parse <strictest|fastest|full> <html-file> <iterations>\n  {s} query-parse <selector> <iterations>\n  {s} query-match <html-file> <selector> <iterations>\n  {s} query-match <strictest|fastest|full> <html-file> <selector> <iterations>\n  {s} query-cached <html-file> <selector> <iterations>\n  {s} query-cached <strictest|fastest|full> <html-file> <selector> <iterations>\n",
             .{ args[0], args[0], args[0], args[0], args[0], args[0], args[0] },
         );
         std.process.exit(2);
@@ -264,6 +302,7 @@ pub fn main(init: std.process.Init) !void {
 test "bench smoke uses parse_mode module for both parse modes" {
     const alloc = std.testing.allocator;
     const fastest_options: root.ParseOptions = .{};
+    const full_options: root.ParseOptions = .{ .store_last_child = true, .store_prev_sibling = true };
     const strictest_options: root.ParseOptions = .{ .drop_whitespace_text_nodes = .none };
 
     var fastest_html = "<div><span id='x'>ok</span></div>".*;
@@ -275,4 +314,9 @@ test "bench smoke uses parse_mode module for both parse modes" {
     var strict_doc = try strictest_options.parse(alloc, &strict_html);
     defer strict_doc.deinit();
     try std.testing.expect(firstQuery(strict_doc.query("span#y")) != null);
+
+    var full_html = "<div><span id='z'>ok</span></div>".*;
+    var full_doc = try full_options.parse(alloc, &full_html);
+    defer full_doc.deinit();
+    try std.testing.expect(firstQuery(full_doc.query("span#z")) != null);
 }

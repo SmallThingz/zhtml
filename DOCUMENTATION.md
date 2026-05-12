@@ -79,10 +79,10 @@ All examples are verified by running `zig build examples-check`
 - Navigation:
   - `tagName()`
   - `parentNode()`
-  - `children().last()`
   - `nextSibling()`
   - `prevSibling()`
   - `children()` (iterator of wrapped child nodes; `collect(allocator)` returns an owned `[]Node`)
+  - `children().last()` only when `ParseOptions.store_last_child = true`
 - Text:
   - `innerTextWithOptions(gpa, TextOptions)` returns `TextResult`
   - `TextResult.value`
@@ -191,9 +191,10 @@ Compilation modes:
 
 | Mode | Parse Options | Best For | Tradeoffs |
 |---|---|---|---|
-| `strictest` | `const opts = html.ParseOptions{ .drop_whitespace_text_nodes = false };` | traversal predictability and text fidelity | keeps whitespace-only text nodes |
-| `fastest` | `const opts = html.ParseOptions{};` | throughput-first scraping | whitespace-only text nodes dropped |
+| `strictest` | `const opts = html.ParseOptions{ .drop_whitespace_text_nodes = .none };` | traversal predictability and text fidelity | keeps whitespace-only text nodes |
+| `fastest` | `const opts = html.ParseOptions{};` | throughput-first scraping | whitespace-only text nodes dropped; raw node metadata is compact |
 | `non-destructive` | `const opts = html.ParseOptions{ .non_destructive = true };` | preserving input bytes, memory maps, exact whole-document formatting | decoded attrs/text are materialized outside the source buffer |
+| `full metadata` | `const opts = html.ParseOptions{ .store_last_child = true, .store_prev_sibling = true };` | O(1) `children().last()` and previous-sibling traversal | two extra persisted node indexes |
 
 Fallback playbook:
 
@@ -228,55 +229,55 @@ Warning: throughput numbers are not conformance claims. This parser is permissiv
 
 <!-- BENCHMARK_SNAPSHOT:START -->
 
-Source: `bench/results/latest.json` (`stable` profile).
+Source: `bench/results/latest.json` (`quick` profile).
 
 #### Parse Throughput Comparison (MB/s)
 
-| Fixture | ours | lol-html |
-|---|---:|---:|
-| `rust-lang.html` | 2517.42 | 1454.86 |
-| `wiki-html.html` | 1929.35 | 1180.91 |
-| `mdn-html.html` | 3093.50 | 1797.59 |
-| `w3-html52.html` | 1016.02 | 703.73 |
-| `hn.html` | 1595.75 | 871.22 |
-| `python-org.html` | 2203.49 | 1346.29 |
-| `kernel-org.html` | 2001.99 | 1270.25 |
-| `gnu-org.html` | 2488.12 | 1440.31 |
-| `ziglang-org.html` | 1965.19 | 1199.49 |
-| `ziglang-doc-master.html` | 1368.09 | 1012.51 |
-| `wikipedia-unicode-list.html` | 1786.17 | 1047.21 |
-| `whatwg-html-spec.html` | 1314.64 | 892.68 |
-| `synthetic-forms.html` | 1304.21 | 713.11 |
-| `synthetic-table-grid.html` | 1232.04 | 704.92 |
-| `synthetic-list-nested.html` | 1356.63 | 650.71 |
-| `synthetic-comments-doctype.html` | 2150.98 | 908.09 |
-| `synthetic-template-rich.html` | 933.92 | 447.73 |
-| `synthetic-whitespace-noise.html` | 1611.65 | 1011.96 |
-| `synthetic-news-feed.html` | 1247.44 | 608.03 |
-| `synthetic-ecommerce.html` | 1154.71 | 622.73 |
-| `synthetic-forum-thread.html` | 1234.55 | 590.61 |
+| Fixture | ours-compact | ours-full | lol-html |
+|---|---:|---:|---:|
+| `rust-lang.html` | 2485.05 | 2400.34 | 1383.76 |
+| `wiki-html.html` | 1788.62 | 1890.62 | 1228.51 |
+| `mdn-html.html` | 3417.27 | 3276.24 | 1847.15 |
+| `w3-html52.html` | 1095.24 | 1035.74 | 697.93 |
+| `hn.html` | 1622.82 | 1630.60 | 852.24 |
+| `python-org.html` | 1885.48 | 1844.83 | 1285.38 |
+| `kernel-org.html` | 1874.04 | 1871.49 | 1234.16 |
+| `gnu-org.html` | 2559.92 | 2460.50 | 1373.72 |
+| `ziglang-org.html` | 1871.68 | 1690.21 | 1131.09 |
+| `ziglang-doc-master.html` | 1456.39 | 1394.26 | 1033.85 |
+| `wikipedia-unicode-list.html` | 1957.29 | 1844.62 | 1109.93 |
+| `whatwg-html-spec.html` | 1305.30 | 1413.02 | 909.29 |
+| `synthetic-forms.html` | 1335.64 | 1315.39 | 709.01 |
+| `synthetic-table-grid.html` | 1212.38 | 1103.64 | 677.19 |
+| `synthetic-list-nested.html` | 1478.86 | 1494.16 | 701.12 |
+| `synthetic-comments-doctype.html` | 2167.19 | 2152.77 | 922.21 |
+| `synthetic-template-rich.html` | 1006.99 | 996.24 | 440.80 |
+| `synthetic-whitespace-noise.html` | 1610.53 | 1628.48 | 1024.44 |
+| `synthetic-news-feed.html` | 1389.43 | 1314.64 | 603.70 |
+| `synthetic-ecommerce.html` | 1341.88 | 1120.67 | 632.53 |
+| `synthetic-forum-thread.html` | 1293.48 | 1224.86 | 612.28 |
 
 #### Query Match Throughput (ours)
 
 | Case | ours ops/s | ours ns/op |
 |---|---:|---:|
-| `attr-heavy-button` | 162223.44 | 6164.34 |
-| `attr-heavy-nav` | 96089.54 | 10406.96 |
+| `attr-heavy-button` | 183426.85 | 5451.76 |
+| `attr-heavy-nav` | 107929.26 | 9265.33 |
 
 #### Cached Query Throughput (ours)
 
 | Case | ours ops/s | ours ns/op |
 |---|---:|---:|
-| `attr-heavy-button` | 162534.94 | 6152.52 |
-| `attr-heavy-nav` | 100095.92 | 9990.42 |
+| `attr-heavy-button` | 203904.48 | 4904.26 |
+| `attr-heavy-nav` | 114066.61 | 8766.81 |
 
 #### Query Parse Throughput (ours)
 
 | Selector case | Ops/s | ns/op |
 |---|---:|---:|
-| `simple` | 10099103.51 | 99.02 |
-| `complex` | 5312868.80 | 188.22 |
-| `grouped` | 7105717.71 | 140.73 |
+| `simple` | 9541915.54 | 104.80 |
+| `complex` | 5185918.42 | 192.83 |
+| `grouped` | 7291680.34 | 137.14 |
 
 For full per-parser, per-fixture tables and gate output:
 - `bench/results/latest.md`
