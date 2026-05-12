@@ -113,20 +113,24 @@ pub fn parseParsedValue(source: []const u8, span_end: usize, name_end: usize) Pa
     // In destructive mode parsed values are materialized in place and delimited
     // by zero bytes plus optional gap metadata.
     const marker = source[name_end + 1];
-    var value_start: usize = if (marker == 0) name_end + 2 else name_end + 1;
+    const quoted = marker == 0;
+    var value_start: usize = if (quoted) name_end + 2 else name_end + 1;
     if (value_start > span_end) value_start = span_end;
 
-    const value_end = findValueEnd(source, value_start, span_end);
+    const value_end = findParsedValueEnd(source, value_start, span_end, quoted);
+    if (!quoted and value_end < span_end and source[value_end] == '>') {
+        return .{ .value = source[value_start..value_end], .next_start = value_end };
+    }
     const next = nextAfterValue(source, value_end, span_end);
     return .{ .value = source[value_start..value_end], .next_start = next };
 }
 
-/// Finds the zero terminator ending a destructive-mode parsed value.
-pub fn findValueEnd(source: []const u8, value_start: usize, span_end: usize) usize {
+/// Finds a destructive-mode parsed value end; naked values may end at `>`.
+pub fn findParsedValueEnd(source: []const u8, value_start: usize, span_end: usize, quoted: bool) usize {
     std.debug.assert(span_end <= source.len);
     std.debug.assert(value_start <= span_end);
     var i = value_start;
-    while (i < span_end and source[i] != 0) : (i += 1) {}
+    while (i < span_end and source[i] != 0 and (quoted or source[i] != '>')) : (i += 1) {}
     return i;
 }
 
@@ -211,7 +215,7 @@ pub fn getAttrValueRaw(noalias doc_ptr: anytype, node: anytype, name: []const u8
     const lookup_kind = classifyLookupName(name);
 
     var i: usize = node.name_or_text.end;
-    const end = node.attrEnd(source);
+    const end = source.len;
     if (i >= end) return null;
 
     while (i < end) {
@@ -275,7 +279,7 @@ pub fn collectSelectedValues(
     // Selector matching often probes a few attribute names repeatedly; this
     // helper resolves all requested names in one traversal of the attr span.
     var i: usize = node.name_or_text.end;
-    const end = node.attrEnd(source);
+    const end = source.len;
     var remaining: usize = 0;
     for (out_values) |v| {
         if (v == null) remaining += 1;
@@ -349,7 +353,7 @@ inline fn getAttrValueDestructive(doc: anytype, node: anytype, name: []const u8)
     const lookup_kind = classifyLookupName(name);
 
     var i: usize = node.name_or_text.end;
-    const end = node.attrEnd(source);
+    const end = source.len;
     if (i >= end) return null;
 
     while (i < end) {
@@ -413,7 +417,7 @@ inline fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const 
     const lookup_kind = classifyLookupName(name);
 
     var i: usize = node.name_or_text.end;
-    const end = node.attrEnd(source);
+    const end = source.len;
     if (i >= end) return null;
 
     while (i < end) {

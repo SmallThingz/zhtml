@@ -667,7 +667,7 @@ fn expectDocumentStructureValid(doc: anytype) !void {
         }
 
         if (is_element) {
-            const attr_end = node.attrEnd(doc.source);
+            const attr_end = std.mem.indexOfScalarPos(u8, doc.source, span_end, '>') orelse doc.source.len;
             try testing.expect(span_end <= attr_end);
             try testing.expect(attr_end <= doc.source.len);
         }

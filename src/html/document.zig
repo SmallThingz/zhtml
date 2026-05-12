@@ -78,36 +78,6 @@ pub const RawNode = struct {
     pub inline fn isElement(self: *const @This(), idx: IndexInt) bool {
         return idx != 0 and self.subtree_end != 0;
     }
-
-    /// Computes the raw attribute span end as a host-size index.
-    pub fn attrEnd(self: *const @This(), source: []const u8) usize {
-        var i: usize = @intCast(self.name_or_text.end);
-        while (i < source.len) : (i += 1) {
-            switch (source[i]) {
-                '>' => return i,
-                '\'', '"' => |q| {
-                    i += 1;
-                    i = std.mem.indexOfScalarPos(u8, source, i, q) orelse return source.len;
-                },
-                0 => {
-                    const quoted = i + 1 < source.len and source[i + 1] == 0;
-                    var value_end = i + @as(usize, if (quoted) 2 else 1);
-                    while (value_end < source.len) : (value_end += 1) {
-                        if (source[value_end] == 0) break;
-                        if (!quoted and source[value_end] == '>') return value_end;
-                    }
-                    if (value_end >= source.len) return source.len;
-
-                    const next = attr.nextAfterValue(source, value_end, source.len);
-                    if (next > i) {
-                        i = next - 1;
-                    }
-                },
-                else => {},
-            }
-        }
-        return source.len;
-    }
 };
 
 /// Compile-time parser options and type factory for generated public API types.
@@ -571,7 +541,7 @@ fn GetNode(comptime options: ParseOptions) type {
         fn writeAttrsHtml(doc: anytype, noalias node_raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
             const source: []const u8 = doc.source;
             var i: usize = @intCast(node_raw.name_or_text.end);
-            const end = node_raw.attrEnd(source);
+            const end = source.len;
 
             while (i < end) {
                 while (i < end and tables.WhitespaceTable[source[i]]) : (i += 1) {}
@@ -1213,7 +1183,7 @@ test "non-destructive attribute reads do not rewrite attribute bytes" {
     try std.testing.expectEqualStrings("a&b", value.value);
 
     const attr_start: usize = @intCast(node.raw().name_or_text.end);
-    const attr_end = node.raw().attrEnd(doc.source);
+    const attr_end = std.mem.indexOfScalarPos(u8, doc.source, attr_start, '>') orelse doc.source.len;
     try std.testing.expect(std.mem.indexOf(u8, doc.source[attr_start..attr_end], "&amp;") != null);
     try std.testing.expectEqualSlices(u8, before[0..], html[0..]);
 }
@@ -1616,7 +1586,8 @@ test "parse-time attribute decoding is off by default and query-time lookup deco
 
     const node = doc.findFirstTag("div") orelse return error.TestUnexpectedResult;
     const attr_start: usize = node.raw().name_or_text.end;
-    const span = doc.source[attr_start..node.raw().attrEnd(doc.source)];
+    const attr_end = std.mem.indexOfScalarPos(u8, doc.source, attr_start, '>') orelse doc.source.len;
+    const span = doc.source[attr_start..attr_end];
     try std.testing.expect(std.mem.indexOf(u8, span, "&amp;") != null);
 
     const value = (try node.getAttributeValue(alloc, "data-v")) orelse return error.TestUnexpectedResult;
@@ -1710,7 +1681,8 @@ test "inplace attr lazy parse updates state markers and supports selector-trigge
     try std.testing.expectEqualStrings("a&b", n.value);
 
     const attr_start: usize = node.raw().name_or_text.end;
-    const span = doc.source[attr_start..node.raw().attrEnd(doc.source)];
+    const attr_end = std.mem.indexOfScalarPos(u8, doc.source, attr_start, '>') orelse doc.source.len;
+    const span = doc.source[attr_start..attr_end];
     const q_marker = [_]u8{ 'q', 0, 0 };
     const q_pos = std.mem.indexOf(u8, span, &q_marker) orelse return error.TestUnexpectedResult;
     try std.testing.expect(q_pos < span.len);
@@ -1738,7 +1710,8 @@ test "attribute matching short-circuits and does not parse later attrs on early 
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const attr_start: usize = node.raw().name_or_text.end;
-    const span = doc.source[attr_start..node.raw().attrEnd(doc.source)];
+    const attr_end = std.mem.indexOfScalarPos(u8, doc.source, attr_start, '>') orelse doc.source.len;
+    const span = doc.source[attr_start..attr_end];
     const class_pos = std.mem.indexOf(u8, span, "class") orelse return error.TestUnexpectedResult;
     const marker_pos = class_pos + "class".len;
     try std.testing.expect(marker_pos < span.len);

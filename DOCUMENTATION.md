@@ -234,49 +234,49 @@ Source: `bench/results/latest.json` (`stable` profile).
 
 | Fixture | ours | lol-html |
 |---|---:|---:|
-| `rust-lang.html` | 2618.23 | 1561.42 |
-| `wiki-html.html` | 1902.93 | 1178.07 |
-| `mdn-html.html` | 3244.56 | 1892.63 |
-| `w3-html52.html` | 1016.83 | 698.58 |
-| `hn.html` | 1627.02 | 889.90 |
-| `python-org.html` | 2175.88 | 1377.00 |
-| `kernel-org.html` | 2037.84 | 1368.04 |
-| `gnu-org.html` | 2658.50 | 1551.94 |
-| `ziglang-org.html` | 2070.94 | 1289.46 |
-| `ziglang-doc-master.html` | 1370.79 | 1037.91 |
-| `wikipedia-unicode-list.html` | 1792.11 | 1100.70 |
-| `whatwg-html-spec.html` | 1314.85 | 901.43 |
-| `synthetic-forms.html` | 1328.97 | 731.64 |
-| `synthetic-table-grid.html` | 1254.04 | 729.91 |
-| `synthetic-list-nested.html` | 1381.92 | 675.02 |
-| `synthetic-comments-doctype.html` | 2152.85 | 947.56 |
-| `synthetic-template-rich.html` | 954.69 | 460.64 |
-| `synthetic-whitespace-noise.html` | 1679.69 | 1078.16 |
-| `synthetic-news-feed.html` | 1249.00 | 614.60 |
-| `synthetic-ecommerce.html` | 1180.85 | 639.94 |
-| `synthetic-forum-thread.html` | 1227.84 | 618.11 |
+| `rust-lang.html` | 2517.42 | 1454.86 |
+| `wiki-html.html` | 1929.35 | 1180.91 |
+| `mdn-html.html` | 3093.50 | 1797.59 |
+| `w3-html52.html` | 1016.02 | 703.73 |
+| `hn.html` | 1595.75 | 871.22 |
+| `python-org.html` | 2203.49 | 1346.29 |
+| `kernel-org.html` | 2001.99 | 1270.25 |
+| `gnu-org.html` | 2488.12 | 1440.31 |
+| `ziglang-org.html` | 1965.19 | 1199.49 |
+| `ziglang-doc-master.html` | 1368.09 | 1012.51 |
+| `wikipedia-unicode-list.html` | 1786.17 | 1047.21 |
+| `whatwg-html-spec.html` | 1314.64 | 892.68 |
+| `synthetic-forms.html` | 1304.21 | 713.11 |
+| `synthetic-table-grid.html` | 1232.04 | 704.92 |
+| `synthetic-list-nested.html` | 1356.63 | 650.71 |
+| `synthetic-comments-doctype.html` | 2150.98 | 908.09 |
+| `synthetic-template-rich.html` | 933.92 | 447.73 |
+| `synthetic-whitespace-noise.html` | 1611.65 | 1011.96 |
+| `synthetic-news-feed.html` | 1247.44 | 608.03 |
+| `synthetic-ecommerce.html` | 1154.71 | 622.73 |
+| `synthetic-forum-thread.html` | 1234.55 | 590.61 |
 
 #### Query Match Throughput (ours)
 
 | Case | ours ops/s | ours ns/op |
 |---|---:|---:|
-| `attr-heavy-button` | 201812.74 | 4955.09 |
-| `attr-heavy-nav` | 116346.67 | 8595.00 |
+| `attr-heavy-button` | 162223.44 | 6164.34 |
+| `attr-heavy-nav` | 96089.54 | 10406.96 |
 
 #### Cached Query Throughput (ours)
 
 | Case | ours ops/s | ours ns/op |
 |---|---:|---:|
-| `attr-heavy-button` | 171001.78 | 5847.89 |
-| `attr-heavy-nav` | 105660.31 | 9464.29 |
+| `attr-heavy-button` | 162534.94 | 6152.52 |
+| `attr-heavy-nav` | 100095.92 | 9990.42 |
 
 #### Query Parse Throughput (ours)
 
 | Selector case | Ops/s | ns/op |
 |---|---:|---:|
-| `simple` | 10103285.89 | 98.98 |
-| `complex` | 5682122.55 | 175.99 |
-| `grouped` | 7411193.84 | 134.93 |
+| `simple` | 10099103.51 | 99.02 |
+| `complex` | 5312868.80 | 188.22 |
+| `grouped` | 7105717.71 | 140.73 |
 
 For full per-parser, per-fixture tables and gate output:
 - `bench/results/latest.md`
