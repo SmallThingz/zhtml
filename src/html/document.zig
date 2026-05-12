@@ -58,14 +58,10 @@ pub const RawNode = struct {
     /// `0` marks non-element nodes (document root at index 0, or text).
     attr_end: AttrEnd = .invalid_1,
 
-    /// First direct element child index.
-    first_child: IndexInt,
     /// Last direct element child index.
     last_child: IndexInt,
     /// Previous element sibling index.
     prev_sibling: IndexInt,
-    /// Next element sibling index.
-    next_sibling: IndexInt,
     /// Parent node index.
     parent: IndexInt,
 
@@ -431,9 +427,8 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Returns next element sibling.
         pub fn nextSibling(self: @This()) ?@This() {
             self.assertElement();
-            const next = self.raw().next_sibling;
-            if (next == InvalidIndex) return null;
-            return .{ .doc = self.doc, .index = next };
+            if (common.nextElementSibling(self.doc, self.index)) |next| return .{ .doc = self.doc, .index = next };
+            return null;
         }
 
         /// Returns previous element sibling.
@@ -457,7 +452,8 @@ fn GetNode(comptime options: ParseOptions) type {
             self.assertContainer();
             return .{
                 .doc = self.doc,
-                .next_idx = self.raw().first_child,
+                .parent_idx = self.index,
+                .next_idx = firstElementChild(self.doc, self.index),
             };
         }
 
@@ -700,6 +696,21 @@ fn GetNode(comptime options: ParseOptions) type {
     };
 }
 
+/// Computes the first direct element child from preorder storage.
+fn firstElementChild(doc: anytype, parent_idx: IndexInt) IndexInt {
+    const parent = &doc.nodes[parent_idx];
+    if (parent.last_child == InvalidIndex) return InvalidIndex;
+
+    const end: usize = @intCast(parent.subtree_end);
+    var idx: usize = @as(usize, @intCast(parent_idx)) + 1;
+    while (idx <= end and idx < doc.nodes.len) : (idx += 1) {
+        const idx_int: IndexInt = @intCast(idx);
+        const node = &doc.nodes[idx];
+        if (node.parent == parent_idx and node.isElement(idx_int)) return idx_int;
+    }
+    return InvalidIndex;
+}
+
 /// Builds the concrete selector iterator type for a parse option set.
 fn GetQueryIter(comptime options: ParseOptions) type {
     return struct {
@@ -790,22 +801,23 @@ fn GetChildrenIter(comptime options: ParseOptions) type {
 
         /// Owning document pointer.
         doc: *const DocType,
+        /// Parent whose direct children are being iterated.
+        parent_idx: IndexInt = InvalidIndex,
         /// Next direct child index to yield.
         next_idx: IndexInt = InvalidIndex,
 
         /// Returns next wrapped child node or `null` when exhausted.
         pub inline fn next(noalias self: *@This()) ?NodeTypeWrapper {
             if (self.next_idx == InvalidIndex) return null;
-            defer self.next_idx = self.doc.nodeAt(self.next_idx).raw().next_sibling;
+            defer self.next_idx = common.nextElementSibling(self.doc, self.next_idx) orelse InvalidIndex;
             return .{ .doc = self.doc, .index = self.next_idx };
         }
 
         /// Returns last remaining wrapped child node without consuming it.
         pub fn last(self: @This()) ?NodeTypeWrapper {
             if (self.next_idx == InvalidIndex) return null;
-            const parent_idx = self.doc.nodes[self.next_idx].parent;
-            if (parent_idx == InvalidIndex) return null;
-            const last_child = self.doc.nodes[parent_idx].last_child;
+            if (self.parent_idx == InvalidIndex) return null;
+            const last_child = self.doc.nodes[self.parent_idx].last_child;
             if (last_child == InvalidIndex) return null;
             return .{ .doc = self.doc, .index = last_child };
         }
@@ -814,14 +826,14 @@ fn GetChildrenIter(comptime options: ParseOptions) type {
         pub fn collect(noalias self: *@This(), allocator: std.mem.Allocator) ![]NodeTypeWrapper {
             var count: usize = 0;
             var idx = self.next_idx;
-            while (idx != InvalidIndex) : (idx = self.doc.nodeAt(idx).raw().next_sibling) {
+            while (idx != InvalidIndex) : (idx = common.nextElementSibling(self.doc, idx) orelse InvalidIndex) {
                 count += 1;
             }
 
             const out = try allocator.alloc(NodeTypeWrapper, count);
             idx = self.next_idx;
             var out_idx: usize = 0;
-            while (idx != InvalidIndex) : (idx = self.doc.nodeAt(idx).raw().next_sibling) {
+            while (idx != InvalidIndex) : (idx = common.nextElementSibling(self.doc, idx) orelse InvalidIndex) {
                 out[out_idx] = .{
                     .doc = self.doc,
                     .index = idx,
@@ -996,6 +1008,8 @@ test "document type excludes parser-only and shadow-source state" {
     try std.testing.expect(!@hasField(GetDocument(.{}), "owned_shadow_source"));
     try std.testing.expect(!@hasField(GetDocument(.{}), "mutable_source"));
     try std.testing.expect(!@hasField(RawNode, "kind"));
+    try std.testing.expect(!@hasField(RawNode, "first_child"));
+    try std.testing.expect(!@hasField(RawNode, "next_sibling"));
     try std.testing.expect(!@hasDecl(ParseOptions, "GetOpenElem"));
 }
 
@@ -2092,11 +2106,9 @@ test "children() iterator next and last use element links across text nodes" {
 
     const a = kids.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a", (try a.getAttributeValue(alloc, "id")).?.value);
-    try std.testing.expectEqual(a.index, doc.nodes[root.index].first_child);
 
     const b = kids.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("b", (try b.getAttributeValue(alloc, "id")).?.value);
-    try std.testing.expectEqual(b.index, doc.nodes[a.index].next_sibling);
     try std.testing.expectEqual(a.index, doc.nodes[b.index].prev_sibling);
 
     const rest = try kids.collect(alloc);

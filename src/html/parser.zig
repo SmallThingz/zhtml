@@ -91,10 +91,8 @@ fn ParseState(comptime opts: ParseOptions) type {
             self.nodes.appendAssumeCapacity(.{
                 .name_or_text = .{ .start = 0, .end = 0 },
                 .attr_end = .text_node,
-                .first_child = InvalidIndex,
                 .last_child = InvalidIndex,
                 .prev_sibling = InvalidIndex,
-                .next_sibling = InvalidIndex,
                 .parent = InvalidIndex,
                 .subtree_end = 0,
             });
@@ -415,19 +413,12 @@ fn ParseState(comptime opts: ParseOptions) type {
                     .end = @intCast(name_or_text[1]),
                 },
                 .attr_end = attr_end,
-                .first_child = InvalidIndex,
                 .last_child = InvalidIndex,
                 .prev_sibling = prev_element,
-                .next_sibling = InvalidIndex,
                 .parent = parent_idx,
                 .subtree_end = idx,
             });
             if (is_element) {
-                if (prev_element == InvalidIndex) {
-                    self.nodes.items[parent_idx].first_child = idx;
-                } else {
-                    self.nodes.items[prev_element].next_sibling = idx;
-                }
                 self.nodes.items[parent_idx].last_child = idx;
             }
         }
@@ -699,25 +690,6 @@ fn expectDocumentStructureValid(doc: anytype) !void {
             try testing.expect(@as(usize, @intCast(nodes[prev_idx].subtree_end)) < i);
         }
 
-        if (node.next_sibling != InvalidIndex) {
-            const next_idx: usize = @intCast(node.next_sibling);
-            try testing.expect(next_idx > i);
-            try testing.expectEqual(node.parent, nodes[next_idx].parent);
-            try testing.expect(!node.isText(idx));
-            try testing.expect(!nodes[next_idx].isText(node.next_sibling));
-        }
-
-        if (node.first_child != InvalidIndex) {
-            const first_child_idx: usize = @intCast(node.first_child);
-            try testing.expect(!is_text);
-            try testing.expect(first_child_idx > i);
-            try testing.expect(first_child_idx <= @as(usize, @intCast(node.subtree_end)));
-            try testing.expectEqual(idx, nodes[first_child_idx].parent);
-            try testing.expect(!nodes[first_child_idx].isText(node.first_child));
-        } else if (is_text) {
-            try testing.expectEqual(InvalidIndex, node.first_child);
-        }
-
         if (node.last_child != InvalidIndex) {
             const last_child_idx: usize = @intCast(node.last_child);
             try testing.expect(!is_text);
@@ -739,10 +711,8 @@ fn expectEquivalentStructures(a: *const TestDocument, b: *const NonDestructiveTe
         try testing.expectEqual(lhs.name_or_text.start, rhs.name_or_text.start);
         try testing.expectEqual(lhs.name_or_text.end, rhs.name_or_text.end);
         try testing.expectEqual(lhs.attr_end, rhs.attr_end);
-        try testing.expectEqual(lhs.first_child, rhs.first_child);
         try testing.expectEqual(lhs.last_child, rhs.last_child);
         try testing.expectEqual(lhs.prev_sibling, rhs.prev_sibling);
-        try testing.expectEqual(lhs.next_sibling, rhs.next_sibling);
         try testing.expectEqual(lhs.parent, rhs.parent);
         try testing.expectEqual(lhs.subtree_end, rhs.subtree_end);
     }
@@ -979,7 +949,7 @@ test "u64 parse accepts sparse 8 GiB plaintext input" {
     const tag = "<plaintext>";
     @memcpy(mapped.memory[0..tag.len], tag);
 
-    var doc = TestDocument.init(alloc);
+    var doc = NonDestructiveTestDocument.init(alloc);
     defer doc.deinit();
     try resetParsed(NonDestructiveTestOptions, &doc, mapped.memory);
 

@@ -174,8 +174,17 @@ pub fn prevElementSibling(doc: anytype, node_index: IndexInt) ?IndexInt {
 
 /// Next element sibling index for `node_index`.
 pub fn nextElementSibling(doc: anytype, node_index: IndexInt) ?IndexInt {
-    const next = doc.nodes[node_index].next_sibling;
-    return if (next == InvalidIndex) null else next;
+    const parent = doc.nodes[node_index].parent;
+    if (parent == InvalidIndex) return null;
+
+    const parent_end: usize = @intCast(doc.nodes[parent].subtree_end);
+    var idx: usize = @as(usize, @intCast(doc.nodes[node_index].subtree_end)) + 1;
+    while (idx <= parent_end and idx < doc.nodes.len) : (idx += 1) {
+        const idx_int: IndexInt = @intCast(idx);
+        const node = &doc.nodes[idx];
+        if (node.parent == parent and node.isElement(idx_int)) return idx_int;
+    }
+    return null;
 }
 
 /// Scope-anchor predicate shared by selector matcher and debug matcher.
