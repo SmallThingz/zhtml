@@ -571,7 +571,7 @@ fn matchesLookupName(attr_name: []const u8, lookup: []const u8, lookup_kind: Loo
     }
 
     if (attr_name.len != lookup.len) return false;
-    if (attr_name.len != 0 and toLowerAscii(attr_name[0]) != toLowerAscii(lookup[0])) return false;
+    if (attr_name.len != 0 and tables.lower(attr_name[0]) != tables.lower(lookup[0])) return false;
     return tables.eqlIgnoreCaseAscii(attr_name, lookup);
 }
 
@@ -588,14 +588,9 @@ fn isExactAsciiWord(value: []const u8, comptime lower: []const u8) bool {
     if (value.len != lower.len) return false;
     var i: usize = 0;
     while (i < lower.len) : (i += 1) {
-        if (toLowerAscii(value[i]) != lower[i]) return false;
+        if (tables.lower(value[i]) != lower[i]) return false;
     }
     return true;
-}
-
-/// Lowercases one ASCII byte without touching non-uppercase bytes.
-fn toLowerAscii(c: u8) u8 {
-    return if (c >= 'A' and c <= 'Z') c + ('a' - 'A') else c;
 }
 
 test "scanAttrNameOrSkip handles terminators and skips non-name bytes" {

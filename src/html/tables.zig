@@ -10,17 +10,6 @@ pub fn makeClassTable(comptime predicate: fn (u8) bool) [256]bool {
     return table;
 }
 
-/// Builds a 256-entry ASCII lowercase conversion table.
-pub fn makeLowerTable() [256]u8 {
-    @setEvalBranchQuota(10_000);
-    var table: [256]u8 = undefined;
-    inline for (0..256) |i| {
-        const c: u8 = @intCast(i);
-        table[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
-    }
-    return table;
-}
-
 /// Returns whether byte is ASCII whitespace relevant to HTML tokenization.
 fn isWhitespace(c: u8) bool {
     return c == ' ' or c == '\n' or c == '\r' or c == '\t' or c == '\x0c';
@@ -42,8 +31,6 @@ fn isTagNameChar(c: u8) bool {
     return !isWhitespace(c) and c != '/' and c != '>' and c != 0;
 }
 
-/// Precomputed lowercase conversion table.
-pub const LowerTable = makeLowerTable();
 /// Precomputed whitespace classification table.
 pub const WhitespaceTable = makeClassTable(isWhitespace);
 /// Precomputed identifier-start classification table.
@@ -53,9 +40,9 @@ pub const IdentCharTable = makeClassTable(isIdentChar);
 /// Precomputed tag-name-char classification table.
 pub const TagNameCharTable = makeClassTable(isTagNameChar);
 
-/// Lowercases one ASCII byte using `LowerTable`.
+/// Lowercases one ASCII byte without a table lookup.
 pub inline fn lower(c: u8) u8 {
-    return LowerTable[c];
+    return c | (@as(u8, @intFromBool(c -% 'A' <= 'Z' - 'A')) << 5);
 }
 
 /// Lowercases ASCII bytes in-place.
@@ -103,9 +90,12 @@ pub fn tokenIncludesAsciiWhitespace(value: []const u8, token: []const u8) bool {
     return false;
 }
 
-test "lower table" {
+test "branchless ascii lower" {
     try std.testing.expect(lower('A') == 'a');
     try std.testing.expect(lower('z') == 'z');
+    try std.testing.expect(lower('@') == '@');
+    try std.testing.expect(lower('[') == '[');
+    try std.testing.expect(lower(0xff) == 0xff);
 }
 
 test "tag name state includes < and excludes delimiters" {
