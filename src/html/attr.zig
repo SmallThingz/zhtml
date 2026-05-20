@@ -571,8 +571,8 @@ fn matchesLookupName(attr_name: []const u8, lookup: []const u8, lookup_kind: Loo
     }
 
     if (attr_name.len != lookup.len) return false;
-    if (attr_name.len != 0 and tables.lower(attr_name[0]) != tables.lower(lookup[0])) return false;
-    return tables.eqlIgnoreCaseAscii(attr_name, lookup);
+    if (attr_name.len != 0 and std.ascii.toLower(attr_name[0]) != std.ascii.toLower(lookup[0])) return false;
+    return std.ascii.eqlIgnoreCase(attr_name, lookup);
 }
 
 /// Classifies common lookup names for cheaper comparisons.
@@ -588,7 +588,7 @@ fn isExactAsciiWord(value: []const u8, comptime lower: []const u8) bool {
     if (value.len != lower.len) return false;
     var i: usize = 0;
     while (i < lower.len) : (i += 1) {
-        if (tables.lower(value[i]) != lower[i]) return false;
+        if (std.ascii.toLower(value[i]) != lower[i]) return false;
     }
     return true;
 }

@@ -63,42 +63,24 @@ pub fn evalAttrOp(raw: []const u8, value: []const u8, op: ast.AttrOp, case: ast.
 fn evalAttrOpIgnoreCase(raw: []const u8, value: []const u8, op: ast.AttrOp) bool {
     return switch (op) {
         .exists => true,
-        .eq => tables.eqlIgnoreCaseAscii(raw, value),
-        .prefix => startsWithIgnoreCaseAscii(raw, value),
-        .suffix => endsWithIgnoreCaseAscii(raw, value),
-        .contains => indexOfIgnoreCaseAscii(raw, value) != null,
+        .eq => std.ascii.eqlIgnoreCase(raw, value),
+        .prefix => std.ascii.startsWithIgnoreCase(raw, value),
+        .suffix => std.ascii.endsWithIgnoreCase(raw, value),
+        .contains => std.ascii.indexOfIgnoreCase(raw, value) != null,
         .includes => tokenIncludesIgnoreCaseAscii(raw, value),
-        .dash_match => tables.eqlIgnoreCaseAscii(raw, value) or (raw.len > value.len and startsWithIgnoreCaseAscii(raw, value) and raw[value.len] == '-'),
+        .dash_match => std.ascii.eqlIgnoreCase(raw, value) or (raw.len > value.len and std.ascii.startsWithIgnoreCase(raw, value) and raw[value.len] == '-'),
     };
-}
-
-fn startsWithIgnoreCaseAscii(haystack: []const u8, needle: []const u8) bool {
-    return haystack.len >= needle.len and tables.eqlIgnoreCaseAscii(haystack[0..needle.len], needle);
-}
-
-fn endsWithIgnoreCaseAscii(haystack: []const u8, needle: []const u8) bool {
-    return haystack.len >= needle.len and tables.eqlIgnoreCaseAscii(haystack[haystack.len - needle.len ..], needle);
-}
-
-fn indexOfIgnoreCaseAscii(haystack: []const u8, needle: []const u8) ?usize {
-    if (needle.len == 0) return 0;
-    if (needle.len > haystack.len) return null;
-    var i: usize = 0;
-    const end = haystack.len - needle.len;
-    while (i <= end) : (i += 1) {
-        if (tables.lower(haystack[i]) != tables.lower(needle[0])) continue;
-        if (tables.eqlIgnoreCaseAscii(haystack[i .. i + needle.len], needle)) return i;
-    }
-    return null;
 }
 
 fn tokenIncludesIgnoreCaseAscii(raw: []const u8, value: []const u8) bool {
     var i: usize = 0;
     while (i < raw.len) {
         while (i < raw.len and tables.WhitespaceTable[raw[i]]) : (i += 1) {}
+        if (i >= raw.len) return false;
+
         const start = i;
         while (i < raw.len and !tables.WhitespaceTable[raw[i]]) : (i += 1) {}
-        if (tables.eqlIgnoreCaseAscii(raw[start..i], value)) return true;
+        if (std.ascii.eqlIgnoreCase(raw[start..i], value)) return true;
     }
     return false;
 }
@@ -118,7 +100,7 @@ pub fn matchesAttrSelectorDebug(
 
 pub fn matchesNotSimpleCommon(ctx: anytype, item: ast.NotSimple) bool {
     return switch (item.kind) {
-        .tag => tables.eqlIgnoreCaseAscii(ctx.nodeName(), item.text.slice(ctx.selector_source)),
+        .tag => std.ascii.eqlIgnoreCase(ctx.nodeName(), item.text.slice(ctx.selector_source)),
         .id => blk: {
             const id = item.text.slice(ctx.selector_source);
             const v = ctx.getAttrValue("id") orelse break :blk false;
@@ -647,8 +629,8 @@ fn findCollectedEntry(collected: *const CollectedAttrs, needle: []const u8) ?usi
     while (i < collected.count) : (i += 1) {
         const cand = collected.names[i];
         if (cand.len != needle.len) continue;
-        if (cand.len != 0 and tables.lower(cand[0]) != tables.lower(needle[0])) continue;
-        if (tables.eqlIgnoreCaseAscii(cand, needle)) return i;
+        if (cand.len != 0 and std.ascii.toLower(cand[0]) != std.ascii.toLower(needle[0])) continue;
+        if (std.ascii.eqlIgnoreCase(cand, needle)) return i;
     }
     return null;
 }
@@ -658,8 +640,8 @@ fn findProbeEntry(noalias probe: *const AttrProbe, needle: []const u8) ?usize {
     while (i < probe.count) : (i += 1) {
         const entry = probe.entries[i];
         if (entry.name.len != needle.len) continue;
-        if (entry.name.len != 0 and tables.lower(entry.name[0]) != tables.lower(needle[0])) continue;
-        if (tables.eqlIgnoreCaseAscii(entry.name, needle)) return i;
+        if (entry.name.len != 0 and std.ascii.toLower(entry.name[0]) != std.ascii.toLower(needle[0])) continue;
+        if (std.ascii.eqlIgnoreCase(entry.name, needle)) return i;
     }
     return null;
 }

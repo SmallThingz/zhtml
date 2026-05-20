@@ -17,7 +17,7 @@ pub inline fn first8Key(name: []const u8) u64 {
 /// eight bytes (parser does this in-place).
 pub inline fn equalByLenAndKeyIgnoreCase(a: []const u8, a_key: u64, b: []const u8, b_key: u64) bool {
     if (a.len != b.len or a_key != b_key) return false;
-    return if (a.len <= 8) true else tables.eqlIgnoreCaseAscii(a[8..], b[8..]);
+    return if (a.len <= 8) true else std.ascii.eqlIgnoreCase(a[8..], b[8..]);
 }
 
 const KEY = struct {
@@ -127,7 +127,7 @@ pub fn isRawTextTagWithKey(name: []const u8, key: u64) bool {
 
 /// Fast check for `<plaintext>` by `(len,key)`.
 pub fn isPlainTextTagWithKey(name: []const u8, key: u64) bool {
-    return name.len == 9 and key == KEY.PLAINTEXT and tables.lower(name[8]) == 't';
+    return name.len == 9 and key == KEY.PLAINTEXT and std.ascii.toLower(name[8]) == 't';
 }
 
 /// Returns true when `new_tag` can trigger optional-close logic.
@@ -189,7 +189,7 @@ pub inline fn mayTriggerImplicitCloseWithKey(new_tag: []const u8, new_key: u64) 
             else => false,
         },
         10 => switch (new_key) {
-            KEY.BLOCKQUOTE => tables.lower(new_tag[8]) == 't' and tables.lower(new_tag[9]) == 'e',
+            KEY.BLOCKQUOTE => std.ascii.toLower(new_tag[8]) == 't' and std.ascii.toLower(new_tag[9]) == 'e',
             else => false,
         },
         else => false,
@@ -305,7 +305,7 @@ fn closesPWithKey(new_tag: []const u8, new_key: u64) bool {
             else => false,
         },
         10 => switch (new_key) {
-            KEY.BLOCKQUOTE => tables.lower(new_tag[8]) == 't' and tables.lower(new_tag[9]) == 'e',
+            KEY.BLOCKQUOTE => std.ascii.toLower(new_tag[8]) == 't' and std.ascii.toLower(new_tag[9]) == 'e',
             else => false,
         },
         else => false,

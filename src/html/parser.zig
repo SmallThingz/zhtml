@@ -226,7 +226,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             for (0..8) |i| {
                 if (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) {
                     var c = self.input[self.i];
-                    c = tables.lower(c);
+                    c = std.ascii.toLower(c);
                     if (!comptime opts.non_destructive) {
                         @constCast(self.input)[self.i] = c;
                     }
@@ -332,7 +332,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             for (0..8) |i| {
                 if (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) {
                     var c = self.input[self.i];
-                    c = tables.lower(c);
+                    c = std.ascii.toLower(c);
                     if (!comptime opts.non_destructive) {
                         @constCast(self.input)[self.i] = c;
                     }
@@ -446,7 +446,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             if (open.tag_len != close_name.len or open.tag_key != close_key) return false;
             if (close_name.len <= 8) return true;
             const open_name = self.nodes.items[open.idx].name_or_text.slice(self.input);
-            return tables.eqlIgnoreCaseAscii(open_name[8..], close_name[8..]);
+            return std.ascii.eqlIgnoreCase(open_name[8..], close_name[8..]);
         }
 
         fn skipComment(noalias self: *Self) void {
@@ -615,13 +615,13 @@ fn ParseState(comptime opts: ParseOptions) type {
             // Raw-text scanning only recognizes a real `</tag>` terminator.
             // Everything else, including stray `<` bytes, stays in the text run.
             var j = std.mem.indexOfScalarPos(u8, self.input, start, '<') orelse return null;
-            const first = tables.lower(tag_name[0]);
+            const first = std.ascii.toLower(tag_name[0]);
             while (j + 3 < self.input.len) {
                 if (self.input[j + 1] != '/') {
                     j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
                     continue;
                 }
-                if (j + 2 >= self.input.len or tables.lower(self.input[j + 2]) != first) {
+                if (j + 2 >= self.input.len or std.ascii.toLower(self.input[j + 2]) != first) {
                     j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
                     continue;
                 }
@@ -632,7 +632,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 for (0..8) |i| {
                     if (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) {
                         var c = self.input[self.i];
-                        c = tables.lower(c);
+                        c = std.ascii.toLower(c);
                         if (!comptime opts.non_destructive) {
                             @constCast(self.input)[self.i] = c;
                         }

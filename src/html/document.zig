@@ -981,7 +981,7 @@ fn GetDocument(comptime options: ParseOptions) type {
             while (i < self.nodes.len) : (i += 1) {
                 const n = &self.nodes[i];
                 if (!n.isElement(@intCast(i))) continue;
-                if (tables.eqlIgnoreCaseAscii(n.name_or_text.slice(self.source), name)) return .{ .doc = self, .index = @intCast(i) };
+                if (std.ascii.eqlIgnoreCase(n.name_or_text.slice(self.source), name)) return .{ .doc = self, .index = @intCast(i) };
             }
             return null;
         }

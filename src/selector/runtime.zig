@@ -286,17 +286,17 @@ const Parser = struct {
         const name = self.parseIdent() orelse return error.InvalidSelector;
         const name_slice = name.slice(self.source);
 
-        if (tables.eqlIgnoreCaseAscii(name_slice, "first-child")) {
+        if (std.ascii.eqlIgnoreCase(name_slice, "first-child")) {
             try self.pushPseudo(.{ .kind = .first_child });
             return;
         }
 
-        if (tables.eqlIgnoreCaseAscii(name_slice, "last-child")) {
+        if (std.ascii.eqlIgnoreCase(name_slice, "last-child")) {
             try self.pushPseudo(.{ .kind = .last_child });
             return;
         }
 
-        if (tables.eqlIgnoreCaseAscii(name_slice, "nth-child")) {
+        if (std.ascii.eqlIgnoreCase(name_slice, "nth-child")) {
             self.skipWs();
             if (!self.consumeIf('(')) return error.InvalidSelector;
             self.skipWs();
@@ -306,7 +306,7 @@ const Parser = struct {
             return;
         }
 
-        if (tables.eqlIgnoreCaseAscii(name_slice, "not")) {
+        if (std.ascii.eqlIgnoreCase(name_slice, "not")) {
             self.skipWs();
             if (!self.consumeIf('(')) return error.InvalidSelector;
             self.skipWs();
@@ -395,7 +395,8 @@ const Parser = struct {
     fn lowerRange(noalias self: *Parser, range: ast.Range) void {
         const start: usize = @intCast(range.start);
         const end = start + @as(usize, @intCast(range.len));
-        tables.toLowerInPlace(@constCast(self.source[start..end]));
+        const bytes = @constCast(self.source[start..end]);
+        _ = std.ascii.lowerString(bytes, bytes);
     }
 
     fn skipWs(noalias self: *Parser) void {
@@ -446,21 +447,17 @@ const Parser = struct {
 };
 
 fn isSelectorIdentChar(c: u8) bool {
-    return (c >= 'a' and c <= 'z') or
-        (c >= 'A' and c <= 'Z') or
-        (c >= '0' and c <= '9') or
-        c == '_' or
-        c == '-';
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
 }
 
 fn isTagIdentStart(c: u8) bool {
-    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+    return std.ascii.isAlphabetic(c) or c == '_';
 }
 
 fn parseNthExpr(expr: []const u8) ?ast.NthExpr {
     if (expr.len == 0) return null;
-    if (tables.eqlIgnoreCaseAscii(expr, "odd")) return .{ .a = 2, .b = 1 };
-    if (tables.eqlIgnoreCaseAscii(expr, "even")) return .{ .a = 2, .b = 0 };
+    if (std.ascii.eqlIgnoreCase(expr, "odd")) return .{ .a = 2, .b = 1 };
+    if (std.ascii.eqlIgnoreCase(expr, "even")) return .{ .a = 2, .b = 0 };
 
     const n_pos: ?usize = blk: {
         var i: usize = 0;
@@ -480,35 +477,18 @@ fn parseNthExpr(expr: []const u8) ?ast.NthExpr {
         else if (std.mem.eql(u8, a_part, "-"))
             -1
         else
-            parseSignedInt(a_part) orelse return null;
+            std.fmt.parseInt(i32, a_part, 10) catch return null;
 
         const b: i32 = if (b_part.len == 0)
             0
         else
-            parseSignedInt(b_part) orelse return null;
+            std.fmt.parseInt(i32, b_part, 10) catch return null;
 
         return .{ .a = a, .b = b };
     }
 
-    const only = parseSignedInt(expr) orelse return null;
+    const only = std.fmt.parseInt(i32, expr, 10) catch return null;
     return .{ .a = 0, .b = only };
-}
-
-fn parseSignedInt(bytes: []const u8) ?i32 {
-    if (bytes.len == 0) return null;
-    var start: usize = 0;
-    var sign: i64 = 1;
-    if (bytes[0] == '+') {
-        start = 1;
-    } else if (bytes[0] == '-') {
-        start = 1;
-        sign = -1;
-    }
-    if (start >= bytes.len) return null;
-    const mag = std.fmt.parseInt(i64, bytes[start..], 10) catch return null;
-    const value = sign * mag;
-    if (value < std.math.minInt(i32) or value > std.math.maxInt(i32)) return null;
-    return @intCast(value);
 }
 
 test "runtime selector parser covers all attribute operators" {
