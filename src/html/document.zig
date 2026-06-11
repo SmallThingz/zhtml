@@ -1,3 +1,5 @@
+// we can reduce the size of the raw node further!?
+// doubt it's possible; Would be crazy tho.
 const std = @import("std");
 const tables = @import("tables.zig");
 const attr = @import("attr.zig");
@@ -12,11 +14,6 @@ const instrumentation = @import("../debug/instrumentation.zig");
 const parser = @import("parser.zig");
 const common = @import("../common.zig");
 const IndexInt = common.IndexInt;
-
-// SAFETY: Document retains the parsed source reference for the life of
-// nodes/iterators. In destructive mode `source` aliases the caller's
-// writable buffer. Node spans and indices are validated on parse; helpers guard
-// against InvalidIndex and out-of-range indexes.
 
 /// Sentinel used for missing node indexes and invalid spans.
 pub const InvalidIndex: IndexInt = common.InvalidIndex;

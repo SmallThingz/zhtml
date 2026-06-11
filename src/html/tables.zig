@@ -1,3 +1,9 @@
+// I tried combining the tables but that results in
+// ~ 0.5% (all 4 in 1 or isIdentStart+isIdentChar)
+// ~ 1.5% (isTagNameChar+isWhitespace)
+// performance loss [tested 3v3 runs for all 3 cases]
+//
+// Maybe i did something wrong or this was just noise; want to reduce the table sizes tho
 const std = @import("std");
 
 /// Builds a 256-entry boolean lookup table from a predicate.

@@ -1,3 +1,4 @@
+// Crazy innit
 const std = @import("std");
 const tables = @import("tables.zig");
 const entities = @import("entities.zig");
@@ -6,11 +7,6 @@ const common = @import("../common.zig");
 const IndexInt = common.IndexInt;
 const ExtendedGapSentinel = 0xff;
 const ExtendedGapHeaderLen = 2 + @sizeOf(IndexInt);
-
-// SAFETY: Attribute helpers operate within caller-provided node/span bounds.
-// Destructive mode mutates `doc.source` in place for lazy decode.
-// Non-destructive mode scans `doc.source` read-only and allocates only when a
-// decoded value cannot be represented as a direct source slice.
 
 pub const RawKind = enum {
     empty,

@@ -1,3 +1,5 @@
+// I am satisfied with how this ended up.
+// Tho i wonder, could there be an even faster way to do this?
 const std = @import("std");
 const tables = @import("tables.zig");
 
