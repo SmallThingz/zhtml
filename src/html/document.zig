@@ -9,7 +9,6 @@ const runtime_selector = @import("../selector/runtime.zig");
 const ast = @import("../selector/ast.zig");
 const matcher = @import("../selector/matcher.zig");
 const matcher_debug = @import("../selector/matcher_debug.zig");
-const selector_debug = @import("../debug/selector_debug.zig");
 const instrumentation = @import("../debug/instrumentation.zig");
 const parser = @import("parser.zig");
 const common = @import("../common.zig");
@@ -165,9 +164,6 @@ pub fn GetRawNode(comptime options: ParseOptions) type {
         }
     };
 }
-
-/// Default raw node layout used by type-level tests and external inspection.
-pub const RawNode = GetRawNode(.{});
 
 /// Builds the concrete node wrapper type for a parse option set.
 fn GetNode(comptime options: ParseOptions) type {
@@ -805,7 +801,7 @@ fn GetQueryDebugResult(comptime options: ParseOptions) type {
         /// First matching node, if any.
         node: ?options.Node() = null,
         /// Detailed mismatch diagnostics for the attempted query.
-        report: selector_debug.QueryDebugReport = .{},
+        report: common.QueryDebugReport = .{},
         /// Runtime parse error, if selector compilation failed.
         err: ?runtime_selector.Error = null,
     };
@@ -945,7 +941,7 @@ fn GetDocument(comptime options: ParseOptions) type {
 
         /// Runs debug selector matching from a document or node scope.
         fn debugFirstMatchFrom(self: *const @This(), sel: ast.Selector, scope_root: IndexInt) DebugQueryResultType {
-            var report: selector_debug.QueryDebugReport = .{};
+            var report: common.QueryDebugReport = .{};
             var scratch = std.heap.ArenaAllocator.init(self.allocator);
             defer scratch.deinit();
             const idx = matcher_debug.explainFirstMatch(@This(), self, scratch.allocator(), sel, scope_root, &report) orelse {
@@ -1020,7 +1016,7 @@ fn resetParsed(comptime options: ParseOptions, doc: *options.Document(), input: 
 
 /// Test helper forcing node/document layout instantiation.
 fn assertNodeTypeLayouts() void {
-    _ = @sizeOf(RawNode);
+    _ = @sizeOf(GetRawNode(.{}));
     _ = @sizeOf(GetNode(.{}));
 }
 
@@ -1029,10 +1025,10 @@ test "document type excludes parser-only and shadow-source state" {
     try std.testing.expect(!@hasField(GetDocument(.{}), "original_source"));
     try std.testing.expect(!@hasField(GetDocument(.{}), "owned_shadow_source"));
     try std.testing.expect(!@hasField(GetDocument(.{}), "mutable_source"));
-    try std.testing.expect(!@hasField(RawNode, "kind"));
-    try std.testing.expect(!@hasField(RawNode, "attr_end"));
-    try std.testing.expect(!@hasField(RawNode, "first_child"));
-    try std.testing.expect(!@hasField(RawNode, "next_sibling"));
+    try std.testing.expect(!@hasField(GetRawNode(.{}), "kind"));
+    try std.testing.expect(!@hasField(GetRawNode(.{}), "attr_end"));
+    try std.testing.expect(!@hasField(GetRawNode(.{}), "first_child"));
+    try std.testing.expect(!@hasField(GetRawNode(.{}), "next_sibling"));
     try std.testing.expect(!@hasDecl(ParseOptions, "GetOpenElem"));
 }
 
@@ -2355,7 +2351,7 @@ test "runtime selector debug reports runtime selector parse errors" {
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    var report: selector_debug.QueryDebugReport = .{};
+    var report: common.QueryDebugReport = .{};
     report.reset("div[", InvalidIndex, 0);
     _ = ast.Selector.compileRuntime(arena.allocator(), "div[") catch |err| {
         report.setRuntimeParseError();

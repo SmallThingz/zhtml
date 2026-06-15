@@ -4,7 +4,6 @@ const matcher = @import("matcher.zig");
 const tables = @import("../html/tables.zig");
 const tags = @import("../html/tags.zig");
 const attr = @import("../html/attr.zig");
-const selector_debug = @import("../debug/selector_debug.zig");
 const common = @import("../common.zig");
 const IndexInt = common.IndexInt;
 
@@ -18,7 +17,7 @@ pub fn explainFirstMatch(
     allocator: std.mem.Allocator,
     selector: ast.Selector,
     scope_root: IndexInt,
-    noalias report: *selector_debug.QueryDebugReport,
+    noalias report: *common.QueryDebugReport,
 ) ?IndexInt {
     report.reset(selector.source, scope_root, selector.groups.len);
 
@@ -29,19 +28,19 @@ pub fn explainFirstMatch(
         if (!doc.nodes[i].isElement(i)) continue;
         report.visited_elements += 1;
 
-        var first_failure: selector_debug.Failure = .{};
+        var first_failure: common.Failure = .{};
         var g_idx: usize = 0;
         while (g_idx < selector.groups.len) : (g_idx += 1) {
             const group = selector.groups[g_idx];
             if (group.compound_len == 0) continue;
-            if (g_idx < selector_debug.MaxSelectorGroups) {
+            if (g_idx < common.MaxSelectorGroups) {
                 report.group_eval_counts[g_idx] += 1;
             }
 
             var one_group_selector = selector;
             one_group_selector.groups = selector.groups[g_idx .. g_idx + 1];
             if (matcher.matchesSelectorAt(Doc, doc, one_group_selector, i, scope_root)) {
-                if (g_idx < selector_debug.MaxSelectorGroups) {
+                if (g_idx < common.MaxSelectorGroups) {
                     report.group_match_counts[g_idx] += 1;
                 }
                 report.matched_index = i;
@@ -70,7 +69,7 @@ fn classifyGroupFailure(
     node_index: IndexInt,
     scope_root: IndexInt,
     group_index: usize,
-) selector_debug.Failure {
+) common.Failure {
     const rightmost = group.compound_len - 1;
     const comp_abs: usize = @intCast(group.compound_start + rightmost);
     const comp = selector.compounds[comp_abs];
@@ -104,7 +103,7 @@ fn classifyCompoundFailure(
     node_index: IndexInt,
     group_index: usize,
     compound_index: usize,
-) selector_debug.Failure {
+) common.Failure {
     const node = &doc.nodes[node_index];
     var predicate_index: u16 = 0;
     const g: u16 = @intCast(@min(group_index, std.math.maxInt(u16)));
