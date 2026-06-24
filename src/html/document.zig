@@ -359,20 +359,46 @@ fn GetNode(comptime options: ParseOptions) type {
 
         /// Materializes text by scanning all text descendants from a known first text node.
         fn innerTextOwnedFromScan(self: @This(), gpa: std.mem.Allocator, comptime opts: Self.TextOptions, scan: InnerTextProbe.Scan) ![]const u8 {
-            var out = std.ArrayList(u8).empty;
-            defer out.deinit(gpa);
             const doc = self.doc;
             const node_raw = self.raw();
 
-            try out.appendSlice(gpa, doc.nodes[scan.first_idx].name_or_text.slice(doc.source));
+            var total: usize = 0;
+            var last_byte: u8 = 0;
+            {
+                const first_slice = doc.nodes[scan.first_idx].name_or_text.slice(doc.source);
+                total = first_slice.len;
+                if (total > 0) last_byte = first_slice[total - 1];
 
-            var idx = scan.resume_idx;
-            while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
-                if (!doc.nodeAt(idx).isText()) continue;
-                if (out.items.len != 0 and !tables.WhitespaceTable[out.items[out.items.len - 1]]) {
-                    try out.append(gpa, ' ');
+                var idx = scan.resume_idx;
+                while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
+                    if (!doc.nodeAt(idx).isText()) continue;
+                    const slice = doc.nodes[idx].name_or_text.slice(doc.source);
+                    if (slice.len == 0) continue;
+                    if (total != 0 and !tables.WhitespaceTable[last_byte]) {
+                        total = try std.math.add(usize, total, 1);
+                        last_byte = ' ';
+                    }
+                    last_byte = slice[slice.len - 1];
+                    total = try std.math.add(usize, total, slice.len);
                 }
-                try out.appendSlice(gpa, doc.nodes[idx].name_or_text.slice(doc.source));
+            }
+
+            var out = try std.ArrayList(u8).initCapacity(gpa, total);
+            errdefer out.deinit(gpa);
+
+            {
+                out.appendSliceAssumeCapacity(doc.nodes[scan.first_idx].name_or_text.slice(doc.source));
+
+                var idx = scan.resume_idx;
+                while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
+                    if (!doc.nodeAt(idx).isText()) continue;
+                    const slice = doc.nodes[idx].name_or_text.slice(doc.source);
+                    if (slice.len == 0) continue;
+                    if (out.items.len != 0 and !tables.WhitespaceTable[out.items[out.items.len - 1]]) {
+                        out.appendAssumeCapacity(' ');
+                    }
+                    out.appendSliceAssumeCapacity(slice);
+                }
             }
 
             return try finishInnerTextOwned(&out, gpa, opts);
