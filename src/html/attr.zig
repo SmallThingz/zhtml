@@ -1,4 +1,3 @@
-// Crazy innit
 const std = @import("std");
 const tables = @import("tables.zig");
 const entities = @import("entities.zig");
@@ -44,6 +43,12 @@ const LookupKind = enum(u8) {
     id,
     class,
     href,
+};
+
+const AttrValueMode = enum {
+    raw,
+    destructive,
+    non_destructive,
 };
 
 /// Scans the next attribute name starting at `start`.
@@ -126,7 +131,11 @@ pub fn findParsedValueEnd(source: []const u8, value_start: usize, span_end: usiz
     std.debug.assert(span_end <= source.len);
     std.debug.assert(value_start <= span_end);
     var i = value_start;
-    while (i < span_end and source[i] != 0 and (quoted or source[i] != '>')) : (i += 1) {}
+    if (quoted) {
+        while (i < span_end and source[i] != 0) : (i += 1) {}
+    } else {
+        while (i < span_end and source[i] != 0 and source[i] != '>') : (i += 1) {}
+    }
     return i;
 }
 
@@ -207,46 +216,7 @@ pub inline fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []cons
 /// Returns the current raw attribute value span for `name`.
 /// In destructive documents this may point at already-mutated decoded bytes.
 pub fn getAttrValueRaw(noalias doc_ptr: anytype, node: anytype, name: []const u8) ?[]const u8 {
-    const source = doc_ptr.source;
-    const lookup_kind = classifyLookupName(name);
-
-    var i: usize = node.name_or_text.end();
-    const end = source.len;
-    if (i >= end) return null;
-
-    while (i < end) {
-        skipWhitespace(source, end, &i);
-        if (i >= end) return null;
-
-        const scanned = scanAttrNameOrSkip(source, end, i);
-        const attr_name = scanned.name orelse return null;
-        i = scanned.next_start;
-        if (attr_name.len == 0) continue;
-        const is_target = matchesLookupName(attr_name, name, lookup_kind);
-
-        if (i >= end) return if (is_target) "" else null;
-
-        const delim = source[i];
-        if (delim == '=') {
-            const raw = parseRawValue(source, end, i);
-            if (is_target) return source[raw.start..raw.end];
-            i = raw.next_start;
-            continue;
-        }
-
-        if (delim == 0) {
-            const parsed = parseParsedValue(source, end, i);
-            if (is_target) return parsed.value;
-            i = parsed.next_start;
-            continue;
-        }
-
-        if (is_target) return "";
-        if (delim == '>' or delim == '/') return null;
-        i += 1;
-    }
-
-    return null;
+    return getAttrValueSingle(doc_ptr, node, name, undefined, .raw) catch unreachable;
 }
 
 /// One-pass multi-attribute collector used by matcher hot paths.
@@ -344,8 +314,17 @@ pub fn collectSelectedValues(
 
 /// Finds and lazily decodes one attribute value in destructive document source.
 inline fn getAttrValueDestructive(doc: anytype, node: anytype, name: []const u8) ?[]const u8 {
-    const mut_doc = @constCast(doc);
-    const source: []u8 = mut_doc.source;
+    return getAttrValueSingle(doc, node, name, undefined, .destructive) catch unreachable;
+}
+
+/// Finds and materializes one attribute value without mutating document source.
+inline fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
+    return getAttrValueSingle(doc, node, name, allocator, .non_destructive);
+}
+
+/// Shared single-attribute traversal; mode only changes value materialization.
+inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator, comptime mode: AttrValueMode) !?[]const u8 {
+    const source = if (comptime mode == .destructive) @constCast(doc).source else doc.source;
     const lookup_kind = classifyLookupName(name);
 
     var i: usize = node.name_or_text.end();
@@ -356,30 +335,23 @@ inline fn getAttrValueDestructive(doc: anytype, node: anytype, name: []const u8)
         skipWhitespace(source, end, &i);
         if (i >= end) return null;
 
-        const c = source[i];
-        if (c == '>' or c == '/') return null;
-
-        const name_start = i;
-        while (i < end and tables.IdentCharTable[source[i]]) : (i += 1) {}
-        if (i == name_start) {
-            i += 1;
-            continue;
-        }
-
-        const name_end = i;
-        const attr_name = source[name_start..name_end];
+        const scanned = scanAttrNameOrSkip(source, end, i);
+        const attr_name = scanned.name orelse return null;
+        i = scanned.next_start;
+        if (attr_name.len == 0) continue;
         const is_target = matchesLookupName(attr_name, name, lookup_kind);
 
-        if (i >= end) {
-            if (is_target) return "";
-            return null;
-        }
+        if (i >= end) return if (is_target) "" else null;
 
         const delim = source[i];
         if (delim == '=') {
             const raw = parseRawValue(source, end, i);
             if (is_target) {
-                return materializeRawValue(source, end, i, raw);
+                return switch (comptime mode) {
+                    .raw => source[raw.start..raw.end],
+                    .destructive => materializeRawValue(source, end, i, raw),
+                    .non_destructive => try materializeRawValueOwned(allocator, source, raw),
+                };
             }
             i = raw.next_start;
             continue;
@@ -389,56 +361,6 @@ inline fn getAttrValueDestructive(doc: anytype, node: anytype, name: []const u8)
             const parsed = parseParsedValue(source, end, i);
             if (is_target) return parsed.value;
             i = parsed.next_start;
-            continue;
-        }
-
-        if (is_target) return "";
-
-        if (delim == '>' or delim == '/') return null;
-
-        if (tables.WhitespaceTable[delim]) {
-            i += 1;
-            continue;
-        }
-
-        i += 1;
-    }
-
-    return null;
-}
-
-/// Finds and materializes one attribute value without mutating document source.
-inline fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
-    const source: []const u8 = doc.source;
-    const lookup_kind = classifyLookupName(name);
-
-    var i: usize = node.name_or_text.end();
-    const end = source.len;
-    if (i >= end) return null;
-
-    while (i < end) {
-        skipWhitespace(source, end, &i);
-        if (i >= end) return null;
-
-        const c = source[i];
-        if (c == '>' or c == '/') return null;
-
-        const scanned = scanAttrNameOrSkip(source, end, i);
-        const attr_name = scanned.name orelse return null;
-        i = scanned.next_start;
-        if (attr_name.len == 0) continue;
-        const is_target = matchesLookupName(attr_name, name, lookup_kind);
-
-        if (i >= end) {
-            if (is_target) return "";
-            return null;
-        }
-
-        const delim = source[i];
-        if (delim == '=') {
-            const raw = parseRawValue(source, end, i);
-            if (is_target) return try materializeRawValueOwned(allocator, source, raw);
-            i = raw.next_start;
             continue;
         }
 
@@ -543,8 +465,6 @@ fn patchGap(source: []u8, span_end: usize, value_end: usize, raw_next_start: usi
         std.mem.writeInt(IndexInt, source[gap_start + 2 .. gap_start + ExtendedGapHeaderLen][0..@sizeOf(IndexInt)], skip, nativeEndian());
         return;
     }
-
-    source[gap_start] = ' ';
 }
 
 /// Returns the first unresolved requested name matching `name`.
