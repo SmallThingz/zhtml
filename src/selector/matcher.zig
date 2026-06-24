@@ -167,11 +167,14 @@ pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
 /// Returns first matching node index for `selector` within optional `scope_root`.
 pub fn firstMatchIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: IndexInt) ?IndexInt {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return null;
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch.deinit();
+
     var best: ?IndexInt = null;
     // Group matches are independent; the earliest document-order hit wins.
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
-        const idx = firstMatchForGroup(Doc, doc, selector, group, scope_root) orelse continue;
+        const idx = firstMatchForGroup(Doc, doc, selector, group, scope_root, &scratch) orelse continue;
         if (best == null or idx < best.?) best = idx;
     }
     return best;
@@ -180,10 +183,13 @@ pub fn firstMatchIndex(comptime Doc: type, noalias doc: *const Doc, selector: as
 /// Returns whether `node_index` matches any selector group within scope.
 pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt) bool {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch.deinit();
+
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
         const rightmost = group.compound_len - 1;
-        if (matchGroupFromRight(Doc, doc, selector, group, rightmost, node_index, scope_root)) return true;
+        if (matchGroupFromRight(Doc, doc, selector, group, rightmost, node_index, scope_root, &scratch)) return true;
     }
     return false;
 }
@@ -201,7 +207,7 @@ const MatchFrame = struct {
     cursor: IndexInt = InvalidIndex,
 };
 
-fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, rel_index: IndexInt, node_index: IndexInt, scope_root: IndexInt) bool {
+fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, rel_index: IndexInt, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) bool {
     if (group.compound_len == 0) {
         @branchHint(.cold);
         return false;
@@ -210,7 +216,7 @@ fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: as
     const needed_frames: usize = @intCast(group.compound_len);
     var local_frames: [LocalMatchFrameCap]MatchFrame = undefined;
     var heap_frames: ?[]MatchFrame = null;
-    defer if (heap_frames) |frames| std.heap.page_allocator.free(frames);
+    defer if (heap_frames) |hf| std.heap.page_allocator.free(hf);
 
     const frames: []MatchFrame = if (needed_frames <= LocalMatchFrameCap)
         local_frames[0..needed_frames]
@@ -238,7 +244,7 @@ fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: as
             .enter => {
                 const comp_abs: usize = @intCast(group.compound_start + frame.rel_index);
                 const comp = selector.compounds[comp_abs];
-                if (!matchesCompound(Doc, doc, selector, comp, frame.node_index)) {
+                if (!matchesCompound(Doc, doc, selector, comp, frame.node_index, scratch)) {
                     depth -= 1;
                     continue;
                 }
@@ -328,23 +334,22 @@ fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: as
     return false;
 }
 
-fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selector, group: ast.Group, scope_root: IndexInt) ?IndexInt {
+fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selector, group: ast.Group, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) ?IndexInt {
     const rightmost = group.compound_len - 1;
 
     const bounds = traversalBounds(Doc, doc, scope_root);
     var i = bounds.start;
     while (i < bounds.end_excl and i < doc.nodes.len) : (i += 1) {
         if (!doc.nodes[i].isElement(i)) continue;
-        if (matchGroupFromRight(Doc, doc, selector, group, rightmost, i, scope_root)) return i;
+        if (matchGroupFromRight(Doc, doc, selector, group, rightmost, i, scope_root, scratch)) return i;
     }
     return null;
 }
 
-fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt) bool {
+fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, scratch: *std.heap.ArenaAllocator) bool {
     if (!doc.nodes[node_index].isElement(node_index)) return false;
     const node = &doc.nodes[node_index];
-    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer scratch.deinit();
+    _ = scratch.reset(.retain_capacity);
     const scratch_alloc = scratch.allocator();
     // Per-node memo for attribute probes inside one compound match.
     // This preserves selector-order short-circuiting while avoiding repeated
@@ -519,11 +524,11 @@ fn attrValueByNameFrom(
         if (findCollectedEntry(c, name)) |idx| {
             if (c.materialized or c.looked[idx]) return c.values[idx];
 
-            if (c.request_count == 0) {
+            if (!c.requested_once) {
                 const value = attrValueByName(doc, node, allocator, probe, name);
                 c.values[idx] = value;
                 c.looked[idx] = true;
-                c.request_count = 1;
+                c.requested_once = true;
                 return value;
             }
 
@@ -578,9 +583,9 @@ const AttrProbe = struct {
 
 const CollectedAttrs = struct {
     count: usize = 0,
-    request_count: u8 = 0,
+    requested_once: bool = false,
     materialized: bool = false,
-    names: [MaxCollectedAttrs][]const u8 = [_][]const u8{""} ** MaxCollectedAttrs,
+    names: [MaxCollectedAttrs][]const u8 = undefined,
     values: [MaxCollectedAttrs]?[]const u8 = [_]?[]const u8{null} ** MaxCollectedAttrs,
     looked: [MaxCollectedAttrs]bool = [_]bool{false} ** MaxCollectedAttrs,
 };

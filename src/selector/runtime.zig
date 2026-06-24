@@ -24,7 +24,7 @@ pub fn compileRuntimeImpl(alloc: std.mem.Allocator, source: []const u8) Error!as
 }
 
 const Parser = struct {
-    source: []const u8,
+    source: []u8,
     i: usize,
     alloc: std.mem.Allocator,
 
@@ -35,7 +35,7 @@ const Parser = struct {
     pseudos: std.ArrayList(ast.Pseudo),
     not_items: std.ArrayList(ast.NotSimple),
 
-    fn init(source: []const u8, alloc: std.mem.Allocator) Parser {
+    fn init(source: []u8, alloc: std.mem.Allocator) Parser {
         return .{
             .source = source,
             .i = 0,
@@ -62,52 +62,14 @@ const Parser = struct {
 
         while (true) {
             const group_start: IndexInt = @intCast(self.compounds.items.len);
-            var first_combinator: ast.Combinator = .none;
-            if (self.i < self.source.len) {
-                first_combinator = switch (self.peek()) {
-                    '>' => blk: {
-                        self.i += 1;
-                        self.skipWs();
-                        break :blk ast.Combinator.child;
-                    },
-                    '+' => blk: {
-                        self.i += 1;
-                        self.skipWs();
-                        break :blk ast.Combinator.adjacent;
-                    },
-                    '~' => blk: {
-                        self.i += 1;
-                        self.skipWs();
-                        break :blk ast.Combinator.sibling;
-                    },
-                    else => .none,
-                };
-            }
+            const first_combinator = self.consumeCombinator() orelse .none;
             try self.parseCompound(first_combinator);
 
             while (true) {
                 const saw_ws = self.skipWsRet();
                 if (self.i >= self.source.len or self.peek() == ',') break;
 
-                var combinator: ast.Combinator = if (saw_ws) .descendant else .none;
-                combinator = switch (self.peek()) {
-                    '>' => blk: {
-                        self.i += 1;
-                        self.skipWs();
-                        break :blk ast.Combinator.child;
-                    },
-                    '+' => blk: {
-                        self.i += 1;
-                        self.skipWs();
-                        break :blk ast.Combinator.adjacent;
-                    },
-                    '~' => blk: {
-                        self.i += 1;
-                        self.skipWs();
-                        break :blk ast.Combinator.sibling;
-                    },
-                    else => combinator,
-                };
+                const combinator = self.consumeCombinator() orelse if (saw_ws) ast.Combinator.descendant else .none;
 
                 if (combinator == .none) return error.InvalidSelector;
                 try self.parseCompound(combinator);
@@ -155,6 +117,19 @@ const Parser = struct {
             .pseudos = pseudos,
             .not_items = not_items,
         };
+    }
+
+    fn consumeCombinator(noalias self: *Parser) ?ast.Combinator {
+        if (self.i >= self.source.len) return null;
+        const combinator: ast.Combinator = switch (self.peek()) {
+            '>' => .child,
+            '+' => .adjacent,
+            '~' => .sibling,
+            else => return null,
+        };
+        self.i += 1;
+        self.skipWs();
+        return combinator;
     }
 
     fn parseCompound(noalias self: *Parser, combinator: ast.Combinator) Error!void {
@@ -225,38 +200,53 @@ const Parser = struct {
         self.lowerRange(name);
         self.skipWs();
 
-        if (!self.consumeIf('=')) {
-            if (!self.consumeIf('^')) {
-                if (!self.consumeIf('$')) {
-                    if (!self.consumeIf('*')) {
-                        if (!self.consumeIf('~')) {
-                            if (!self.consumeIf('|')) {
-                                if (!self.consumeIf(']')) return error.InvalidSelector;
-                                return .{ .name = name, .op = .exists, .value = .{} };
-                            }
-                            if (!self.consumeIf('=')) return error.InvalidSelector;
-                            const parsed = try self.parseAttrValueThenClose();
-                            return .{ .name = name, .op = .dash_match, .case = parsed.case, .value = parsed.value };
-                        }
-                        if (!self.consumeIf('=')) return error.InvalidSelector;
-                        const parsed = try self.parseAttrValueThenClose();
-                        return .{ .name = name, .op = .includes, .case = parsed.case, .value = parsed.value };
-                    }
-                    if (!self.consumeIf('=')) return error.InvalidSelector;
-                    const parsed = try self.parseAttrValueThenClose();
-                    return .{ .name = name, .op = .contains, .case = parsed.case, .value = parsed.value };
-                }
-                if (!self.consumeIf('=')) return error.InvalidSelector;
-                const parsed = try self.parseAttrValueThenClose();
-                return .{ .name = name, .op = .suffix, .case = parsed.case, .value = parsed.value };
-            }
-            if (!self.consumeIf('=')) return error.InvalidSelector;
-            const parsed = try self.parseAttrValueThenClose();
-            return .{ .name = name, .op = .prefix, .case = parsed.case, .value = parsed.value };
-        }
-
+        const op = (try self.parseAttrOp()) orelse return .{ .name = name, .op = .exists, .value = .{} };
         const parsed = try self.parseAttrValueThenClose();
-        return .{ .name = name, .op = .eq, .case = parsed.case, .value = parsed.value };
+        return .{ .name = name, .op = op, .case = parsed.case, .value = parsed.value };
+    }
+
+    fn parseAttrOp(noalias self: *Parser) Error!?ast.AttrOp {
+        return switch (self.peekOrInvalid()) {
+            ']' => {
+                self.i += 1;
+                return null;
+            },
+            '=' => blk: {
+                self.i += 1;
+                break :blk .eq;
+            },
+            '^' => blk: {
+                self.i += 1;
+                if (!self.consumeIf('=')) return error.InvalidSelector;
+                break :blk .prefix;
+            },
+            '$' => blk: {
+                self.i += 1;
+                if (!self.consumeIf('=')) return error.InvalidSelector;
+                break :blk .suffix;
+            },
+            '*' => blk: {
+                self.i += 1;
+                if (!self.consumeIf('=')) return error.InvalidSelector;
+                break :blk .contains;
+            },
+            '~' => blk: {
+                self.i += 1;
+                if (!self.consumeIf('=')) return error.InvalidSelector;
+                break :blk .includes;
+            },
+            '|' => blk: {
+                self.i += 1;
+                if (!self.consumeIf('=')) return error.InvalidSelector;
+                break :blk .dash_match;
+            },
+            else => return error.InvalidSelector,
+        };
+    }
+
+    fn peekOrInvalid(self: *const Parser) u8 {
+        if (self.i >= self.source.len) return 0;
+        return self.source[self.i];
     }
 
     const ParsedAttrValue = struct {
@@ -297,57 +287,62 @@ const Parser = struct {
         }
 
         if (std.ascii.eqlIgnoreCase(name_slice, "nth-child")) {
-            self.skipWs();
-            if (!self.consumeIf('(')) return error.InvalidSelector;
-            self.skipWs();
-            const arg = self.parseUntil(')') orelse return error.InvalidSelector;
-            const nth = parseNthExpr(tables.trimAsciiWhitespace(arg.slice(self.source))) orelse return error.InvalidSelector;
-            try self.pushPseudo(.{ .kind = .nth_child, .nth = nth });
+            try self.parseNthChildPseudo();
             return;
         }
 
         if (std.ascii.eqlIgnoreCase(name_slice, "not")) {
-            self.skipWs();
-            if (!self.consumeIf('(')) return error.InvalidSelector;
-            self.skipWs();
-            const item = try self.parseSimpleNot();
-            self.skipWs();
-            if (!self.consumeIf(')')) return error.InvalidSelector;
-            try self.pushNotItem(item);
+            try self.parseNotPseudo();
             return;
         }
 
         return error.InvalidSelector;
     }
 
+    fn parseNthChildPseudo(noalias self: *Parser) Error!void {
+        self.skipWs();
+        if (!self.consumeIf('(')) return error.InvalidSelector;
+        self.skipWs();
+        const arg = self.parseUntil(')') orelse return error.InvalidSelector;
+        const nth = parseNthExpr(tables.trimAsciiWhitespace(arg.slice(self.source))) orelse return error.InvalidSelector;
+        try self.pushPseudo(.{ .kind = .nth_child, .nth = nth });
+    }
+
+    fn parseNotPseudo(noalias self: *Parser) Error!void {
+        self.skipWs();
+        if (!self.consumeIf('(')) return error.InvalidSelector;
+        self.skipWs();
+        const item = try self.parseSimpleNot();
+        self.skipWs();
+        if (!self.consumeIf(')')) return error.InvalidSelector;
+        try self.pushNotItem(item);
+    }
+
     fn parseSimpleNot(noalias self: *Parser) Error!ast.NotSimple {
         if (self.i >= self.source.len) return error.InvalidSelector;
-
-        if (self.peek() == '#') {
-            self.i += 1;
-            const id = self.parseIdent() orelse return error.InvalidSelector;
-            return .{ .kind = .id, .text = id };
-        }
-
-        if (self.peek() == '.') {
-            self.i += 1;
-            const c = self.parseIdent() orelse return error.InvalidSelector;
-            return .{ .kind = .class, .text = c };
-        }
-
-        if (self.peek() == '[') {
-            self.i += 1;
-            const attr = try self.parseAttrSelector();
-            return .{ .kind = .attr, .attr = attr };
-        }
-
-        if (tables.IdentStartTable[self.peek()]) {
-            const tag = self.parseIdent() orelse return error.InvalidSelector;
-            self.lowerRange(tag);
-            return .{ .kind = .tag, .text = tag };
-        }
-
-        return error.InvalidSelector;
+        return switch (self.peek()) {
+            '#' => blk: {
+                self.i += 1;
+                const id = self.parseIdent() orelse return error.InvalidSelector;
+                break :blk .{ .kind = .id, .text = id };
+            },
+            '.' => blk: {
+                self.i += 1;
+                const c = self.parseIdent() orelse return error.InvalidSelector;
+                break :blk .{ .kind = .class, .text = c };
+            },
+            '[' => blk: {
+                self.i += 1;
+                const attr = try self.parseAttrSelector();
+                break :blk .{ .kind = .attr, .attr = attr };
+            },
+            else => blk: {
+                if (!tables.IdentStartTable[self.peek()]) return error.InvalidSelector;
+                const tag = self.parseIdent() orelse return error.InvalidSelector;
+                self.lowerRange(tag);
+                break :blk .{ .kind = .tag, .text = tag };
+            },
+        };
     }
 
     fn parseUntil(noalias self: *Parser, terminator: u8) ?ast.Range {
@@ -395,7 +390,7 @@ const Parser = struct {
     fn lowerRange(noalias self: *Parser, range: ast.Range) void {
         const start: usize = @intCast(range.start);
         const end = start + @as(usize, @intCast(range.len));
-        const bytes = @constCast(self.source[start..end]);
+        const bytes = self.source[start..end];
         _ = std.ascii.lowerString(bytes, bytes);
     }
 
