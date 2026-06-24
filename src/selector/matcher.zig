@@ -167,7 +167,7 @@ pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
 /// Returns first matching node index for `selector` within optional `scope_root`.
 pub fn firstMatchIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: IndexInt) ?IndexInt {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return null;
-    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var scratch = std.heap.ArenaAllocator.init(doc.allocator);
     defer scratch.deinit();
 
     var best: ?IndexInt = null;
@@ -183,7 +183,7 @@ pub fn firstMatchIndex(comptime Doc: type, noalias doc: *const Doc, selector: as
 /// Returns whether `node_index` matches any selector group within scope.
 pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt) bool {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
-    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var scratch = std.heap.ArenaAllocator.init(doc.allocator);
     defer scratch.deinit();
 
     for (selector.groups) |group| {
@@ -216,13 +216,13 @@ fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: as
     const needed_frames: usize = @intCast(group.compound_len);
     var local_frames: [LocalMatchFrameCap]MatchFrame = undefined;
     var heap_frames: ?[]MatchFrame = null;
-    defer if (heap_frames) |hf| std.heap.page_allocator.free(hf);
+    defer if (heap_frames) |hf| doc.allocator.free(hf);
 
     const frames: []MatchFrame = if (needed_frames <= LocalMatchFrameCap)
         local_frames[0..needed_frames]
     else blk: {
         @branchHint(.cold);
-        const buf = std.heap.page_allocator.alloc(MatchFrame, needed_frames) catch {
+        const buf = doc.allocator.alloc(MatchFrame, needed_frames) catch {
             @branchHint(.cold);
             return false;
         };
