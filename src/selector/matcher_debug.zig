@@ -18,7 +18,7 @@ pub fn explainFirstMatch(
     selector: ast.Selector,
     scope_root: IndexInt,
     noalias report: *common.QueryDebugReport,
-) ?IndexInt {
+) !?IndexInt {
     report.reset(selector.source, scope_root, selector.groups.len);
 
     const bounds = matcher.traversalBounds(Doc, doc, scope_root);
@@ -39,7 +39,7 @@ pub fn explainFirstMatch(
 
             var one_group_selector = selector;
             one_group_selector.groups = selector.groups[g_idx .. g_idx + 1];
-            if (matcher.matchesSelectorAt(Doc, doc, one_group_selector, i, scope_root)) {
+            if (try matcher.matchesSelectorAt(Doc, doc, one_group_selector, i, scope_root)) {
                 if (g_idx < common.MaxSelectorGroups) {
                     report.group_match_counts[g_idx] += 1;
                 }
@@ -49,7 +49,7 @@ pub fn explainFirstMatch(
             }
 
             if (first_failure.isNone()) {
-                first_failure = classifyGroupFailure(doc, allocator, selector, group, i, scope_root, g_idx);
+                first_failure = try classifyGroupFailure(doc, allocator, selector, group, i, scope_root, g_idx);
             }
         }
 
@@ -69,11 +69,11 @@ fn classifyGroupFailure(
     node_index: IndexInt,
     scope_root: IndexInt,
     group_index: usize,
-) common.Failure {
+) !common.Failure {
     const rightmost = group.compound_len - 1;
     const comp_abs: usize = @intCast(group.compound_start + rightmost);
     const comp = selector.compounds[comp_abs];
-    var reason = classifyCompoundFailure(doc, allocator, selector, comp, node_index, group_index, comp_abs);
+    var reason = try classifyCompoundFailure(doc, allocator, selector, comp, node_index, group_index, comp_abs);
     if (!reason.isNone()) return reason;
 
     if (group.compound_len == 1 and comp.combinator != .none and !common.matchesScopeAnchor(doc, comp.combinator, node_index, scope_root)) {
@@ -103,7 +103,7 @@ fn classifyCompoundFailure(
     node_index: IndexInt,
     group_index: usize,
     compound_index: usize,
-) common.Failure {
+) !common.Failure {
     const node = &doc.nodes[node_index];
     var predicate_index: u16 = 0;
     const g: u16 = @intCast(@min(group_index, std.math.maxInt(u16)));
@@ -119,7 +119,7 @@ fn classifyCompoundFailure(
 
     if (comp.hasId()) {
         const id = comp.id.slice(selector.source);
-        const value = (attr.getAttrValue(doc, node, "id", allocator) catch null) orelse return .{
+        const value = (try attr.getAttrValue(doc, node, "id", allocator)) orelse return .{
             .kind = .id,
             .group_index = g,
             .compound_index = c,
@@ -132,7 +132,7 @@ fn classifyCompoundFailure(
     }
 
     if (comp.class_len != 0) {
-        const class_attr = (attr.getAttrValue(doc, node, "class", allocator) catch null) orelse return .{
+        const class_attr = (try attr.getAttrValue(doc, node, "class", allocator)) orelse return .{
             .kind = .class,
             .group_index = g,
             .compound_index = c,
@@ -151,7 +151,7 @@ fn classifyCompoundFailure(
     var attr_i: IndexInt = 0;
     while (attr_i < comp.attr_len) : (attr_i += 1) {
         const attr_sel = selector.attrs[comp.attr_start + attr_i];
-        if (!matcher.matchesAttrSelectorDebug(doc, node, allocator, selector.source, attr_sel)) {
+        if (!try matcher.matchesAttrSelectorDebug(doc, node, allocator, selector.source, attr_sel)) {
             return .{ .kind = .attr, .group_index = g, .compound_index = c, .predicate_index = predicate_index };
         }
         predicate_index += 1;
@@ -169,7 +169,7 @@ fn classifyCompoundFailure(
     var not_i: IndexInt = 0;
     while (not_i < comp.not_len) : (not_i += 1) {
         const item = selector.not_items[comp.not_start + not_i];
-        if (matchesNotSimple(doc, node, allocator, selector.source, item)) {
+        if (try matchesNotSimple(doc, node, allocator, selector.source, item)) {
             return .{ .kind = .not_simple, .group_index = g, .compound_index = c, .predicate_index = predicate_index };
         }
         predicate_index += 1;
@@ -184,7 +184,7 @@ fn matchesNotSimple(
     allocator: std.mem.Allocator,
     selector_source: []const u8,
     item: ast.NotSimple,
-) bool {
+) !bool {
     const Ctx = matcher.NotSimpleCtxDebug(@TypeOf(doc), @TypeOf(node));
     const ctx = Ctx{
         .doc = doc,
@@ -192,5 +192,5 @@ fn matchesNotSimple(
         .allocator = allocator,
         .selector_source = selector_source,
     };
-    return matcher.matchesNotSimpleCommon(ctx, item);
+    return try matcher.matchesNotSimpleCommon(ctx, item);
 }

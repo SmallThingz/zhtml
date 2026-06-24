@@ -797,7 +797,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
             while (self.next_index < self.end_index) : (self.next_index += 1) {
                 if (!self.doc.nodeAt(self.next_index).isElement()) continue;
 
-                if (matcher.matchesSelectorAtWithScratch(DocType, self.doc, self.selector, self.next_index, self.scope_root, &self.scratch.?)) {
+                if (matcher.matchesSelectorAtWithScratch(DocType, self.doc, self.selector, self.next_index, self.scope_root, &self.scratch.?) catch @panic("query matcher allocation failed")) {
                     defer self.next_index += 1;
                     return self.doc.nodeAt(self.next_index);
                 }
@@ -995,7 +995,7 @@ fn GetDocument(comptime options: ParseOptions) type {
             var report: common.QueryDebugReport = .{};
             var scratch = std.heap.ArenaAllocator.init(self.allocator);
             defer scratch.deinit();
-            const idx = matcher_debug.explainFirstMatch(@This(), self, scratch.allocator(), sel, scope_root, &report) orelse {
+            const idx = (matcher_debug.explainFirstMatch(@This(), self, scratch.allocator(), sel, scope_root, &report) catch @panic("debug query matcher allocation failed")) orelse {
                 return .{ .report = report };
             };
             return .{
@@ -1465,7 +1465,7 @@ test "matcher firstMatchIndex rejects invalid scope roots safely" {
     try resetParsed(.{}, &doc, &html);
 
     const sel = comptime ast.Selector.compile("div");
-    const idx = matcher.firstMatchIndex(GetDocument(.{}), &doc, sel, @as(IndexInt, @intCast(doc.nodes.len + 10)));
+    const idx = try matcher.firstMatchIndex(GetDocument(.{}), &doc, sel, @as(IndexInt, @intCast(doc.nodes.len + 10)));
     try std.testing.expect(idx == null);
 }
 

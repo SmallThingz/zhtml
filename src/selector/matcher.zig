@@ -91,23 +91,23 @@ pub fn matchesAttrSelectorDebug(
     allocator: std.mem.Allocator,
     selector_source: []const u8,
     sel: ast.AttrSelector,
-) bool {
+) !bool {
     const name = sel.name.slice(selector_source);
-    const raw = (attr.getAttrValue(doc, node, name, allocator) catch null) orelse return false;
+    const raw = (try attr.getAttrValue(doc, node, name, allocator)) orelse return false;
     const value = sel.value.slice(selector_source);
     return evalAttrOp(raw, value, sel.op, sel.case);
 }
 
-pub fn matchesNotSimpleCommon(ctx: anytype, item: ast.NotSimple) bool {
+pub fn matchesNotSimpleCommon(ctx: anytype, item: ast.NotSimple) !bool {
     return switch (item.kind) {
         .tag => std.ascii.eqlIgnoreCase(ctx.nodeName(), item.text.slice(ctx.selector_source)),
         .id => blk: {
             const id = item.text.slice(ctx.selector_source);
-            const v = ctx.getAttrValue("id") orelse break :blk false;
+            const v = (try ctx.getAttrValue("id")) orelse break :blk false;
             break :blk std.mem.eql(u8, v, id);
         },
-        .class => ctx.classMatches(item.text.slice(ctx.selector_source)),
-        .attr => ctx.attrMatches(item.attr),
+        .class => try ctx.classMatches(item.text.slice(ctx.selector_source)),
+        .attr => try ctx.attrMatches(item.attr),
     };
 }
 
@@ -124,15 +124,15 @@ pub fn NotSimpleCtxFast(comptime Doc: type, comptime Node: type) type {
             return self.node.name_or_text.slice(self.doc.source);
         }
 
-        fn getAttrValue(self: @This(), name: []const u8) ?[]const u8 {
+        fn getAttrValue(self: @This(), name: []const u8) !?[]const u8 {
             return attrValueByNameFrom(self.doc, self.node, self.allocator, self.probe, self.collected, name);
         }
 
-        fn classMatches(self: @This(), class_name: []const u8) bool {
+        fn classMatches(self: @This(), class_name: []const u8) !bool {
             return hasClass(self.doc, self.node, self.allocator, self.probe, self.collected, class_name);
         }
 
-        fn attrMatches(self: @This(), sel: ast.AttrSelector) bool {
+        fn attrMatches(self: @This(), sel: ast.AttrSelector) !bool {
             return matchesAttrSelector(self.doc, self.node, self.allocator, self.probe, self.collected, self.selector_source, sel);
         }
     };
@@ -149,23 +149,23 @@ pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
             return self.node.name_or_text.slice(self.doc.source);
         }
 
-        fn getAttrValue(self: @This(), name: []const u8) ?[]const u8 {
-            return attr.getAttrValue(self.doc, self.node, name, self.allocator) catch null;
+        fn getAttrValue(self: @This(), name: []const u8) !?[]const u8 {
+            return try attr.getAttrValue(self.doc, self.node, name, self.allocator);
         }
 
-        fn classMatches(self: @This(), class_name: []const u8) bool {
-            const class_attr = (attr.getAttrValue(self.doc, self.node, "class", self.allocator) catch null) orelse return false;
+        fn classMatches(self: @This(), class_name: []const u8) !bool {
+            const class_attr = (try attr.getAttrValue(self.doc, self.node, "class", self.allocator)) orelse return false;
             return tables.tokenIncludesAsciiWhitespace(class_attr, class_name);
         }
 
-        fn attrMatches(self: @This(), sel: ast.AttrSelector) bool {
+        fn attrMatches(self: @This(), sel: ast.AttrSelector) !bool {
             return matchesAttrSelectorDebug(self.doc, self.node, self.allocator, self.selector_source, sel);
         }
     };
 }
 
 /// Returns first matching node index for `selector` within optional `scope_root`.
-pub fn firstMatchIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: IndexInt) ?IndexInt {
+pub fn firstMatchIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: IndexInt) !?IndexInt {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return null;
     var scratch = std.heap.ArenaAllocator.init(doc.allocator);
     defer scratch.deinit();
@@ -174,28 +174,28 @@ pub fn firstMatchIndex(comptime Doc: type, noalias doc: *const Doc, selector: as
     // Group matches are independent; the earliest document-order hit wins.
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
-        const idx = firstMatchForGroup(Doc, doc, selector, group, scope_root, &scratch) orelse continue;
+        const idx = (try firstMatchForGroup(Doc, doc, selector, group, scope_root, &scratch)) orelse continue;
         if (best == null or idx < best.?) best = idx;
     }
     return best;
 }
 
 /// Returns whether `node_index` matches any selector group within scope.
-pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt) bool {
+pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt) !bool {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
     var scratch = std.heap.ArenaAllocator.init(doc.allocator);
     defer scratch.deinit();
 
-    return matchesSelectorAtWithScratch(Doc, doc, selector, node_index, scope_root, &scratch);
+    return try matchesSelectorAtWithScratch(Doc, doc, selector, node_index, scope_root, &scratch);
 }
 
-pub fn matchesSelectorAtWithScratch(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) bool {
+pub fn matchesSelectorAtWithScratch(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) !bool {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
 
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
         const rightmost = group.compound_len - 1;
-        if (matchGroupFromRight(Doc, doc, selector, group, rightmost, node_index, scope_root, scratch)) return true;
+        if (try matchGroupFromRight(Doc, doc, selector, group, rightmost, node_index, scope_root, scratch)) return true;
     }
     return false;
 }
@@ -213,7 +213,7 @@ const MatchFrame = struct {
     cursor: IndexInt = InvalidIndex,
 };
 
-fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, rel_index: IndexInt, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) bool {
+fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, rel_index: IndexInt, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) !bool {
     if (group.compound_len == 0) {
         @branchHint(.cold);
         return false;
@@ -228,10 +228,7 @@ fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: as
         local_frames[0..needed_frames]
     else blk: {
         @branchHint(.cold);
-        const buf = doc.allocator.alloc(MatchFrame, needed_frames) catch {
-            @branchHint(.cold);
-            return false;
-        };
+        const buf = try doc.allocator.alloc(MatchFrame, needed_frames);
         heap_frames = buf;
         break :blk buf;
     };
@@ -250,7 +247,7 @@ fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: as
             .enter => {
                 const comp_abs: usize = @intCast(group.compound_start + frame.rel_index);
                 const comp = selector.compounds[comp_abs];
-                if (!matchesCompound(Doc, doc, selector, comp, frame.node_index, scratch)) {
+                if (!try matchesCompound(Doc, doc, selector, comp, frame.node_index, scratch)) {
                     depth -= 1;
                     continue;
                 }
@@ -340,19 +337,19 @@ fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: as
     return false;
 }
 
-fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selector, group: ast.Group, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) ?IndexInt {
+fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selector, group: ast.Group, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) !?IndexInt {
     const rightmost = group.compound_len - 1;
 
     const bounds = traversalBounds(Doc, doc, scope_root);
     var i = bounds.start;
     while (i < bounds.end_excl and i < doc.nodes.len) : (i += 1) {
         if (!doc.nodes[i].isElement(i)) continue;
-        if (matchGroupFromRight(Doc, doc, selector, group, rightmost, i, scope_root, scratch)) return i;
+        if (try matchGroupFromRight(Doc, doc, selector, group, rightmost, i, scope_root, scratch)) return i;
     }
     return null;
 }
 
-fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, scratch: *std.heap.ArenaAllocator) bool {
+fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, scratch: *std.heap.ArenaAllocator) !bool {
     if (!doc.nodes[node_index].isElement(node_index)) return false;
     const node = &doc.nodes[node_index];
     _ = scratch.reset(.retain_capacity);
@@ -372,7 +369,7 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
 
     if (comp.hasId()) {
         const id = comp.id.slice(selector.source);
-        const value = attrValueByNameFrom(
+        const value = try attrValueByNameFrom(
             doc,
             node,
             scratch_alloc,
@@ -384,7 +381,7 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
     }
 
     if (comp.class_len != 0) {
-        const class_attr = attrValueByNameFrom(
+        const class_attr = try attrValueByNameFrom(
             doc,
             node,
             scratch_alloc,
@@ -398,7 +395,7 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
     var attr_i: IndexInt = 0;
     while (attr_i < comp.attr_len) : (attr_i += 1) {
         const attr_sel = selector.attrs[comp.attr_start + attr_i];
-        if (!matchesAttrSelector(doc, node, scratch_alloc, &attr_probe, collected_ptr, selector.source, attr_sel)) return false;
+        if (!try matchesAttrSelector(doc, node, scratch_alloc, &attr_probe, collected_ptr, selector.source, attr_sel)) return false;
     }
 
     var pseudo_i: IndexInt = 0;
@@ -410,7 +407,7 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
     var not_i: IndexInt = 0;
     while (not_i < comp.not_len) : (not_i += 1) {
         const item = selector.not_items[comp.not_start + not_i];
-        if (matchesNotSimple(doc, node, scratch_alloc, &attr_probe, collected_ptr, selector.source, item)) return false;
+        if (try matchesNotSimple(doc, node, scratch_alloc, &attr_probe, collected_ptr, selector.source, item)) return false;
     }
 
     return true;
@@ -424,7 +421,7 @@ fn matchesNotSimple(
     collected: ?*CollectedAttrs,
     selector_source: []const u8,
     item: ast.NotSimple,
-) bool {
+) !bool {
     const Ctx = NotSimpleCtxFast(@TypeOf(doc), @TypeOf(node));
     const ctx = Ctx{
         .doc = doc,
@@ -434,7 +431,7 @@ fn matchesNotSimple(
         .collected = collected,
         .selector_source = selector_source,
     };
-    return matchesNotSimpleCommon(ctx, item);
+    return try matchesNotSimpleCommon(ctx, item);
 }
 
 pub fn matchesPseudo(doc: anytype, node_index: IndexInt, pseudo: ast.Pseudo) bool {
@@ -442,7 +439,7 @@ pub fn matchesPseudo(doc: anytype, node_index: IndexInt, pseudo: ast.Pseudo) boo
         .first_child => prevElementSibling(doc, node_index) == null,
         .last_child => nextElementSibling(doc, node_index) == null,
         .nth_child => blk: {
-            _ = parentElement(doc, node_index) orelse break :blk false;
+            if (parentElement(doc, node_index) == null) break :blk false;
             var position: usize = 1;
             var prev = prevElementSibling(doc, node_index);
             while (prev) |idx| : (prev = prevElementSibling(doc, idx)) {
@@ -461,9 +458,9 @@ fn matchesAttrSelector(
     collected: ?*CollectedAttrs,
     selector_source: []const u8,
     sel: ast.AttrSelector,
-) bool {
+) !bool {
     const name = sel.name.slice(selector_source);
-    const raw = attrValueByNameFrom(doc, node, allocator, probe, collected, name) orelse return false;
+    const raw = (try attrValueByNameFrom(doc, node, allocator, probe, collected, name)) orelse return false;
     const value = sel.value.slice(selector_source);
     return evalAttrOp(raw, value, sel.op, sel.case);
 }
@@ -475,8 +472,8 @@ fn hasClass(
     noalias probe: *AttrProbe,
     collected: ?*CollectedAttrs,
     class_name: []const u8,
-) bool {
-    const class_attr = attrValueByNameFrom(doc, node, allocator, probe, collected, "class") orelse return false;
+) !bool {
+    const class_attr = (try attrValueByNameFrom(doc, node, allocator, probe, collected, "class")) orelse return false;
     return tables.tokenIncludesAsciiWhitespace(class_attr, class_name);
 }
 
@@ -525,20 +522,20 @@ fn attrValueByNameFrom(
     noalias probe: *AttrProbe,
     collected: ?*CollectedAttrs,
     name: []const u8,
-) ?[]const u8 {
+) !?[]const u8 {
     if (collected) |c| {
         if (findCollectedEntry(c, name)) |idx| {
             if (c.materialized or c.looked[idx]) return c.values[idx];
 
             if (!c.requested_once) {
-                const value = attrValueByName(doc, node, allocator, probe, name);
+                const value = try attrValueByName(doc, node, allocator, probe, name);
                 c.values[idx] = value;
                 c.looked[idx] = true;
                 c.requested_once = true;
                 return value;
             }
 
-            attr.collectSelectedValues(
+            try attr.collectSelectedValues(
                 doc,
                 node,
                 c.names[0..c.count],
@@ -551,16 +548,16 @@ fn attrValueByNameFrom(
             return c.values[idx];
         }
     }
-    return attrValueByName(doc, node, allocator, probe, name);
+    return try attrValueByName(doc, node, allocator, probe, name);
 }
 
-fn attrValueByName(doc: anytype, node: anytype, allocator: std.mem.Allocator, noalias probe: *AttrProbe, name: []const u8) ?[]const u8 {
+fn attrValueByName(doc: anytype, node: anytype, allocator: std.mem.Allocator, noalias probe: *AttrProbe, name: []const u8) !?[]const u8 {
     if (findProbeEntry(probe, name)) |idx| {
         return probe.entries[idx].value;
     }
 
     if (!probe.overflow and probe.count < MaxProbeEntries) {
-        const value = attr.getAttrValue(doc, node, name, allocator) catch null;
+        const value = try attr.getAttrValue(doc, node, name, allocator);
         const idx = probe.count;
         probe.entries[idx] = .{
             .name = name,
@@ -573,7 +570,7 @@ fn attrValueByName(doc: anytype, node: anytype, allocator: std.mem.Allocator, no
     probe.overflow = true;
     // Fallback for very large compounds still stays allocation-free; we simply
     // bypass memoization once the fixed probe budget is exhausted.
-    return attr.getAttrValue(doc, node, name, allocator) catch null;
+    return try attr.getAttrValue(doc, node, name, allocator);
 }
 
 const AttrProbeEntry = struct {
@@ -733,7 +730,7 @@ test "matcher direct selector entry points handle attrs classes pseudos and not"
 
     var sel = try ast.Selector.compileRuntime(alloc, "a[href^=https][class*=nav]:first-child:not(.missing)");
     defer sel.deinit(alloc);
-    try std.testing.expectEqual(@as(?IndexInt, 2), firstMatchIndex(@TypeOf(doc), &doc, sel, InvalidIndex));
-    try std.testing.expect(matchesSelectorAt(@TypeOf(doc), &doc, sel, 2, InvalidIndex));
-    try std.testing.expect(!matchesSelectorAt(@TypeOf(doc), &doc, sel, 4, InvalidIndex));
+    try std.testing.expectEqual(@as(?IndexInt, 2), try firstMatchIndex(@TypeOf(doc), &doc, sel, InvalidIndex));
+    try std.testing.expect(try matchesSelectorAt(@TypeOf(doc), &doc, sel, 2, InvalidIndex));
+    try std.testing.expect(!try matchesSelectorAt(@TypeOf(doc), &doc, sel, 4, InvalidIndex));
 }

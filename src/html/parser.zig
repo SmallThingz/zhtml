@@ -1,8 +1,3 @@
-// A lot of things use std's mem.eql which might use largest possible vector size which might not be optimal.
-// Simd instructions heat cpu more; ones with larger data size heat up more; so it may be optimal to use lower data size.
-// TODO: investigate this.
-//
-// other than that, attempts to optimize anything in here will likely fail.
 const std = @import("std");
 const tables = @import("tables.zig");
 const tags = @import("tags.zig");

@@ -226,13 +226,13 @@ pub fn collectSelectedValues(
     selected_names: []const []const u8,
     out_values: []?[]const u8,
     allocator: std.mem.Allocator,
-) void {
+) !void {
     const Doc = @TypeOf(doc_ptr.*);
     if (comptime hasConstSource(Doc)) {
         var idx: usize = 0;
         while (idx < selected_names.len) : (idx += 1) {
             if (out_values[idx] != null) continue;
-            out_values[idx] = getAttrValueNonDestructive(doc_ptr, node, selected_names[idx], allocator) catch null;
+            out_values[idx] = try getAttrValueNonDestructive(doc_ptr, node, selected_names[idx], allocator);
         }
         return;
     }
