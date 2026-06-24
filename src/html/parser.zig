@@ -454,6 +454,11 @@ fn ParseState(comptime opts: ParseOptions) type {
                 self.i += 1;
                 return;
             }
+            if (self.i + 1 < self.input.len and self.input[self.i] == '-' and self.input[self.i + 1] == '>') {
+                // Fast-path malformed short comment form: "<!--->"
+                self.i += 2;
+                return;
+            }
 
             var j = self.i;
             while (j + 2 < self.input.len) {
@@ -666,6 +671,18 @@ const NonDestructiveTestDocument = NonDestructiveTestOptions.Document();
 fn resetParsed(comptime options: ParseOptions, doc: *options.Document(), input: options.Input()) !void {
     doc.deinit();
     doc.* = try options.parse(doc.allocator, input);
+}
+
+test "malformed short comment does not swallow following nodes" {
+    const alloc = std.testing.allocator;
+    var html = "<!---><div id=x></div>".*;
+
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    var iter = doc.query("div");
+    try std.testing.expect(iter.next() != null);
 }
 
 fn expectDocumentStructureValid(doc: anytype) !void {

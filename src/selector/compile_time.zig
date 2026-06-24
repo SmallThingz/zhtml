@@ -65,8 +65,10 @@ pub fn compileImpl(comptime source: []const u8) ast.Selector {
     const pseudos = materializeSlice(ast.Pseudo, parsed.pseudos);
     const not_items = materializeSlice(ast.NotSimple, parsed.not_items);
 
+    const lowered_source = materializeSlice(u8, parsed.source);
+
     return .{
-        .source = source,
+        .source = lowered_source,
         .groups = groups,
         .compounds = compounds,
         .classes = classes,
@@ -86,6 +88,16 @@ test "compile-time parser" {
     try std.testing.expectEqual(@as(usize, 2), sel.groups.len);
     try std.testing.expectEqual(@as(usize, 3), sel.compounds.len);
     try std.testing.expect(sel.compounds[2].combinator == .adjacent);
+}
+
+test "compile-time parser returns lowered tag source" {
+    const sel = comptime compileImpl("DIV");
+    try std.testing.expectEqualStrings("div", sel.compounds[0].tag.slice(sel.source));
+}
+
+test "compile-time selector deinit is safe no-op" {
+    var sel = comptime compileImpl("div");
+    sel.deinit(std.testing.allocator);
 }
 
 test "compile-time parser covers all attribute operators" {

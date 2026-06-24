@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("ast.zig");
+const common = @import("../common.zig");
 const tables = @import("../html/tables.zig");
 const tags = @import("../html/tags.zig");
 const test_helpers = @import("test_helpers.zig");
@@ -16,6 +17,8 @@ pub const Error = error{
 
 /// Parses selector source into runtime-owned AST slices.
 pub fn compileRuntimeImpl(alloc: std.mem.Allocator, source: []const u8) Error!ast.Selector {
+    if (!common.lenFits(source.len)) return error.InvalidSelector;
+
     const owned_source = try alloc.dupe(u8, source);
     errdefer alloc.free(owned_source);
 
@@ -110,6 +113,7 @@ const Parser = struct {
 
         return .{
             .source = self.source,
+            .runtime_owned = true,
             .groups = groups,
             .compounds = compounds,
             .classes = classes,
@@ -602,4 +606,15 @@ test "runtime selector owns source bytes" {
     const cls = sel.classes[0].slice(sel.source);
     try std.testing.expectEqualStrings("x", cls);
     try std.testing.expectEqualStrings("span", sel.compounds[0].tag.slice(sel.source));
+}
+
+test "runtime selector rejects source too long for index width" {
+    if (common.MaxLen >= 1024 * 1024) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const source = try alloc.alloc(u8, common.MaxLen + 1);
+    defer alloc.free(source);
+    @memset(source, 'a');
+
+    try std.testing.expectError(error.InvalidSelector, compileRuntimeImpl(alloc, source));
 }

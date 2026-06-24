@@ -266,6 +266,8 @@ pub const Group = extern struct {
 pub const Selector = struct {
     /// Owned or borrowed selector source text.
     source: []const u8,
+    /// True when slices were allocated by runtime compilation.
+    runtime_owned: bool = false,
     /// Comma-separated selector groups.
     groups: []const Group,
     /// Flattened compound list referenced by `groups`.
@@ -291,6 +293,10 @@ pub const Selector = struct {
 
     /// Releases memory owned by runtime-compiled selector.
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (!self.runtime_owned) {
+            self.* = undefined;
+            return;
+        }
         allocator.free(@constCast(self.source));
         allocator.free(self.groups);
         allocator.free(self.compounds);
