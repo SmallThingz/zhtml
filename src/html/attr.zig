@@ -458,13 +458,10 @@ fn patchGap(source: []u8, span_end: usize, value_end: usize, raw_next_start: usi
         return;
     }
 
-    if (gap_len >= ExtendedGapHeaderLen) {
-        source[gap_start] = 0;
-        source[gap_start + 1] = ExtendedGapSentinel;
-        const skip: IndexInt = @intCast(gap_len - ExtendedGapHeaderLen);
-        std.mem.writeInt(IndexInt, source[gap_start + 2 .. gap_start + ExtendedGapHeaderLen][0..@sizeOf(IndexInt)], skip, nativeEndian());
-        return;
-    }
+    source[gap_start] = 0;
+    source[gap_start + 1] = ExtendedGapSentinel;
+    const skip: IndexInt = @intCast(gap_len - ExtendedGapHeaderLen);
+    std.mem.writeInt(IndexInt, source[gap_start + 2 .. gap_start + ExtendedGapHeaderLen][0..@sizeOf(IndexInt)], skip, nativeEndian());
 }
 
 /// Returns the first unresolved requested name matching `name`.

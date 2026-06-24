@@ -72,6 +72,11 @@ fn ParseState(comptime opts: ParseOptions) type {
             /// Last direct element child seen while this element is open.
             last_child: IndexInt = InvalidIndex,
         };
+        const TagNameScan = struct {
+            key: u64,
+            start: usize,
+            end: usize,
+        };
 
         /// Reserve capacities + add initial values to containers
         inline fn initContainers(noalias self: *Self) !void {
@@ -226,24 +231,10 @@ fn ParseState(comptime opts: ParseOptions) type {
             self.i += 1; // <
             // no whitespace after `<` is allowed, same behavior as browser
 
-            const name_start = self.i;
-            var tag_name_key: u64 = 0;
-            for (0..8) |i| {
-                if (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) {
-                    var c = self.input[self.i];
-                    c = std.ascii.toLower(c);
-                    if (!comptime opts.non_destructive) {
-                        @constCast(self.input)[self.i] = c;
-                    }
-                    tag_name_key |= @as(u64, c) << @as(u6, @intCast(i * 8));
-                    self.i += 1;
-                } else {
-                    break;
-                }
-            } else {
-                while (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) : (self.i += 1) {}
-            }
-            const name_end = self.i;
+            const tag = self.scanTagName();
+            const name_start = tag.start;
+            const name_end = tag.end;
+            const tag_name_key = tag.key;
             const tag_name = self.input[name_start..name_end];
 
             // Handle malformed input similar to browser; treated the `<` as text only
@@ -331,25 +322,10 @@ fn ParseState(comptime opts: ParseOptions) type {
             self.i += 2; // </
             // no whitespace after `<` is allowed, same behavior as browser
 
-            const name_start = self.i;
-            var close_key: u64 = 0;
-            // Closing tags rebuild the same first-8-bytes key so stack matching usually avoids slicing the stored element name.
-            for (0..8) |i| {
-                if (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) {
-                    var c = self.input[self.i];
-                    c = std.ascii.toLower(c);
-                    if (!comptime opts.non_destructive) {
-                        @constCast(self.input)[self.i] = c;
-                    }
-                    close_key |= @as(u64, c) << @as(u6, @intCast(i * 8));
-                    self.i += 1;
-                } else {
-                    break;
-                }
-            } else {
-                while (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) : (self.i += 1) {}
-            }
-            const name_end = self.i;
+            const tag = self.scanTagName();
+            const name_start = tag.start;
+            const name_end = tag.end;
+            const close_key = tag.key;
             const close_name = self.input[name_start..name_end];
 
             if (self.i < self.input.len and self.input[self.i] == '>') {
@@ -452,6 +428,23 @@ fn ParseState(comptime opts: ParseOptions) type {
             if (close_name.len <= 8) return true;
             const open_name = self.nodes.items[open.idx].name_or_text.slice(self.input);
             return std.ascii.eqlIgnoreCase(open_name[8..], close_name[8..]);
+        }
+
+        inline fn scanTagName(noalias self: *Self) TagNameScan {
+            const start = self.i;
+            var key: u64 = 0;
+            for (0..8) |i| {
+                if (self.i >= self.input.len or !tables.TagNameCharTable[self.input[self.i]]) break;
+                const c = std.ascii.toLower(self.input[self.i]);
+                if (!comptime opts.non_destructive) {
+                    @constCast(self.input)[self.i] = c;
+                }
+                key |= @as(u64, c) << @as(u6, @intCast(i * 8));
+                self.i += 1;
+            } else {
+                while (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) : (self.i += 1) {}
+            }
+            return .{ .key = key, .start = start, .end = self.i };
         }
 
         fn skipComment(noalias self: *Self) void {
@@ -614,7 +607,6 @@ fn ParseState(comptime opts: ParseOptions) type {
             return null;
         }
 
-        /// Please... Try to make this nicer. I dare you!!
         inline fn findRawTextClose(noalias self: *Self, tag_name: []const u8, tag_key: u64, start: usize) ?struct { content_end: usize, close_end: usize } {
             std.debug.assert(tag_name.len != 0);
             // Raw-text scanning only recognizes a real `</tag>` terminator.
@@ -632,30 +624,18 @@ fn ParseState(comptime opts: ParseOptions) type {
                 }
 
                 self.i = j + 2;
-                const name_start = self.i;
-                var close_key: u64 = 0;
-                for (0..8) |i| {
-                    if (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) {
-                        var c = self.input[self.i];
-                        c = std.ascii.toLower(c);
-                        if (!comptime opts.non_destructive) {
-                            @constCast(self.input)[self.i] = c;
-                        }
-                        close_key |= @as(u64, c) << @as(u6, @intCast(i * 8));
-                        self.i += 1;
-                    } else {
-                        break;
-                    }
-                } else {
-                    while (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) : (self.i += 1) {}
-                }
-
-                if (self.i == name_start) {
+                const close = self.scanTagName();
+                if (close.end == close.start) {
                     j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
                     continue;
                 }
 
-                if (self.i - name_start != tag_name.len or close_key != tag_key) {
+                if (close.end - close.start != tag_name.len or close.key != tag_key) {
+                    j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
+                    continue;
+                }
+
+                if (tag_name.len > 8 and !std.ascii.eqlIgnoreCase(self.input[close.start + 8 .. close.end], tag_name[8..])) {
                     j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
                     continue;
                 }
