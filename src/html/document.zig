@@ -815,6 +815,8 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         }
 
         /// Allocates and returns all remaining matches.
+        /// Allocator param is separate from doc.allocator — callers must free the
+        /// returned slice with same allocator passed here (not doc.allocator).
         pub fn collect(self: @This(), allocator: std.mem.Allocator) ![]NodeTypeWrapper {
             const upper_bound: usize = if (self.next_index < self.end_index and self.end_index <= self.doc.nodes.len)
                 @intCast(self.end_index - self.next_index)
@@ -885,6 +887,8 @@ fn GetChildrenIter(comptime options: ParseOptions) type {
         }
 
         /// Allocates and returns all remaining wrapped child nodes.
+        /// Allocator param is separate from doc.allocator — callers must free the
+        /// returned slice with same allocator passed here (not doc.allocator).
         pub fn collect(noalias self: *@This(), allocator: std.mem.Allocator) ![]NodeTypeWrapper {
             var count: usize = 0;
             var idx = self.next_idx;

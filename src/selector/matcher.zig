@@ -656,3 +656,84 @@ fn findProbeEntry(noalias probe: *const AttrProbe, needle: []const u8) ?usize {
     }
     return null;
 }
+
+test "matcher attr operators cover sensitive and ascii-insensitive semantics" {
+    try std.testing.expect(evalAttrOp("alpha beta", "", .exists, .sensitive));
+    try std.testing.expect(evalAttrOp("abc", "abc", .eq, .sensitive));
+    try std.testing.expect(!evalAttrOp("Abc", "abc", .eq, .sensitive));
+    try std.testing.expect(evalAttrOp("Abc", "abc", .eq, .insensitive_ascii));
+    try std.testing.expect(evalAttrOp("abcdef", "abc", .prefix, .sensitive));
+    try std.testing.expect(evalAttrOp("abcdef", "DEF", .suffix, .insensitive_ascii));
+    try std.testing.expect(evalAttrOp("abcdef", "CD", .contains, .insensitive_ascii));
+    try std.testing.expect(evalAttrOp("alpha\tbeta\ngamma", "BETA", .includes, .insensitive_ascii));
+    try std.testing.expect(!evalAttrOp("alphabet", "alpha", .includes, .sensitive));
+    try std.testing.expect(evalAttrOp("en-US", "EN", .dash_match, .insensitive_ascii));
+    try std.testing.expect(!evalAttrOp("english", "en", .dash_match, .sensitive));
+}
+
+test "matcher ascii-insensitive token include respects token boundaries" {
+    try std.testing.expect(tokenIncludesIgnoreCaseAscii("  Foo\tbar\nBAZ  ", "foo"));
+    try std.testing.expect(tokenIncludesIgnoreCaseAscii("  Foo\tbar\nBAZ  ", "baz"));
+    try std.testing.expect(!tokenIncludesIgnoreCaseAscii("foobar baz", "foo"));
+    try std.testing.expect(!tokenIncludesIgnoreCaseAscii("   ", "foo"));
+}
+
+test "matcher class one-pass requires every class token exactly" {
+    const classes = [_]ast.Range{
+        ast.Range.from(0, 3),
+        ast.Range.from(4, 7),
+        ast.Range.from(8, 13),
+    };
+    const selector: ast.Selector = .{
+        .source = "foo bar bazed",
+        .groups = &.{},
+        .compounds = &.{},
+        .classes = &classes,
+        .attrs = &.{},
+        .pseudos = &.{},
+        .not_items = &.{},
+    };
+    const comp: ast.Compound = .{ .class_start = 0, .class_len = classes.len };
+
+    try std.testing.expect(hasAllClassesOnePass(selector, comp, "bar foo bazed"));
+    try std.testing.expect(hasAllClassesOnePass(selector, comp, "foo foo bazed bar"));
+    try std.testing.expect(!hasAllClassesOnePass(selector, comp, "foo bar baz"));
+    try std.testing.expect(!hasAllClassesOnePass(selector, comp, "foobar bazed bar"));
+}
+
+test "matcher pseudo classes inspect element sibling position" {
+    const html = @import("../html/document.zig");
+    const opts: html.ParseOptions = .{ .drop_whitespace_text_nodes = .nodes };
+    const alloc = std.testing.allocator;
+    const input = try alloc.dupe(u8, "<main><p>A</p>text<span>B</span><em>C</em></main>");
+    defer alloc.free(input);
+    var doc = try opts.parse(alloc, input);
+    defer doc.deinit();
+
+    const p: IndexInt = 2;
+    const span: IndexInt = 4;
+    const em: IndexInt = 6;
+
+    try std.testing.expect(matchesPseudo(&doc, p, .{ .kind = .first_child }));
+    try std.testing.expect(!matchesPseudo(&doc, span, .{ .kind = .first_child }));
+    try std.testing.expect(matchesPseudo(&doc, em, .{ .kind = .last_child }));
+    try std.testing.expect(!matchesPseudo(&doc, span, .{ .kind = .last_child }));
+    try std.testing.expect(matchesPseudo(&doc, span, .{ .kind = .nth_child, .nth = .{ .a = 0, .b = 2 } }));
+    try std.testing.expect(matchesPseudo(&doc, em, .{ .kind = .nth_child, .nth = .{ .a = 2, .b = 1 } }));
+}
+
+test "matcher direct selector entry points handle attrs classes pseudos and not" {
+    const html = @import("../html/document.zig");
+    const opts: html.ParseOptions = .{ .drop_whitespace_text_nodes = .nodes };
+    const alloc = std.testing.allocator;
+    const input = try alloc.dupe(u8, "<main><a class='nav button' href='https-docs'>x</a><a class='nav'>y</a></main>");
+    defer alloc.free(input);
+    var doc = try opts.parse(alloc, input);
+    defer doc.deinit();
+
+    var sel = try ast.Selector.compileRuntime(alloc, "a[href^=https][class*=nav]:first-child:not(.missing)");
+    defer sel.deinit(alloc);
+    try std.testing.expectEqual(@as(?IndexInt, 2), firstMatchIndex(@TypeOf(doc), &doc, sel, InvalidIndex));
+    try std.testing.expect(matchesSelectorAt(@TypeOf(doc), &doc, sel, 2, InvalidIndex));
+    try std.testing.expect(!matchesSelectorAt(@TypeOf(doc), &doc, sel, 4, InvalidIndex));
+}
