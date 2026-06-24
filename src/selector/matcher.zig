@@ -186,10 +186,16 @@ pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: 
     var scratch = std.heap.ArenaAllocator.init(doc.allocator);
     defer scratch.deinit();
 
+    return matchesSelectorAtWithScratch(Doc, doc, selector, node_index, scope_root, &scratch);
+}
+
+pub fn matchesSelectorAtWithScratch(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) bool {
+    if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
+
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
         const rightmost = group.compound_len - 1;
-        if (matchGroupFromRight(Doc, doc, selector, group, rightmost, node_index, scope_root, &scratch)) return true;
+        if (matchGroupFromRight(Doc, doc, selector, group, rightmost, node_index, scope_root, scratch)) return true;
     }
     return false;
 }

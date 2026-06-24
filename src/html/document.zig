@@ -660,6 +660,7 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         /// Compiles selector at comptime and returns lazy descendant iterator.
+        /// Call `deinit` when stopping before exhaustion to release retained matcher scratch.
         pub fn query(self: @This(), comptime selector: []const u8) QueryIterType {
             const sel = comptime ast.Selector.compile(selector);
             if (self.doc.nodes.len == 0) return self.emptyQueryIter(sel);
@@ -668,6 +669,7 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         /// Returns lazy descendant iterator for already compiled selector.
+        /// Call `deinit` when stopping before exhaustion to release retained matcher scratch.
         pub fn queryRuntime(self: @This(), sel: ast.Selector) QueryIterType {
             if (self.doc.nodes.len == 0) return self.emptyQueryIter(sel);
             self.assertContainer();
@@ -730,6 +732,7 @@ fn firstElementChild(doc: anytype, parent_idx: IndexInt) IndexInt {
 fn GetQueryIter(comptime options: ParseOptions) type {
     return struct {
         //! Lazy selector iterator over document or scoped subtree matches.
+        //! Matcher scratch is retained across `next` calls and freed on exhaustion or `deinit`.
         const DocType = options.Document();
         const NodeTypeWrapper = options.Node();
 
@@ -743,23 +746,37 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         next_index: IndexInt = 1,
         /// Exclusive traversal bound for `next_index`.
         end_index: IndexInt = 1,
+        /// Reused matcher scratch; initialized lazily and retained between `next` calls.
+        scratch: ?std.heap.ArenaAllocator = null,
+
+        /// Releases matcher scratch if iteration stops before exhaustion.
+        pub fn deinit(noalias self: *@This()) void {
+            if (self.scratch) |*scratch| {
+                scratch.deinit();
+                self.scratch = null;
+            }
+        }
 
         /// Returns next matching node or `null` when exhausted.
         pub inline fn next(noalias self: *@This()) ?NodeTypeWrapper {
             if (self.end_index > self.doc.nodes.len) {
                 @branchHint(.cold);
                 self.next_index = self.end_index;
+                self.deinit();
                 return null;
             }
+
+            if (self.scratch == null) self.scratch = std.heap.ArenaAllocator.init(self.doc.allocator);
 
             while (self.next_index < self.end_index) : (self.next_index += 1) {
                 if (!self.doc.nodeAt(self.next_index).isElement()) continue;
 
-                if (matcher.matchesSelectorAt(DocType, self.doc, self.selector, self.next_index, self.scope_root)) {
+                if (matcher.matchesSelectorAtWithScratch(DocType, self.doc, self.selector, self.next_index, self.scope_root, &self.scratch.?)) {
                     defer self.next_index += 1;
                     return self.doc.nodeAt(self.next_index);
                 }
             }
+            self.deinit();
             return null;
         }
 
@@ -780,6 +797,8 @@ fn GetQueryIter(comptime options: ParseOptions) type {
             const out = try allocator.alloc(NodeTypeWrapper, upper_bound);
 
             var fill_it = self;
+            fill_it.scratch = null;
+            defer fill_it.deinit();
             var out_idx: usize = 0;
             while (fill_it.next()) |node| : (out_idx += 1) out[out_idx] = node;
             if (out_idx == out.len) return out;
@@ -930,11 +949,13 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Compiles selector at comptime and returns lazy iterator over matches.
+        /// Call iterator `deinit` when stopping before exhaustion.
         pub fn query(self: *const @This(), comptime selector: []const u8) QueryIterType {
             return self.root().query(selector);
         }
 
         /// Returns lazy iterator over matches for already compiled selector.
+        /// Call iterator `deinit` when stopping before exhaustion.
         pub fn queryRuntime(self: *const @This(), sel: ast.Selector) QueryIterType {
             return self.root().queryIter(sel);
         }
