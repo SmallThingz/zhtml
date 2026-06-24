@@ -2,6 +2,7 @@ const std = @import("std");
 const common = @import("common.zig");
 const instrumentation = @import("debug/instrumentation.zig");
 const document = @import("html/document.zig");
+const stream = @import("html/stream.zig");
 const selector_ast = @import("selector/ast.zig");
 
 pub const ParseInt = common.IndexInt;
@@ -10,6 +11,12 @@ pub const ParseInt = common.IndexInt;
 pub const ParseOptions = document.ParseOptions;
 /// Options controlling whitespace normalization behavior in text extraction APIs.
 pub const TextOptions = document.TextOptions;
+/// Allocation-free event parser for streaming-style HTML scans.
+pub const StreamingParser = stream.Parser;
+pub const StreamingEvent = stream.Event;
+pub const StreamingEventKind = stream.EventKind;
+pub const StreamingAttribute = stream.Attribute;
+pub const StreamingAttributeIterator = stream.AttributeIterator;
 /// Compiled selector representation shared by comptime/runtime query paths.
 pub const Selector = selector_ast.Selector;
 /// Structured query-debug output populated by debug query internals.
