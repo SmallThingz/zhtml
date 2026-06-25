@@ -328,9 +328,9 @@ const QueryResult = struct {
 const GateRow = struct {
     fixture: []const u8,
     ours_compact_mb_s: f64,
+    ours_stream_mb_s: f64,
     ours_full_mb_s: f64,
     lol_html_mb_s: f64,
-    lexbor_mb_s: ?f64 = null,
     pass: bool,
 };
 
@@ -1077,7 +1077,7 @@ fn writeMarkdown(
 
         const strlen = findParseThroughput(parse_results, "strlen", row.fixture);
         try w.print("### Fixture: `{s}`\n\n", .{row.fixture});
-        try w.writeAll("| Parser | Capability | Throughput (MB/s) | % of strlen | Median Time (ms) | Iterations |\n");
+        try w.writeAll("| Parser | Capability | Throughput | % of strlen | Median Time (ms) | Iterations |\n");
         try w.writeAll("|---|---|---:|---:|---:|---:|\n");
         for (fixture_rows.items) |r| {
             if (strlen) |s| {
@@ -1108,38 +1108,18 @@ fn writeMarkdown(
     try writeQuerySection(alloc, w, "## Query Cached Throughput", query_cached_results);
 
     if (gate_rows.len > 0) {
-        const has_lexbor = gateRowsHaveLexbor(gate_rows);
         try w.writeAll("## Parse Gate\n\n");
-        if (has_lexbor) {
-            try w.writeAll("| Fixture | ours-compact (MB/s) | ours-full (MB/s) | lol-html (MB/s) | lexbor (MB/s) | Result |\n");
-            try w.writeAll("|---|---:|---:|---:|---:|---|\n");
-        } else {
-            try w.writeAll("| Fixture | ours-compact (MB/s) | ours-full (MB/s) | lol-html (MB/s) | Result |\n");
-            try w.writeAll("|---|---:|---:|---:|---|\n");
-        }
+        try w.writeAll("| Fixture | ours-compact | ours-stream | ours-full | lol-html | Result |\n");
+        try w.writeAll("|---|---:|---:|---:|---:|---|\n");
         for (gate_rows) |g| {
-            if (has_lexbor) {
-                try w.print("| {s} | {d:.2} | {d:.2} | {d:.2} | ", .{
-                    g.fixture,
-                    g.ours_compact_mb_s,
-                    g.ours_full_mb_s,
-                    g.lol_html_mb_s,
-                });
-                if (g.lexbor_mb_s) |lexbor| {
-                    try w.print("{d:.2}", .{lexbor});
-                } else {
-                    try w.writeAll("-");
-                }
-                try w.print(" | {s} |\n", .{if (g.pass) "PASS" else "FAIL"});
-            } else {
-                try w.print("| {s} | {d:.2} | {d:.2} | {d:.2} | {s} |\n", .{
-                    g.fixture,
-                    g.ours_compact_mb_s,
-                    g.ours_full_mb_s,
-                    g.lol_html_mb_s,
-                    if (g.pass) "PASS" else "FAIL",
-                });
-            }
+            try w.print("| {s} | {d:.2} | {d:.2} | {d:.2} | {d:.2} | {s} |\n", .{
+                g.fixture,
+                g.ours_compact_mb_s,
+                g.ours_stream_mb_s,
+                g.ours_full_mb_s,
+                g.lol_html_mb_s,
+                if (g.pass) "PASS" else "FAIL",
+            });
         }
         try w.writeAll("\n");
     }
@@ -1190,25 +1170,19 @@ fn evaluateGateRows(alloc: std.mem.Allocator, profile: Profile, parse_results: [
     errdefer rows.deinit(alloc);
     for (profile.fixtures) |fx| {
         const compact = findParseThroughput(parse_results, "ours-compact", fx.name) orelse continue;
+        const stream = findParseThroughput(parse_results, "ours-stream", fx.name) orelse continue;
         const full = findParseThroughput(parse_results, "ours-full", fx.name) orelse continue;
         const lol = findParseThroughput(parse_results, "lol-html", fx.name) orelse continue;
         try rows.append(alloc, .{
             .fixture = fx.name,
             .ours_compact_mb_s = compact,
+            .ours_stream_mb_s = stream,
             .ours_full_mb_s = full,
             .lol_html_mb_s = lol,
-            .lexbor_mb_s = findParseThroughput(parse_results, "lexbor", fx.name),
             .pass = compact > lol,
         });
     }
     return rows.toOwnedSlice(alloc);
-}
-
-fn gateRowsHaveLexbor(gate_rows: []const GateRow) bool {
-    for (gate_rows) |row| {
-        if (row.lexbor_mb_s != null) return true;
-    }
-    return false;
 }
 
 fn fixtureIterations(profile: Profile, fixture: []const u8) usize {
@@ -1232,12 +1206,15 @@ fn rerunFailedGateRows(io: std.Io, alloc: std.mem.Allocator, profile: Profile, g
 
         const ours = try benchParseOne(io, alloc, "ours-compact", row.fixture, iters);
         defer alloc.free(ours.samples_ns);
+        const stream = try benchParseOne(io, alloc, "ours-stream", row.fixture, iters);
+        defer alloc.free(stream.samples_ns);
         const full = try benchParseOne(io, alloc, "ours-full", row.fixture, iters);
         defer alloc.free(full.samples_ns);
         const lol = try benchParseOne(io, alloc, "lol-html", row.fixture, iters);
         defer alloc.free(lol.samples_ns);
 
         row.ours_compact_mb_s = ours.throughput_mb_s;
+        row.ours_stream_mb_s = stream.throughput_mb_s;
         row.ours_full_mb_s = full.throughput_mb_s;
         row.lol_html_mb_s = lol.throughput_mb_s;
         row.pass = row.ours_compact_mb_s > row.lol_html_mb_s;
@@ -1283,7 +1260,7 @@ fn renderConsole(
             }
         }.lt);
 
-        const headers = [_][]const u8{ "Parser", "Capability", "Throughput (MB/s)", "% of strlen", "Median Time (ms)", "Iterations" };
+        const headers = [_][]const u8{ "Parser", "Capability", "Throughput", "% of strlen", "Median Time (ms)", "Iterations" };
         const aligns = [_]bool{ false, false, true, true, true, true };
         var widths = [_]usize{
             headers[0].len,
@@ -1334,9 +1311,8 @@ fn renderConsole(
     try renderQueryConsoleSection(alloc, w, "Query Cached Throughput", query_cached_results);
 
     if (gate_rows.len > 0) {
-        const has_lexbor = gateRowsHaveLexbor(gate_rows);
         try w.writeAll("Parse Gate\n\n");
-        const headers = [_][]const u8{ "Fixture", "ours-compact (MB/s)", "ours-full (MB/s)", "lol-html (MB/s)", "lexbor (MB/s)", "Result" };
+        const headers = [_][]const u8{ "Fixture", "ours-compact", "ours-stream", "ours-full", "lol-html", "Result" };
         const aligns = [_]bool{ false, true, true, true, true, false };
         var widths = [_]usize{ headers[0].len, headers[1].len, headers[2].len, headers[3].len, headers[4].len, headers[5].len };
 
@@ -1349,39 +1325,19 @@ fn renderConsole(
             var cells: [6][]u8 = undefined;
             cells[0] = try alloc.dupe(u8, g.fixture);
             cells[1] = try std.fmt.allocPrint(alloc, "{d:.2}", .{g.ours_compact_mb_s});
-            cells[2] = try std.fmt.allocPrint(alloc, "{d:.2}", .{g.ours_full_mb_s});
-            cells[3] = try std.fmt.allocPrint(alloc, "{d:.2}", .{g.lol_html_mb_s});
-            cells[4] = if (g.lexbor_mb_s) |lexbor|
-                try std.fmt.allocPrint(alloc, "{d:.2}", .{lexbor})
-            else
-                try alloc.dupe(u8, "-");
+            cells[2] = try std.fmt.allocPrint(alloc, "{d:.2}", .{g.ours_stream_mb_s});
+            cells[3] = try std.fmt.allocPrint(alloc, "{d:.2}", .{g.ours_full_mb_s});
+            cells[4] = try std.fmt.allocPrint(alloc, "{d:.2}", .{g.lol_html_mb_s});
             cells[5] = try alloc.dupe(u8, if (g.pass) "PASS" else "FAIL");
             inline for (0..6) |i| widths[i] = @max(widths[i], cells[i].len);
             try rows.append(alloc, cells);
         }
 
-        const visible_len: usize = if (has_lexbor) 6 else 5;
-        if (!has_lexbor) {
-            widths[4] = widths[5];
-        }
+        const visible_len: usize = 6;
         try appendAsciiSep(w, widths[0..visible_len]);
-        if (has_lexbor) {
-            try appendAsciiRow(w, widths[0..visible_len], headers[0..visible_len], aligns[0..visible_len]);
-        } else {
-            const compact_headers = [_][]const u8{ headers[0], headers[1], headers[2], headers[3], headers[5] };
-            const compact_aligns = [_]bool{ aligns[0], aligns[1], aligns[2], aligns[3], aligns[5] };
-            try appendAsciiRow(w, widths[0..visible_len], &compact_headers, &compact_aligns);
-        }
+        try appendAsciiRow(w, widths[0..visible_len], headers[0..visible_len], aligns[0..visible_len]);
         try appendAsciiSep(w, widths[0..visible_len]);
-        for (rows.items) |cells| {
-            if (has_lexbor) {
-                try appendAsciiRow(w, widths[0..visible_len], cells[0..visible_len], aligns[0..visible_len]);
-            } else {
-                const compact_cells = [_][]const u8{ cells[0], cells[1], cells[2], cells[3], cells[5] };
-                const compact_aligns = [_]bool{ aligns[0], aligns[1], aligns[2], aligns[3], aligns[5] };
-                try appendAsciiRow(w, widths[0..visible_len], &compact_cells, &compact_aligns);
-            }
-        }
+        for (rows.items) |cells| try appendAsciiRow(w, widths[0..visible_len], cells[0..visible_len], aligns[0..visible_len]);
         try appendAsciiSep(w, widths[0..visible_len]);
         try w.writeAll("\n");
     }
