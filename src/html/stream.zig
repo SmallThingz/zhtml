@@ -14,6 +14,15 @@ const TagScan = struct {
     key: u64,
 };
 
+fn findGtScanOnly(source: []const u8, start: usize) usize {
+    var i = start;
+    const limit = @min(start + 32, source.len);
+    while (i < limit) : (i += 1) {
+        if (source[i] == '>') return i + 1;
+    }
+    return (std.mem.indexOfScalarPos(u8, source, i, '>') orelse (source.len - 1)) + 1;
+}
+
 fn scanOnly(source: []const u8) void {
     var i: usize = 0;
     while (i < source.len) {
@@ -26,15 +35,15 @@ fn scanOnly(source: []const u8) void {
         if (lt + 1 >= source.len) return;
 
         switch (source[lt + 1]) {
-            '/' => i = (std.mem.indexOfScalarPos(u8, source, lt + 2, '>') orelse (source.len - 1)) + 1,
+            '/' => i = findGtScanOnly(source, lt + 2),
             '!' => {
                 if (lt + 3 < source.len and source[lt + 2] == '-' and source[lt + 3] == '-') {
                     i = if (std.mem.indexOfPos(u8, source, lt + 4, "-->")) |end| end + 3 else source.len;
                 } else {
-                    i = (std.mem.indexOfScalarPos(u8, source, lt + 2, '>') orelse (source.len - 1)) + 1;
+                    i = findGtScanOnly(source, lt + 2);
                 }
             },
-            '?' => i = (std.mem.indexOfScalarPos(u8, source, lt + 2, '>') orelse (source.len - 1)) + 1,
+            '?' => i = findGtScanOnly(source, lt + 2),
             else => |c| {
                 if (!tables.TagNameCharTable[c]) {
                     i = lt + 1;
