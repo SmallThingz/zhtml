@@ -233,51 +233,51 @@ Source: `bench/results/latest.json` (`stable` profile).
 
 #### Parse Throughput Comparison (MB/s)
 
-| Fixture | ours-compact | ours-full | lol-html |
-|---|---:|---:|---:|
-| `rust-lang.html` | 2323.70 | 2527.42 | 1471.78 |
-| `wiki-html.html` | 2072.66 | 2136.29 | 1187.19 |
-| `mdn-html.html` | 3003.43 | 3259.49 | 1890.36 |
-| `w3-html52.html` | 1304.13 | 1243.51 | 663.15 |
-| `hn.html` | 1584.01 | 1625.82 | 854.69 |
-| `python-org.html` | 1924.99 | 2190.06 | 1415.19 |
-| `kernel-org.html` | 2000.56 | 2086.46 | 1358.12 |
-| `gnu-org.html` | 2522.80 | 2578.56 | 1516.49 |
-| `ziglang-org.html` | 1940.41 | 2024.06 | 1174.06 |
-| `ziglang-doc-master.html` | 1385.56 | 1388.09 | 1018.83 |
-| `wikipedia-unicode-list.html` | 1763.60 | 1717.25 | 1082.86 |
-| `whatwg-html-spec.html` | 1336.30 | 1354.55 | 907.51 |
-| `synthetic-forms.html` | 1276.45 | 1256.32 | 704.17 |
-| `synthetic-table-grid.html` | 1198.54 | 1260.46 | 424.76 |
-| `synthetic-list-nested.html` | 1233.17 | 1336.38 | 668.86 |
-| `synthetic-comments-doctype.html` | 2241.23 | 2200.74 | 949.11 |
-| `synthetic-template-rich.html` | 958.38 | 964.37 | 465.44 |
-| `synthetic-whitespace-noise.html` | 1562.67 | 1617.85 | 1031.72 |
-| `synthetic-news-feed.html` | 1282.20 | 1271.19 | 615.70 |
-| `synthetic-ecommerce.html` | 1238.52 | 1223.87 | 640.26 |
-| `synthetic-forum-thread.html` | 1284.23 | 1198.83 | 629.25 |
+| Fixture | ours-compact | ours-full | ours-stream | lol-html |
+|---|---:|---:|---:|---:|
+| `rust-lang.html` | 2294.78 | 2277.38 | 2965.94 | 1445.66 |
+| `wiki-html.html` | 1996.51 | 2027.04 | 2297.52 | 1074.60 |
+| `mdn-html.html` | 2879.00 | 2920.84 | 3708.01 | 1820.95 |
+| `w3-html52.html` | 1275.82 | 1294.77 | 1664.80 | 707.55 |
+| `hn.html` | 1721.48 | 1606.89 | 2180.55 | 868.33 |
+| `python-org.html` | 2012.39 | 1963.02 | 2768.12 | 1363.24 |
+| `kernel-org.html` | 1928.72 | 1861.08 | 2895.80 | 1342.83 |
+| `gnu-org.html` | 2561.14 | 2429.90 | 2774.80 | 1537.07 |
+| `ziglang-org.html` | 1841.88 | 1976.51 | 2490.96 | 1179.92 |
+| `ziglang-doc-master.html` | 1382.98 | 1249.01 | 1238.12 | 1023.38 |
+| `wikipedia-unicode-list.html` | 1783.14 | 1708.97 | 2321.23 | 1064.76 |
+| `whatwg-html-spec.html` | 1342.39 | 1299.87 | 1890.99 | 851.59 |
+| `synthetic-forms.html` | 1327.24 | 1277.61 | 2347.83 | 738.74 |
+| `synthetic-table-grid.html` | 1228.43 | 1163.45 | 2105.19 | 683.05 |
+| `synthetic-list-nested.html` | 1357.32 | 1328.03 | 1562.89 | 612.87 |
+| `synthetic-comments-doctype.html` | 2234.98 | 2143.18 | 1544.80 | 882.11 |
+| `synthetic-template-rich.html` | 931.49 | 905.62 | 976.26 | 432.93 |
+| `synthetic-whitespace-noise.html` | 1532.75 | 1494.66 | 2361.65 | 950.18 |
+| `synthetic-news-feed.html` | 1154.09 | 1155.50 | 1523.30 | 566.22 |
+| `synthetic-ecommerce.html` | 1146.02 | 1113.03 | 1383.80 | 594.43 |
+| `synthetic-forum-thread.html` | 1192.85 | 1122.31 | 1455.60 | 612.95 |
 
 #### Query Match Throughput
 
 | Case | compact ops/s | compact ns/op | full ops/s | full ns/op |
 |---|---:|---:|---:|---:|
-| `attr-heavy-button` | 44303.19 | 22571.74 | 43624.38 | 22922.96 |
-| `attr-heavy-nav` | 29000.12 | 34482.62 | 28903.68 | 34597.67 |
+| `attr-heavy-button` | 42854.89 | 23334.56 | 42447.21 | 23558.67 |
+| `attr-heavy-nav` | 28047.09 | 35654.33 | 28366.82 | 35252.46 |
 
 #### Cached Query Throughput
 
 | Case | compact ops/s | compact ns/op | full ops/s | full ns/op |
 |---|---:|---:|---:|---:|
-| `attr-heavy-button` | 44283.30 | 22581.87 | 43890.46 | 22783.99 |
-| `attr-heavy-nav` | 28733.43 | 34802.67 | 28651.09 | 34902.68 |
+| `attr-heavy-button` | 43444.00 | 23018.14 | 42463.05 | 23549.89 |
+| `attr-heavy-nav` | 28102.43 | 35584.12 | 27749.76 | 36036.35 |
 
 #### Query Parse Throughput (ours)
 
 | Selector case | Ops/s | ns/op |
 |---|---:|---:|
-| `simple` | 10066258.12 | 99.34 |
-| `complex` | 5408695.35 | 184.89 |
-| `grouped` | 6858424.68 | 145.81 |
+| `simple` | 10147335.25 | 98.55 |
+| `complex` | 5255717.80 | 190.27 |
+| `grouped` | 6305701.91 | 158.59 |
 
 For full per-parser, per-fixture tables and gate output:
 - `bench/results/latest.md`

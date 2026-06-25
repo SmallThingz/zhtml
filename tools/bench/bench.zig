@@ -3,6 +3,15 @@ const root = @import("html");
 const parse_mode = @import("parse_mode");
 const ParseMode = parse_mode.ParseMode;
 
+const StreamBenchCtx = struct {
+    events: usize = 0,
+
+    fn cb(self: *@This(), _: root.StreamingEvent) !bool {
+        _ = self;
+        return true;
+    }
+};
+
 fn elapsedNs(start: i96, finish: i96) u64 {
     if (finish <= start) return 0;
     return @intCast(finish - start);
@@ -95,6 +104,38 @@ pub fn runParseFile(io: std.Io, path: []const u8, iterations: usize, mode: Parse
     }
     const end = nowNs(io);
 
+    return elapsedNs(start, end);
+}
+
+/// Benchmarks streaming parse throughput for one fixture; returns total elapsed ns.
+pub fn runStreamParseFile(io: std.Io, path: []const u8, iterations: usize) !u64 {
+    const alloc = std.heap.smp_allocator;
+
+    const input = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .unlimited);
+    defer alloc.free(input);
+
+    var parse_arena = std.heap.ArenaAllocator.init(alloc);
+    defer parse_arena.deinit();
+
+    var ctx: StreamBenchCtx = .{};
+    const parser: root.StreamingParser = .{ .options = .{
+        .emit_text = false,
+        .emit_start_tags = false,
+        .emit_end_tags = false,
+        .emit_implicit_end_tags = false,
+        .track_nesting = false,
+        .assume_no_gt_in_attribute_values = true,
+    } };
+
+    const start = nowNs(io);
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        try parser.parse(parse_arena.allocator(), input, &ctx, StreamBenchCtx.cb);
+        _ = parse_arena.reset(.retain_capacity);
+    }
+    const end = nowNs(io);
+
+    if (ctx.events == std.math.maxInt(usize)) return error.InvalidBenchmark;
     return elapsedNs(start, end);
 }
 
@@ -279,6 +320,12 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (args.len == 5 and std.mem.eql(u8, args[1], "parse")) {
+        if (std.mem.eql(u8, args[2], "stream")) {
+            const iterations = try std.fmt.parseInt(usize, args[4], 10);
+            const total_ns = try runStreamParseFile(io, args[3], iterations);
+            std.debug.print("{d}\n", .{total_ns});
+            return;
+        }
         const mode = parse_mode.parseMode(args[2]) orelse return error.InvalidBenchMode;
         const iterations = try std.fmt.parseInt(usize, args[4], 10);
         const total_ns = try runParseFile(io, args[3], iterations, mode);
@@ -288,7 +335,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len != 3) {
         std.debug.print(
-            "usage:\n  {s} <html-file> <iterations>\n  {s} parse <strictest|fastest|full> <html-file> <iterations>\n  {s} query-parse <selector> <iterations>\n  {s} query-match <html-file> <selector> <iterations>\n  {s} query-match <strictest|fastest|full> <html-file> <selector> <iterations>\n  {s} query-cached <html-file> <selector> <iterations>\n  {s} query-cached <strictest|fastest|full> <html-file> <selector> <iterations>\n",
+            "usage:\n  {s} <html-file> <iterations>\n  {s} parse <strictest|fastest|full|stream> <html-file> <iterations>\n  {s} query-parse <selector> <iterations>\n  {s} query-match <html-file> <selector> <iterations>\n  {s} query-match <strictest|fastest|full> <html-file> <selector> <iterations>\n  {s} query-cached <html-file> <selector> <iterations>\n  {s} query-cached <strictest|fastest|full> <html-file> <selector> <iterations>\n",
             .{ args[0], args[0], args[0], args[0], args[0], args[0], args[0] },
         );
         std.process.exit(2);

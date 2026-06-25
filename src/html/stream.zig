@@ -33,7 +33,12 @@ pub const Options = struct {
     include_comments: bool = false,
     include_doctype: bool = false,
     include_processing_instructions: bool = false,
+    emit_start_tags: bool = true,
+    emit_text: bool = true,
+    emit_end_tags: bool = true,
     emit_implicit_end_tags: bool = true,
+    track_nesting: bool = true,
+    assume_no_gt_in_attribute_values: bool = false,
 };
 
 pub const Attribute = struct {
@@ -104,14 +109,13 @@ pub const Parser = struct {
     pub fn parse(self: @This(), allocator: std.mem.Allocator, source: []const u8, ctx: anytype, comptime callback: anytype) !void {
         if (!common.lenFits(source.len)) return error.InputTooLarge;
 
-        var p = State(@TypeOf(ctx), @TypeOf(callback)){
+        var p = State(@TypeOf(ctx), callback){
             .allocator = allocator,
             .source = source,
             .ctx = ctx,
-            .callback = callback,
             .options = self.options,
         };
-        try p.stack.append(allocator, .{ .name = .{}, .key = 0, .depth = 0 });
+        if (self.options.track_nesting) try p.stack.append(allocator, .{ .name = .{}, .key = 0, .depth = 0 });
         defer p.stack.deinit(allocator);
         try p.run();
     }
@@ -133,12 +137,11 @@ const TagScan = struct {
     key: u64,
 };
 
-fn State(comptime Ctx: type, comptime Callback: type) type {
+fn State(comptime Ctx: type, comptime callback: anytype) type {
     return struct {
         allocator: std.mem.Allocator,
         source: []const u8,
         ctx: Ctx,
-        callback: Callback,
         options: Options,
         i: usize = 0,
         stack: std.ArrayList(OpenTag) = .empty,
@@ -146,13 +149,26 @@ fn State(comptime Ctx: type, comptime Callback: type) type {
         const Self = @This();
 
         fn run(self: *Self) !void {
+            if (!self.options.emit_start_tags and
+                !self.options.emit_text and
+                !self.options.emit_end_tags and
+                !self.options.track_nesting and
+                self.options.assume_no_gt_in_attribute_values and
+                !self.options.include_comments and
+                !self.options.include_doctype and
+                !self.options.include_processing_instructions)
+            {
+                self.runScanOnly();
+                return;
+            }
+
             while (self.i < self.source.len) {
                 const lt = std.mem.indexOfScalarPos(u8, self.source, self.i, '<') orelse self.source.len;
-                if (lt > self.i) try self.emitText(self.i, lt);
+                if (lt > self.i and self.options.emit_text) try self.emitText(self.i, lt);
                 if (lt >= self.source.len) break;
                 self.i = lt;
                 if (self.i + 1 >= self.source.len) {
-                    try self.emitText(self.i, self.source.len);
+                    if (self.options.emit_text) try self.emitText(self.i, self.source.len);
                     self.i = self.source.len;
                     break;
                 }
@@ -165,12 +181,76 @@ fn State(comptime Ctx: type, comptime Callback: type) type {
                 }
             }
 
-            if (self.options.emit_implicit_end_tags) {
+            if (self.options.track_nesting and self.options.emit_implicit_end_tags) {
                 while (self.stack.items.len > 1) {
                     const open = self.stack.pop().?;
                     try self.emitEnd(open, self.i, self.i, true);
                 }
             }
+        }
+
+        fn runScanOnly(self: *Self) void {
+            while (self.i < self.source.len) {
+                if (self.source[self.i] != '<') {
+                    self.i += 1;
+                    continue;
+                }
+
+                const lt = self.i;
+                if (lt + 1 >= self.source.len) {
+                    self.i = self.source.len;
+                    return;
+                }
+
+                switch (self.source[lt + 1]) {
+                    '/' => self.i = (std.mem.indexOfScalarPos(u8, self.source, lt + 2, '>') orelse (self.source.len - 1)) + 1,
+                    '!' => {
+                        if (lt + 3 < self.source.len and self.source[lt + 2] == '-' and self.source[lt + 3] == '-') {
+                            self.i = if (std.mem.indexOfPos(u8, self.source, lt + 4, "-->")) |end| end + 3 else self.source.len;
+                        } else {
+                            self.i = (std.mem.indexOfScalarPos(u8, self.source, lt + 2, '>') orelse (self.source.len - 1)) + 1;
+                        }
+                    },
+                    '?' => self.i = (std.mem.indexOfScalarPos(u8, self.source, lt + 2, '>') orelse (self.source.len - 1)) + 1,
+                    else => |c| {
+                        if (!tables.TagNameCharTable[c]) {
+                            self.i = lt + 1;
+                            continue;
+                        }
+                        self.i = (std.mem.indexOfScalarPos(u8, self.source, lt + 2, '>') orelse (self.source.len - 1)) + 1;
+
+                        const lower = std.ascii.toLower(c);
+                        if (lower != 's' and lower != 't' and lower != 'p') continue;
+                        if (lower == 's' and !self.startsWithIgnoreCase(lt + 1, "script") and !self.startsWithIgnoreCase(lt + 1, "style")) continue;
+                        if (lower == 't' and !self.startsWithIgnoreCase(lt + 1, "title") and !self.startsWithIgnoreCase(lt + 1, "textarea")) continue;
+                        if (lower == 'p' and !self.startsWithIgnoreCase(lt + 1, "plaintext")) continue;
+
+                        const tag = self.scanTagName(lt + 1);
+                        const name = self.source[tag.start..tag.end];
+                        if (lower == 'p' and tags.isPlainTextTagWithKey(name, tag.key)) {
+                            self.i = self.source.len;
+                            return;
+                        }
+                        if ((lower == 's' or lower == 't') and tags.isRawTextTagWithKey(name, tag.key)) {
+                            if (self.findRawTextClose(name, tag.key, self.i)) |close| {
+                                self.i = close.close_end;
+                            } else {
+                                self.i = self.source.len;
+                                return;
+                            }
+                        }
+                    },
+                }
+            }
+            self.i = self.source.len;
+        }
+
+        fn startsWithIgnoreCase(self: *Self, start: usize, comptime needle: []const u8) bool {
+            if (start + needle.len > self.source.len) return false;
+            inline for (needle, 0..) |want, off| {
+                if (std.ascii.toLower(self.source[start + off]) != want) return false;
+            }
+            return true;
         }
 
         fn parseStartTag(self: *Self) !void {
@@ -192,13 +272,33 @@ fn State(comptime Ctx: type, comptime Callback: type) type {
             const self_closing = tag_end > tag.start and self.source[tag_end - 1] == '/';
             const tag_name = self.source[tag.start..tag.end];
 
-            if (self.stack.items.len > 1 and tags.mayTriggerImplicitCloseWithKey(tag_name, tag.key)) {
+            if (self.options.track_nesting and self.stack.items.len > 1 and tags.mayTriggerImplicitCloseWithKey(tag_name, tag.key)) {
                 try self.applyImplicitClosures(tag_name, tag.key, token_start);
             }
 
-            const depth: u32 = @intCast(self.stack.items.len - 1);
+            const depth = self.currentDepth();
             const attrs_start = tag.end;
             const attrs_end = if (self_closing and tag_end > attrs_start) tag_end - 1 else tag_end;
+            self.i = tag_end + 1;
+
+            if (!self.options.emit_start_tags) {
+                if (tags.isPlainTextTagWithKey(tag_name, tag.key)) {
+                    if (self.options.emit_text and self.i < self.source.len) try self.emitText(self.i, self.source.len);
+                    self.i = self.source.len;
+                    return;
+                }
+
+                if (tags.isRawTextTagWithKey(tag_name, tag.key)) {
+                    try self.parseRawText(tag, depth, token_start);
+                    return;
+                }
+
+                if (self.options.track_nesting and !self_closing and !tags.isVoidTagWithKey(tag_name, tag.key)) {
+                    try self.stack.append(self.allocator, .{ .name = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) }, .key = tag.key, .depth = depth });
+                }
+                return;
+            }
+
             const ev = Event{
                 .source = self.source,
                 .kind = .start_tag,
@@ -208,9 +308,8 @@ fn State(comptime Ctx: type, comptime Callback: type) type {
                 .token = .{ .start = @intCast(token_start), .len = @intCast(tag_end + 1 - token_start) },
                 .self_closing = self_closing,
             };
-            self.i = tag_end + 1;
 
-            const descend = try self.callback(self.ctx, ev);
+            const descend = try callback(self.ctx, ev);
             if (!descend) {
                 if (!self_closing and !tags.isVoidTagWithKey(tag_name, tag.key)) self.i = self.skipSubtree(tag_name, tag.key, self.i);
                 return;
@@ -229,12 +328,16 @@ fn State(comptime Ctx: type, comptime Callback: type) type {
                 return;
             }
 
-            try self.stack.append(self.allocator, .{ .name = ev.name, .key = tag.key, .depth = depth });
+            if (self.options.track_nesting) try self.stack.append(self.allocator, .{ .name = ev.name, .key = tag.key, .depth = depth });
         }
 
         fn parseEndTag(self: *Self) !void {
             const token_start = self.i;
             self.i += 2;
+            if (!self.options.track_nesting) {
+                self.i = (std.mem.indexOfScalarPos(u8, self.source, self.i, '>') orelse (self.source.len - 1)) + 1;
+                return;
+            }
             const tag = self.scanTagName(self.i);
             self.i = tag.end;
             const token_end = (std.mem.indexOfScalarPos(u8, self.source, self.i, '>') orelse (self.source.len - 1)) + 1;
@@ -263,10 +366,10 @@ fn State(comptime Ctx: type, comptime Callback: type) type {
                 const token_end = if (end_marker < self.source.len) end_marker + 3 else self.source.len;
                 self.i = token_end;
                 if (self.options.include_comments) {
-                    _ = try self.callback(self.ctx, .{
+                    _ = try callback(self.ctx, .{
                         .source = self.source,
                         .kind = .comment,
-                        .depth = @intCast(self.stack.items.len - 1),
+                        .depth = self.currentDepth(),
                         .value = .{ .start = @intCast(content_start), .len = @intCast(end_marker - content_start) },
                         .token = .{ .start = @intCast(start), .len = @intCast(token_end - start) },
                     });
@@ -279,10 +382,10 @@ fn State(comptime Ctx: type, comptime Callback: type) type {
             const value_end = if (token_end > start and self.source[token_end - 1] == '>') token_end - 1 else token_end;
             self.i = token_end;
             if (self.options.include_doctype) {
-                _ = try self.callback(self.ctx, .{
+                _ = try callback(self.ctx, .{
                     .source = self.source,
                     .kind = .doctype,
-                    .depth = @intCast(self.stack.items.len - 1),
+                    .depth = self.currentDepth(),
                     .value = .{ .start = @intCast(start + 2), .len = @intCast(value_end - (start + 2)) },
                     .token = .{ .start = @intCast(start), .len = @intCast(token_end - start) },
                 });
@@ -296,10 +399,10 @@ fn State(comptime Ctx: type, comptime Callback: type) type {
             const token_end = if (close < self.source.len and self.source[close] == '?') close + 2 else @min(close + 1, self.source.len);
             self.i = token_end;
             if (self.options.include_processing_instructions) {
-                _ = try self.callback(self.ctx, .{
+                _ = try callback(self.ctx, .{
                     .source = self.source,
                     .kind = .processing_instruction,
-                    .depth = @intCast(self.stack.items.len - 1),
+                    .depth = self.currentDepth(),
                     .value = .{ .start = @intCast(content_start), .len = @intCast(close - content_start) },
                     .token = .{ .start = @intCast(start), .len = @intCast(token_end - start) },
                 });
@@ -321,23 +424,25 @@ fn State(comptime Ctx: type, comptime Callback: type) type {
         }
 
         fn emitText(self: *Self, start: usize, end: usize) !void {
+            if (!self.options.emit_text) return;
             if (start >= end) return;
             if (self.options.drop_whitespace_text_nodes) {
                 var i = start;
                 while (i < end and tables.WhitespaceTable[self.source[i]]) : (i += 1) {}
                 if (i == end) return;
             }
-            _ = try self.callback(self.ctx, .{
+            _ = try callback(self.ctx, .{
                 .source = self.source,
                 .kind = .text,
-                .depth = @intCast(self.stack.items.len - 1),
+                .depth = self.currentDepth(),
                 .value = .{ .start = @intCast(start), .len = @intCast(end - start) },
                 .token = .{ .start = @intCast(start), .len = @intCast(end - start) },
             });
         }
 
         fn emitEnd(self: *Self, open: OpenTag, token_start: usize, token_end: usize, implicit: bool) !void {
-            _ = try self.callback(self.ctx, .{
+            if (!self.options.emit_end_tags) return;
+            _ = try callback(self.ctx, .{
                 .source = self.source,
                 .kind = .end_tag,
                 .depth = open.depth,
@@ -360,39 +465,49 @@ fn State(comptime Ctx: type, comptime Callback: type) type {
         fn scanTagName(self: *Self, start: usize) TagScan {
             var i = start;
             var key: u64 = 0;
-            while (i < self.source.len and tables.TagNameCharTable[self.source[i]]) : (i += 1) {
-                const off = i - start;
-                if (off < 8) std.mem.asBytes(&key)[off] = std.ascii.toLower(self.source[i]);
+            for (0..8) |off| {
+                if (i >= self.source.len or !tables.TagNameCharTable[self.source[i]]) break;
+                const c = std.ascii.toLower(self.source[i]);
+                key |= @as(u64, c) << @as(u6, @intCast(off * 8));
+                i += 1;
+            } else {
+                while (i < self.source.len and tables.TagNameCharTable[self.source[i]]) : (i += 1) {}
             }
             return .{ .start = start, .end = i, .key = key };
         }
 
+        fn currentDepth(self: *Self) u32 {
+            return if (self.options.track_nesting) @intCast(self.stack.items.len - 1) else 0;
+        }
+
         fn findTagEnd(self: *Self, start: usize) ?usize {
+            if (self.options.assume_no_gt_in_attribute_values) return std.mem.indexOfScalarPos(u8, self.source, start, '>');
+
             var i = start;
-            while (i < self.source.len) : (i += 1) {
-                switch (self.source[i]) {
-                    '>' => return i,
-                    '\'', '"' => |quote| {
-                        i += 1;
-                        while (i < self.source.len and self.source[i] != quote) : (i += 1) {}
-                    },
-                    else => {},
+            while (std.mem.indexOfScalarPos(u8, self.source, i, '>')) |pos| {
+                if (std.mem.indexOfAny(u8, self.source[i..pos], "'\"")) |rel| {
+                    const qpos = i + rel;
+                    const quote = self.source[qpos];
+                    i = (std.mem.indexOfScalarPos(u8, self.source, qpos + 1, quote) orelse return null) + 1;
+                    continue;
                 }
+                return pos;
             }
             return null;
         }
 
         fn findBangEnd(self: *Self, start: usize) usize {
+            if (self.options.assume_no_gt_in_attribute_values) return (std.mem.indexOfScalarPos(u8, self.source, start, '>') orelse (self.source.len - 1)) + 1;
+
             var i = start;
-            while (i < self.source.len) : (i += 1) {
-                switch (self.source[i]) {
-                    '>' => return i + 1,
-                    '\'', '"' => |quote| {
-                        i += 1;
-                        while (i < self.source.len and self.source[i] != quote) : (i += 1) {}
-                    },
-                    else => {},
+            while (std.mem.indexOfScalarPos(u8, self.source, i, '>')) |pos| {
+                if (std.mem.indexOfAny(u8, self.source[i..pos], "'\"")) |rel| {
+                    const qpos = i + rel;
+                    const quote = self.source[qpos];
+                    i = (std.mem.indexOfScalarPos(u8, self.source, qpos + 1, quote) orelse return self.source.len) + 1;
+                    continue;
                 }
+                return pos + 1;
             }
             return self.source.len;
         }

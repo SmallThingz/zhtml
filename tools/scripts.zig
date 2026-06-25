@@ -27,6 +27,7 @@ const ParserCapability = struct {
 const parser_capabilities = [_]ParserCapability{
     .{ .parser = "ours-compact", .capability = "dom" },
     .{ .parser = "ours-full", .capability = "dom" },
+    .{ .parser = "ours-stream", .capability = "streaming" },
     .{ .parser = "strlen", .capability = "scan" },
     .{ .parser = "lol-html", .capability = "streaming" },
     .{ .parser = "lexbor", .capability = "dom" },
@@ -34,6 +35,7 @@ const parser_capabilities = [_]ParserCapability{
 
 const default_parse_parsers = [_][]const u8{
     "ours-compact",
+    "ours-stream",
     "ours-full",
     "strlen",
     "lol-html",
@@ -392,6 +394,15 @@ fn runnerCmdParse(alloc: std.mem.Allocator, parser_name: []const u8, fixture: []
         argv[0] = "zig-out/bin/html-bench";
         argv[1] = "parse";
         argv[2] = "full";
+        argv[3] = fixture;
+        argv[4] = iter_s;
+        return argv;
+    }
+    if (std.mem.eql(u8, parser_name, "ours-stream")) {
+        const argv = try alloc.alloc([]const u8, 5);
+        argv[0] = "zig-out/bin/html-bench";
+        argv[1] = "parse";
+        argv[2] = "stream";
         argv[3] = fixture;
         argv[4] = iter_s;
         return argv;
