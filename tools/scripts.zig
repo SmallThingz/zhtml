@@ -1103,9 +1103,9 @@ fn writeMarkdown(
         try w.writeAll("\n");
     }
 
-    try writeQuerySection(alloc, w, "## Query Parse Throughput", query_parse_results);
-    try writeQuerySection(alloc, w, "## Query Match Throughput", query_match_results);
-    try writeQuerySection(alloc, w, "## Query Cached Throughput", query_cached_results);
+    if (query_parse_results.len > 0) try writeQuerySection(alloc, w, "## Query Parse Throughput", query_parse_results);
+    if (query_match_results.len > 0) try writeQuerySection(alloc, w, "## Query Match Throughput", query_match_results);
+    if (query_cached_results.len > 0) try writeQuerySection(alloc, w, "## Query Cached Throughput", query_cached_results);
 
     if (gate_rows.len > 0) {
         try w.writeAll("## Parse Gate\n\n");
@@ -1306,9 +1306,9 @@ fn renderConsole(
         try w.writeAll("\n");
     }
 
-    try renderQueryConsoleSection(alloc, w, "Query Parse Throughput", query_parse_results);
-    try renderQueryConsoleSection(alloc, w, "Query Match Throughput", query_match_results);
-    try renderQueryConsoleSection(alloc, w, "Query Cached Throughput", query_cached_results);
+    if (query_parse_results.len > 0) try renderQueryConsoleSection(alloc, w, "Query Parse Throughput", query_parse_results);
+    if (query_match_results.len > 0) try renderQueryConsoleSection(alloc, w, "Query Match Throughput", query_match_results);
+    if (query_cached_results.len > 0) try renderQueryConsoleSection(alloc, w, "Query Cached Throughput", query_cached_results);
 
     if (gate_rows.len > 0) {
         try w.writeAll("Parse Gate\n\n");
@@ -1443,6 +1443,7 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
     var profile_name: []const u8 = "quick";
     var write_baseline = false;
     var include_lexbor = false;
+    var run_query = true;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -1455,6 +1456,8 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
             write_baseline = true;
         } else if (std.mem.eql(u8, arg, "--lexbor")) {
             include_lexbor = true;
+        } else if (std.mem.eql(u8, arg, "--no-query")) {
+            run_query = false;
         } else {
             return error.InvalidArgument;
         }
@@ -1502,11 +1505,13 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
         freeQuerySamples(alloc, query_parse_results.items);
         query_parse_results.deinit(alloc);
     }
-    for (query_parse_modes) |qm| {
-        for (profile.query_parse_cases) |qc| {
-            std.debug.print("benchmarking query-parse {s} on {s} ({d} iters)\n", .{ qm.parser, qc.name, qc.iterations });
-            const row = try benchQueryParseOne(io, alloc, qm.parser, qc.name, qc.selector, qc.iterations);
-            try query_parse_results.append(alloc, row);
+    if (run_query) {
+        for (query_parse_modes) |qm| {
+            for (profile.query_parse_cases) |qc| {
+                std.debug.print("benchmarking query-parse {s} on {s} ({d} iters)\n", .{ qm.parser, qc.name, qc.iterations });
+                const row = try benchQueryParseOne(io, alloc, qm.parser, qc.name, qc.selector, qc.iterations);
+                try query_parse_results.append(alloc, row);
+            }
         }
     }
 
@@ -1515,11 +1520,13 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
         freeQuerySamples(alloc, query_match_results.items);
         query_match_results.deinit(alloc);
     }
-    for (query_modes) |qm| {
-        for (profile.query_match_cases) |qc| {
-            std.debug.print("benchmarking query-match {s} on {s} ({d} iters)\n", .{ qm.parser, qc.name, qc.iterations });
-            const row = try benchQueryExecOne(io, alloc, qm.parser, qm.mode, qc.name, qc.fixture, qc.selector, qc.iterations, false);
-            try query_match_results.append(alloc, row);
+    if (run_query) {
+        for (query_modes) |qm| {
+            for (profile.query_match_cases) |qc| {
+                std.debug.print("benchmarking query-match {s} on {s} ({d} iters)\n", .{ qm.parser, qc.name, qc.iterations });
+                const row = try benchQueryExecOne(io, alloc, qm.parser, qm.mode, qc.name, qc.fixture, qc.selector, qc.iterations, false);
+                try query_match_results.append(alloc, row);
+            }
         }
     }
 
@@ -1528,11 +1535,13 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
         freeQuerySamples(alloc, query_cached_results.items);
         query_cached_results.deinit(alloc);
     }
-    for (query_modes) |qm| {
-        for (profile.query_cached_cases) |qc| {
-            std.debug.print("benchmarking query-cached {s} on {s} ({d} iters)\n", .{ qm.parser, qc.name, qc.iterations });
-            const row = try benchQueryExecOne(io, alloc, qm.parser, qm.mode, qc.name, qc.fixture, qc.selector, qc.iterations, true);
-            try query_cached_results.append(alloc, row);
+    if (run_query) {
+        for (query_modes) |qm| {
+            for (profile.query_cached_cases) |qc| {
+                std.debug.print("benchmarking query-cached {s} on {s} ({d} iters)\n", .{ qm.parser, qc.name, qc.iterations });
+                const row = try benchQueryExecOne(io, alloc, qm.parser, qm.mode, qc.name, qc.fixture, qc.selector, qc.iterations, true);
+                try query_cached_results.append(alloc, row);
+            }
         }
     }
 
@@ -1555,7 +1564,7 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
         .generated_unix = common.nowUnix(io),
         .profile = profile.name,
         .repeats = repeats,
-        .bench_modes = .{ .parse = parse_parsers.items, .query = &[_][]const u8{ "ours-compact", "ours-full" } },
+        .bench_modes = .{ .parse = parse_parsers.items, .query = if (run_query) &[_][]const u8{ "ours-compact", "ours-full" } else &[_][]const u8{} },
         .parser_capabilities = active_parser_capabilities.items,
         .parse_results = parse_results.items,
         .query_parse_results = query_parse_results.items,
@@ -2862,7 +2871,7 @@ fn usage() void {
         \\Usage:
         \\  html-tools setup-parsers
         \\  html-tools setup-fixtures [--refresh]
-        \\  html-tools run-benchmarks [--profile quick|stable] [--write-baseline]
+        \\  html-tools run-benchmarks [--profile quick|stable] [--write-baseline] [--no-query]
         \\  html-tools sync-docs-bench
         \\  html-tools run-external-suites [--mode strictest|fastest|both] [--max-html5lib-cases N] [--max-whatwg-cases N] [--json-out path] [--failures-out path]
         \\  html-tools docs-check

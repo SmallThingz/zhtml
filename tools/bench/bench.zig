@@ -4,10 +4,7 @@ const parse_mode = @import("parse_mode");
 const ParseMode = parse_mode.ParseMode;
 
 const StreamBenchCtx = struct {
-    events: usize = 0,
-
-    fn cb(self: *@This(), _: root.StreamingEvent) !bool {
-        _ = self;
+    fn cb(_: *@This(), _: root.StreamingEvent) !bool {
         return true;
     }
 };
@@ -135,7 +132,6 @@ pub fn runStreamParseFile(io: std.Io, path: []const u8, iterations: usize) !u64 
     }
     const end = nowNs(io);
 
-    if (ctx.events == std.math.maxInt(usize)) return error.InvalidBenchmark;
     return elapsedNs(start, end);
 }
 

@@ -6,6 +6,99 @@ const tags = @import("tags.zig");
 
 const IndexInt = common.IndexInt;
 
+const RawClose = struct { content_end: usize, close_start: usize, close_end: usize };
+
+const TagScan = struct {
+    start: usize,
+    end: usize,
+    key: u64,
+};
+
+fn scanOnly(source: []const u8) void {
+    var i: usize = 0;
+    while (i < source.len) {
+        if (source[i] != '<') {
+            i += 1;
+            continue;
+        }
+
+        const lt = i;
+        if (lt + 1 >= source.len) return;
+
+        switch (source[lt + 1]) {
+            '/' => i = (std.mem.indexOfScalarPos(u8, source, lt + 2, '>') orelse (source.len - 1)) + 1,
+            '!' => {
+                if (lt + 3 < source.len and source[lt + 2] == '-' and source[lt + 3] == '-') {
+                    i = if (std.mem.indexOfPos(u8, source, lt + 4, "-->")) |end| end + 3 else source.len;
+                } else {
+                    i = (std.mem.indexOfScalarPos(u8, source, lt + 2, '>') orelse (source.len - 1)) + 1;
+                }
+            },
+            '?' => i = (std.mem.indexOfScalarPos(u8, source, lt + 2, '>') orelse (source.len - 1)) + 1,
+            else => |c| {
+                if (!tables.TagNameCharTable[c]) {
+                    i = lt + 1;
+                    continue;
+                }
+                i = (std.mem.indexOfScalarPos(u8, source, lt + 2, '>') orelse (source.len - 1)) + 1;
+
+                const lower = std.ascii.toLower(c);
+                if (lower != 's' and lower != 't' and lower != 'p') continue;
+                if (lower == 's' and !startsWithIgnoreCase(source, lt + 1, "script") and !startsWithIgnoreCase(source, lt + 1, "style")) continue;
+                if (lower == 't' and !startsWithIgnoreCase(source, lt + 1, "title") and !startsWithIgnoreCase(source, lt + 1, "textarea")) continue;
+                if (lower == 'p' and !startsWithIgnoreCase(source, lt + 1, "plaintext")) continue;
+
+                const tag = scanOnlyTagName(source, lt + 1);
+                const name = source[tag.start..tag.end];
+                if (lower == 'p' and tags.isPlainTextTagWithKey(name, tag.key)) return;
+                if ((lower == 's' or lower == 't') and tags.isRawTextTagWithKey(name, tag.key)) {
+                    if (scanOnlyFindRawTextClose(source, name, tag.key, i)) |close| {
+                        i = close.close_end;
+                    } else {
+                        return;
+                    }
+                }
+            },
+        }
+    }
+}
+
+fn startsWithIgnoreCase(source: []const u8, start: usize, comptime needle: []const u8) bool {
+    if (start + needle.len > source.len) return false;
+    inline for (needle, 0..) |want, off| {
+        if (std.ascii.toLower(source[start + off]) != want) return false;
+    }
+    return true;
+}
+
+fn scanOnlyTagName(source: []const u8, start: usize) TagScan {
+    var i = start;
+    var key: u64 = 0;
+    for (0..8) |off| {
+        if (i >= source.len or !tables.TagNameCharTable[source[i]]) break;
+        const c = std.ascii.toLower(source[i]);
+        key |= @as(u64, c) << @as(u6, @intCast(off * 8));
+        i += 1;
+    } else {
+        while (i < source.len and tables.TagNameCharTable[source[i]]) : (i += 1) {}
+    }
+    return .{ .start = start, .end = i, .key = key };
+}
+
+fn scanOnlyFindRawTextClose(source: []const u8, name: []const u8, key: u64, start: usize) ?RawClose {
+    var search = start;
+    while (std.mem.indexOfScalarPos(u8, source, search, '<')) |lt| {
+        search = lt + 1;
+        if (lt + 2 >= source.len or source[lt + 1] != '/') continue;
+        const close = scanOnlyTagName(source, lt + 2);
+        if (!tags.equalByLenAndKeyIgnoreCase(source[close.start..close.end], close.key, name, key)) continue;
+        var end = close.end;
+        while (end < source.len and tables.WhitespaceTable[source[end]]) : (end += 1) {}
+        if (end < source.len and source[end] == '>') return .{ .content_end = lt, .close_start = lt, .close_end = end + 1 };
+    }
+    return null;
+}
+
 pub const Span = struct {
     start: IndexInt = 0,
     len: IndexInt = 0,
@@ -131,12 +224,6 @@ const OpenTag = struct {
     depth: u32,
 };
 
-const TagScan = struct {
-    start: usize,
-    end: usize,
-    key: u64,
-};
-
 fn State(comptime Ctx: type, comptime callback: anytype) type {
     return struct {
         allocator: std.mem.Allocator,
@@ -190,67 +277,8 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn runScanOnly(self: *Self) void {
-            while (self.i < self.source.len) {
-                if (self.source[self.i] != '<') {
-                    self.i += 1;
-                    continue;
-                }
-
-                const lt = self.i;
-                if (lt + 1 >= self.source.len) {
-                    self.i = self.source.len;
-                    return;
-                }
-
-                switch (self.source[lt + 1]) {
-                    '/' => self.i = (std.mem.indexOfScalarPos(u8, self.source, lt + 2, '>') orelse (self.source.len - 1)) + 1,
-                    '!' => {
-                        if (lt + 3 < self.source.len and self.source[lt + 2] == '-' and self.source[lt + 3] == '-') {
-                            self.i = if (std.mem.indexOfPos(u8, self.source, lt + 4, "-->")) |end| end + 3 else self.source.len;
-                        } else {
-                            self.i = (std.mem.indexOfScalarPos(u8, self.source, lt + 2, '>') orelse (self.source.len - 1)) + 1;
-                        }
-                    },
-                    '?' => self.i = (std.mem.indexOfScalarPos(u8, self.source, lt + 2, '>') orelse (self.source.len - 1)) + 1,
-                    else => |c| {
-                        if (!tables.TagNameCharTable[c]) {
-                            self.i = lt + 1;
-                            continue;
-                        }
-                        self.i = (std.mem.indexOfScalarPos(u8, self.source, lt + 2, '>') orelse (self.source.len - 1)) + 1;
-
-                        const lower = std.ascii.toLower(c);
-                        if (lower != 's' and lower != 't' and lower != 'p') continue;
-                        if (lower == 's' and !self.startsWithIgnoreCase(lt + 1, "script") and !self.startsWithIgnoreCase(lt + 1, "style")) continue;
-                        if (lower == 't' and !self.startsWithIgnoreCase(lt + 1, "title") and !self.startsWithIgnoreCase(lt + 1, "textarea")) continue;
-                        if (lower == 'p' and !self.startsWithIgnoreCase(lt + 1, "plaintext")) continue;
-
-                        const tag = self.scanTagName(lt + 1);
-                        const name = self.source[tag.start..tag.end];
-                        if (lower == 'p' and tags.isPlainTextTagWithKey(name, tag.key)) {
-                            self.i = self.source.len;
-                            return;
-                        }
-                        if ((lower == 's' or lower == 't') and tags.isRawTextTagWithKey(name, tag.key)) {
-                            if (self.findRawTextClose(name, tag.key, self.i)) |close| {
-                                self.i = close.close_end;
-                            } else {
-                                self.i = self.source.len;
-                                return;
-                            }
-                        }
-                    },
-                }
-            }
+            scanOnly(self.source);
             self.i = self.source.len;
-        }
-
-        fn startsWithIgnoreCase(self: *Self, start: usize, comptime needle: []const u8) bool {
-            if (start + needle.len > self.source.len) return false;
-            inline for (needle, 0..) |want, off| {
-                if (std.ascii.toLower(self.source[start + off]) != want) return false;
-            }
-            return true;
         }
 
         fn parseStartTag(self: *Self) !void {
@@ -463,17 +491,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn scanTagName(self: *Self, start: usize) TagScan {
-            var i = start;
-            var key: u64 = 0;
-            for (0..8) |off| {
-                if (i >= self.source.len or !tables.TagNameCharTable[self.source[i]]) break;
-                const c = std.ascii.toLower(self.source[i]);
-                key |= @as(u64, c) << @as(u6, @intCast(off * 8));
-                i += 1;
-            } else {
-                while (i < self.source.len and tables.TagNameCharTable[self.source[i]]) : (i += 1) {}
-            }
-            return .{ .start = start, .end = i, .key = key };
+            return scanOnlyTagName(self.source, start);
         }
 
         fn currentDepth(self: *Self) u32 {
@@ -512,20 +530,8 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             return self.source.len;
         }
 
-        const RawClose = struct { content_end: usize, close_start: usize, close_end: usize };
-
         fn findRawTextClose(self: *Self, name: []const u8, key: u64, start: usize) ?RawClose {
-            var search = start;
-            while (std.mem.indexOfScalarPos(u8, self.source, search, '<')) |lt| {
-                search = lt + 1;
-                if (lt + 2 >= self.source.len or self.source[lt + 1] != '/') continue;
-                const close = self.scanTagName(lt + 2);
-                if (!tags.equalByLenAndKeyIgnoreCase(self.source[close.start..close.end], close.key, name, key)) continue;
-                var end = close.end;
-                while (end < self.source.len and tables.WhitespaceTable[self.source[end]]) : (end += 1) {}
-                if (end < self.source.len and self.source[end] == '>') return .{ .content_end = lt, .close_start = lt, .close_end = end + 1 };
-            }
-            return null;
+            return scanOnlyFindRawTextClose(self.source, name, key, start);
         }
 
         fn skipSubtree(self: *Self, name: []const u8, key: u64, start: usize) usize {
