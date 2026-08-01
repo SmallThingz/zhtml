@@ -38,13 +38,6 @@ pub const ScanAttrNameResult = struct {
     next_start: usize,
 };
 
-const LookupKind = enum(u8) {
-    generic,
-    id,
-    class,
-    href,
-};
-
 const AttrValueMode = enum {
     raw,
     destructive,
@@ -325,7 +318,6 @@ inline fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const 
 /// Shared single-attribute traversal; mode only changes value materialization.
 inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator, comptime mode: AttrValueMode) !?[]const u8 {
     const source = if (comptime mode == .destructive) @constCast(doc).source else doc.source;
-    const lookup_kind = classifyLookupName(name);
 
     var i: usize = node.name_or_text.end();
     const end = source.len;
@@ -339,7 +331,7 @@ inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allo
         const attr_name = scanned.name orelse return null;
         i = scanned.next_start;
         if (attr_name.len == 0) continue;
-        const is_target = matchesLookupName(attr_name, name, lookup_kind);
+        const is_target = std.ascii.eqlIgnoreCase(attr_name, name);
 
         if (i >= end) return if (is_target) "" else null;
 
@@ -469,41 +461,9 @@ fn firstUnresolvedMatch(selected_names: []const []const u8, out_values: []const 
     var idx: usize = 0;
     while (idx < selected_names.len) : (idx += 1) {
         if (out_values[idx] != null) continue;
-        if (matchesLookupName(name, selected_names[idx], .generic)) return idx;
+        if (std.ascii.eqlIgnoreCase(name, selected_names[idx])) return idx;
     }
     return null;
-}
-
-/// Returns whether an attribute name matches the requested lookup name.
-fn matchesLookupName(attr_name: []const u8, lookup: []const u8, lookup_kind: LookupKind) bool {
-    switch (lookup_kind) {
-        .id => return isExactAsciiWord(attr_name, "id"),
-        .class => return isExactAsciiWord(attr_name, "class"),
-        .href => return isExactAsciiWord(attr_name, "href"),
-        .generic => {},
-    }
-
-    if (attr_name.len != lookup.len) return false;
-    if (attr_name.len != 0 and std.ascii.toLower(attr_name[0]) != std.ascii.toLower(lookup[0])) return false;
-    return std.ascii.eqlIgnoreCase(attr_name, lookup);
-}
-
-/// Classifies common lookup names for cheaper comparisons.
-fn classifyLookupName(lookup: []const u8) LookupKind {
-    if (isExactAsciiWord(lookup, "id")) return .id;
-    if (isExactAsciiWord(lookup, "class")) return .class;
-    if (isExactAsciiWord(lookup, "href")) return .href;
-    return .generic;
-}
-
-/// Returns true when `value` equals a known lowercase ASCII word.
-fn isExactAsciiWord(value: []const u8, comptime lower: []const u8) bool {
-    if (value.len != lower.len) return false;
-    var i: usize = 0;
-    while (i < lower.len) : (i += 1) {
-        if (std.ascii.toLower(value[i]) != lower[i]) return false;
-    }
-    return true;
 }
 
 test "scanAttrNameOrSkip handles terminators and skips non-name bytes" {
