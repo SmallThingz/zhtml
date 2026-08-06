@@ -489,13 +489,13 @@ fn ParseState(comptime opts: ParseOptions) type {
                         return j;
                     },
                     '=' => {
-                        if (j + 1 < self.input.len and (self.input[j + 1] == '\'' or self.input[j + 1] == '"')) {
+                        self.i = j + 1;
+                        self.skipWs();
+                        if (j < self.input.len and (self.input[j + 1] == '\'' or self.input[j + 1] == '"')) {
                             const q = self.input[j + 1];
                             self.i = j + 2;
                             const end_quote = std.mem.indexOfScalarPos(u8, self.input, self.i, q) orelse return null;
                             self.i = end_quote + 1;
-                        } else {
-                            self.i = j + 1;
                         }
                     },
                     else => unreachable,

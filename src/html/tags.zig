@@ -180,13 +180,17 @@ pub inline fn mayTriggerImplicitCloseWithKey(new_tag: []const u8, new_key: u64) 
             KEY.OPTION,
             KEY.FOOTER,
             KEY.HEADER,
+            => true,
+            else => false,
+        },
+        7 => switch (new_key) {
             KEY.ADDRESS,
             KEY.ARTICLE,
             KEY.SECTION,
             => true,
             else => false,
         },
-        7 => switch (new_key) {
+        8 => switch (new_key) {
             KEY.FIELDSET => true,
             else => false,
         },
