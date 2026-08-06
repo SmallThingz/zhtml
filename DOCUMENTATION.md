@@ -210,6 +210,7 @@ Run benchmarks:
 zig build bench-compare
 zig build tools -- run-benchmarks --profile quick
 zig build tools -- run-benchmarks --profile stable
+zig build bench-interleaved -- --candidate .worktree/experiment --profile stable --runs 6
 ```
 
 Artifacts:
@@ -222,6 +223,7 @@ Benchmark policy:
 - parse comparisons include `strlen`, `lexbor`, and parse-only `lol-html`
 - query parse/match/cached sections benchmark `html`
 - repeated runtime selector workloads should use cached selectors
+- checkout comparisons alternate which side runs first, report median speedups, and preserve every raw sample in `bench/results/interleaved_latest.json`
 
 ## Latest Benchmark Snapshot
 

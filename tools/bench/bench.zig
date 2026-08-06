@@ -60,31 +60,30 @@ pub fn runParseFile(io: std.Io, path: []const u8, iterations: usize, mode: Parse
     const input = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .unlimited);
     defer alloc.free(input);
 
-    var working_opt: ?[]u8 = null;
-    if (mode == .strictest) {
-        working_opt = try alloc.alloc(u8, input.len);
-    }
-    defer if (working_opt) |working| alloc.free(working);
+    const working = try alloc.alloc(u8, input.len);
+    defer alloc.free(working);
 
     var parse_arena = std.heap.ArenaAllocator.init(alloc);
     defer parse_arena.deinit();
 
-    const start = nowNs(io);
+    var total_ns: u64 = 0;
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
+        // Destructive modes must see identical bytes on every iteration. Keep
+        // restoration and arena maintenance outside the timed parse region.
+        @memcpy(working, input);
         const iter_alloc = parse_arena.allocator();
+        const start = nowNs(io);
         {
             switch (mode) {
                 .strictest => {
                     const options: root.ParseOptions = .{ .drop_whitespace_text_nodes = .none };
-                    const working = working_opt.?;
-                    @memcpy(working, input);
                     var doc = try options.parse(iter_alloc, working);
                     defer doc.deinit();
                 },
                 .fastest => {
                     const options: root.ParseOptions = .{};
-                    var doc = try options.parse(iter_alloc, input);
+                    var doc = try options.parse(iter_alloc, working);
                     defer doc.deinit();
                 },
                 .full => {
@@ -92,16 +91,15 @@ pub fn runParseFile(io: std.Io, path: []const u8, iterations: usize, mode: Parse
                         .store_last_child = true,
                         .store_prev_sibling = true,
                     };
-                    var doc = try options.parse(iter_alloc, input);
+                    var doc = try options.parse(iter_alloc, working);
                     defer doc.deinit();
                 },
             }
         }
+        total_ns += elapsedNs(start, nowNs(io));
         _ = parse_arena.reset(.retain_capacity);
     }
-    const end = nowNs(io);
-
-    return elapsedNs(start, end);
+    return total_ns;
 }
 
 /// Benchmarks streaming parse throughput for one fixture; returns total elapsed ns.
@@ -278,6 +276,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (args.len == 2 and std.mem.eql(u8, args[1], "protocol")) {
+        std.debug.print("2\n", .{});
+        return;
+    }
+
     if (args.len == 4 and std.mem.eql(u8, args[1], "query-parse")) {
         const iterations = try std.fmt.parseInt(usize, args[3], 10);
         const total_ns = try runQueryParse(io, args[2], iterations);
@@ -331,8 +334,8 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len != 3) {
         std.debug.print(
-            "usage:\n  {s} <html-file> <iterations>\n  {s} parse <strictest|fastest|full|stream> <html-file> <iterations>\n  {s} query-parse <selector> <iterations>\n  {s} query-match <html-file> <selector> <iterations>\n  {s} query-match <strictest|fastest|full> <html-file> <selector> <iterations>\n  {s} query-cached <html-file> <selector> <iterations>\n  {s} query-cached <strictest|fastest|full> <html-file> <selector> <iterations>\n",
-            .{ args[0], args[0], args[0], args[0], args[0], args[0], args[0] },
+            "usage:\n  {s} protocol\n  {s} <html-file> <iterations>\n  {s} parse <strictest|fastest|full|stream> <html-file> <iterations>\n  {s} query-parse <selector> <iterations>\n  {s} query-match <html-file> <selector> <iterations>\n  {s} query-match <strictest|fastest|full> <html-file> <selector> <iterations>\n  {s} query-cached <html-file> <selector> <iterations>\n  {s} query-cached <strictest|fastest|full> <html-file> <selector> <iterations>\n",
+            .{ args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0] },
         );
         std.process.exit(2);
     }

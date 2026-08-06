@@ -472,6 +472,11 @@ fn putOwnedString(alloc: std.mem.Allocator, set: *std.StringHashMap(void), key: 
 }
 
 fn runIntCmd(io: std.Io, alloc: std.mem.Allocator, argv: []const []const u8) !u64 {
+    return runIntCmdAt(io, alloc, argv, REPO_ROOT);
+}
+
+/// Runs an integer-producing benchmark command from a specific checkout.
+fn runIntCmdAt(io: std.Io, alloc: std.mem.Allocator, argv: []const []const u8, cwd: []const u8) !u64 {
     const taskset_path: ?[]const u8 = blk: {
         if (common.fileExists(io, "/usr/bin/taskset")) break :blk "/usr/bin/taskset";
         if (common.fileExists(io, "/bin/taskset")) break :blk "/bin/taskset";
@@ -488,9 +493,217 @@ fn runIntCmd(io: std.Io, alloc: std.mem.Allocator, argv: []const []const u8) !u6
     } else argv;
     defer if (run_argv.ptr != argv.ptr) alloc.free(run_argv);
 
-    const out = try common.runCaptureCombined(io, alloc, run_argv, REPO_ROOT);
+    const out = try common.runCaptureCombined(io, alloc, run_argv, cwd);
     defer alloc.free(out);
     return common.parseLastInt(out);
+}
+
+const InterleavedRow = struct {
+    category: []const u8,
+    name: []const u8,
+    iterations: usize,
+    base_samples_ns: []u64,
+    candidate_samples_ns: []u64,
+    base_median_ns: u64,
+    candidate_median_ns: u64,
+    speedup: f64,
+};
+
+const InterleavedSamples = struct {
+    base: []u64,
+    candidate: []u64,
+};
+
+/// Alternates which checkout runs first so neither side owns every early slot.
+inline fn baseRunsFirst(round: usize) bool {
+    return round & 1 == 0;
+}
+
+fn freeInterleavedRows(alloc: std.mem.Allocator, rows: []InterleavedRow) void {
+    for (rows) |row| {
+        alloc.free(row.base_samples_ns);
+        alloc.free(row.candidate_samples_ns);
+    }
+}
+
+/// Measures one command in alternating checkout order to counter temporal drift.
+fn benchInterleavedPair(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    base_dir: []const u8,
+    candidate_dir: []const u8,
+    argv: []const []const u8,
+    runs: usize,
+) !InterleavedSamples {
+    _ = try runIntCmdAt(io, alloc, argv, base_dir);
+    _ = try runIntCmdAt(io, alloc, argv, candidate_dir);
+
+    const base = try alloc.alloc(u64, runs);
+    errdefer alloc.free(base);
+    const candidate = try alloc.alloc(u64, runs);
+    errdefer alloc.free(candidate);
+
+    for (0..runs) |round| {
+        if (baseRunsFirst(round)) {
+            base[round] = try runIntCmdAt(io, alloc, argv, base_dir);
+            candidate[round] = try runIntCmdAt(io, alloc, argv, candidate_dir);
+        } else {
+            candidate[round] = try runIntCmdAt(io, alloc, argv, candidate_dir);
+            base[round] = try runIntCmdAt(io, alloc, argv, base_dir);
+        }
+    }
+    return .{ .base = base, .candidate = candidate };
+}
+
+fn appendInterleavedRow(
+    alloc: std.mem.Allocator,
+    rows: *std.ArrayListUnmanaged(InterleavedRow),
+    category: []const u8,
+    name: []const u8,
+    iterations: usize,
+    samples: InterleavedSamples,
+) !void {
+    errdefer {
+        alloc.free(samples.base);
+        alloc.free(samples.candidate);
+    }
+    const base_median = try common.medianU64(alloc, samples.base);
+    const candidate_median = try common.medianU64(alloc, samples.candidate);
+    try rows.append(alloc, .{
+        .category = category,
+        .name = name,
+        .iterations = iterations,
+        .base_samples_ns = samples.base,
+        .candidate_samples_ns = samples.candidate,
+        .base_median_ns = base_median,
+        .candidate_median_ns = candidate_median,
+        .speedup = @as(f64, @floatFromInt(base_median)) / @as(f64, @floatFromInt(candidate_median)),
+    });
+}
+
+/// Compares two checkouts using identical fixtures and balanced interleaving.
+fn compareWorktrees(io: std.Io, alloc: std.mem.Allocator, args: []const []const u8) !void {
+    var base_arg: []const u8 = ".";
+    var candidate_arg: ?[]const u8 = null;
+    var profile_name: []const u8 = "quick";
+    var mode: []const u8 = "fastest";
+    var runs: usize = 3;
+    var run_query = true;
+    var json_out: []const u8 = "bench/results/interleaved_latest.json";
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--no-query")) {
+            run_query = false;
+        } else if (i + 1 < args.len and std.mem.eql(u8, args[i], "--base")) {
+            i += 1;
+            base_arg = args[i];
+        } else if (i + 1 < args.len and std.mem.eql(u8, args[i], "--candidate")) {
+            i += 1;
+            candidate_arg = args[i];
+        } else if (i + 1 < args.len and std.mem.eql(u8, args[i], "--profile")) {
+            i += 1;
+            profile_name = args[i];
+        } else if (i + 1 < args.len and std.mem.eql(u8, args[i], "--mode")) {
+            i += 1;
+            mode = args[i];
+        } else if (i + 1 < args.len and std.mem.eql(u8, args[i], "--runs")) {
+            i += 1;
+            runs = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (i + 1 < args.len and std.mem.eql(u8, args[i], "--json-out")) {
+            i += 1;
+            json_out = args[i];
+        } else return error.InvalidArgument;
+    }
+    if (candidate_arg == null or runs < 3) return error.InvalidArgument;
+    if (!std.mem.eql(u8, mode, "strictest") and !std.mem.eql(u8, mode, "fastest") and !std.mem.eql(u8, mode, "full")) return error.InvalidBenchMode;
+
+    const profile = try getProfile(profile_name);
+    const cwd = std.Io.Dir.cwd();
+    const base_dir = try cwd.realPathFileAlloc(io, base_arg, alloc);
+    defer alloc.free(base_dir);
+    const candidate_dir = try cwd.realPathFileAlloc(io, candidate_arg.?, alloc);
+    defer alloc.free(candidate_dir);
+    const fixture_dir = try std.fs.path.join(alloc, &.{ base_dir, FIXTURES_DIR });
+    defer alloc.free(fixture_dir);
+
+    const build_argv = [_][]const u8{ "zig", "build", "-Doptimize=ReleaseFast" };
+    std.debug.print("building base: {s}\n", .{base_dir});
+    try common.runInherit(io, alloc, &build_argv, base_dir);
+    std.debug.print("building candidate: {s}\n", .{candidate_dir});
+    try common.runInherit(io, alloc, &build_argv, candidate_dir);
+
+    const protocol_argv = [_][]const u8{ "zig-out/bin/html-bench", "protocol" };
+    if (try runIntCmdAt(io, alloc, &protocol_argv, base_dir) != 2 or
+        try runIntCmdAt(io, alloc, &protocol_argv, candidate_dir) != 2)
+    {
+        return error.IncompatibleBenchProtocol;
+    }
+
+    var rows: std.ArrayListUnmanaged(InterleavedRow) = .empty;
+    defer {
+        freeInterleavedRows(alloc, rows.items);
+        rows.deinit(alloc);
+    }
+    for (profile.fixtures) |fixture_case| {
+        const fixture = try std.fs.path.join(alloc, &.{ fixture_dir, fixture_case.name });
+        defer alloc.free(fixture);
+        const iterations = try std.fmt.allocPrint(alloc, "{d}", .{fixture_case.iterations});
+        defer alloc.free(iterations);
+        const argv = [_][]const u8{ "zig-out/bin/html-bench", "parse", mode, fixture, iterations };
+        std.debug.print("parse {s}: ", .{fixture_case.name});
+        const samples = try benchInterleavedPair(io, alloc, base_dir, candidate_dir, &argv, runs);
+        try appendInterleavedRow(alloc, &rows, "parse", fixture_case.name, fixture_case.iterations, samples);
+        std.debug.print("{d:.3}x\n", .{rows.items[rows.items.len - 1].speedup});
+    }
+
+    if (run_query) {
+        for (profile.query_match_cases) |query_case| {
+            const fixture = try std.fs.path.join(alloc, &.{ fixture_dir, query_case.fixture });
+            defer alloc.free(fixture);
+            const iterations = try std.fmt.allocPrint(alloc, "{d}", .{query_case.iterations});
+            defer alloc.free(iterations);
+            inline for (&.{ "query-match", "query-cached" }) |category| {
+                const argv = [_][]const u8{ "zig-out/bin/html-bench", category, mode, fixture, query_case.selector, iterations };
+                std.debug.print("{s} {s}: ", .{ category, query_case.name });
+                const samples = try benchInterleavedPair(io, alloc, base_dir, candidate_dir, &argv, runs);
+                try appendInterleavedRow(alloc, &rows, category, query_case.name, query_case.iterations, samples);
+                std.debug.print("{d:.3}x\n", .{rows.items[rows.items.len - 1].speedup});
+            }
+        }
+    }
+
+    var log_sum: f64 = 0;
+    var base_sum: u128 = 0;
+    var candidate_sum: u128 = 0;
+    var wins: usize = 0;
+    for (rows.items) |row| {
+        log_sum += @log(row.speedup);
+        base_sum += row.base_median_ns;
+        candidate_sum += row.candidate_median_ns;
+        wins += @intFromBool(row.speedup > 1.0);
+    }
+    const geometric_mean = @exp(log_sum / @as(f64, @floatFromInt(rows.items.len)));
+    const aggregate = @as(f64, @floatFromInt(base_sum)) / @as(f64, @floatFromInt(candidate_sum));
+    std.debug.print("summary: geometric mean {d:.4}x, aggregate {d:.4}x, wins {d}/{d}\n", .{ geometric_mean, aggregate, wins, rows.items.len });
+
+    try common.ensureDir(io, RESULTS_DIR);
+    var json_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer json_writer.deinit();
+    var json_stream: std.json.Stringify = .{ .writer = &json_writer.writer, .options = .{ .whitespace = .indent_2 } };
+    try json_stream.write(.{
+        .generated_unix = common.nowUnix(io),
+        .profile = profile.name,
+        .mode = mode,
+        .runs = runs,
+        .base = base_dir,
+        .candidate = candidate_dir,
+        .rows = rows.items,
+        .geometric_mean_speedup = geometric_mean,
+        .aggregate_speedup = aggregate,
+    });
+    try common.writeFile(io, json_out, json_writer.written());
+    std.debug.print("raw samples: {s}\n", .{json_out});
 }
 
 fn benchParseOne(io: std.Io, alloc: std.mem.Allocator, parser_name: []const u8, fixture_name: []const u8, iterations: usize) !ParseResult {
@@ -2872,6 +3085,7 @@ fn usage() void {
         \\  html-tools setup-parsers
         \\  html-tools setup-fixtures [--refresh]
         \\  html-tools run-benchmarks [--profile quick|stable] [--write-baseline] [--no-query]
+        \\  html-tools compare-worktrees --candidate path [--base path] [--profile quick|stable] [--mode strictest|fastest|full] [--runs N] [--no-query] [--json-out path]
         \\  html-tools sync-docs-bench
         \\  html-tools run-external-suites [--mode strictest|fastest|both] [--max-html5lib-cases N] [--max-whatwg-cases N] [--json-out path] [--failures-out path]
         \\  html-tools docs-check
@@ -2908,6 +3122,10 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, cmd, "run-benchmarks")) {
         try runBenchmarks(io, alloc, rest);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "compare-worktrees")) {
+        try compareWorktrees(io, alloc, rest);
         return;
     }
     if (std.mem.eql(u8, cmd, "sync-docs-bench")) {
@@ -2969,6 +3187,13 @@ test "bench cleanup frees sample buffers" {
 
     var empty_query: [0]QueryResult = .{};
     freeQuerySamples(alloc, &empty_query);
+}
+
+test "interleaved benchmark order alternates checkout priority" {
+    try std.testing.expect(baseRunsFirst(0));
+    try std.testing.expect(!baseRunsFirst(1));
+    try std.testing.expect(baseRunsFirst(2));
+    try std.testing.expect(!baseRunsFirst(3));
 }
 
 test "owned string list cleanup frees entries" {

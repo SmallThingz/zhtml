@@ -58,6 +58,7 @@ pub fn build(b: *std.Build) void {
 
     const tools_step = b.step("tools", "Run html-tools utility");
     const bench_compare_step = b.step("bench-compare", "Benchmark against external parser implementations");
+    const bench_interleaved_step = b.step("bench-interleaved", "Compare two checkouts with interleaved benchmark runs");
     const conformance_step = b.step("conformance", "Run external parser/selector conformance suites (strictest+fastest)");
     const docs_check_step = b.step("docs-check", "Validate markdown links and documented commands");
     const examples_check_step = b.step("examples-check", "Compile and run all examples in test mode");
@@ -75,6 +76,9 @@ pub fn build(b: *std.Build) void {
     compare_cmd.addArg("run-benchmarks");
     compare_cmd.step.dependOn(&setup_fixtures_cmd.step);
 
+    const interleaved_cmd = b.addRunArtifact(tools_exe);
+    interleaved_cmd.addArg("compare-worktrees");
+
     const conformance_cmd = b.addRunArtifact(tools_exe);
     conformance_cmd.addArg("run-external-suites");
     conformance_cmd.addArg("--mode");
@@ -88,6 +92,7 @@ pub fn build(b: *std.Build) void {
 
     tools_step.dependOn(&tools_cmd.step);
     bench_compare_step.dependOn(&compare_cmd.step);
+    bench_interleaved_step.dependOn(&interleaved_cmd.step);
     conformance_step.dependOn(&conformance_cmd.step);
     docs_check_step.dependOn(&docs_check_cmd.step);
     examples_check_step.dependOn(&examples_check_cmd.step);
@@ -96,6 +101,7 @@ pub fn build(b: *std.Build) void {
     setup_parsers_cmd.step.dependOn(b.getInstallStep());
     setup_fixtures_cmd.step.dependOn(b.getInstallStep());
     compare_cmd.step.dependOn(b.getInstallStep());
+    interleaved_cmd.step.dependOn(b.getInstallStep());
     conformance_cmd.step.dependOn(b.getInstallStep());
     docs_check_cmd.step.dependOn(b.getInstallStep());
     examples_check_cmd.step.dependOn(b.getInstallStep());
@@ -103,6 +109,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         tools_cmd.addArgs(args);
         compare_cmd.addArgs(args);
+        interleaved_cmd.addArgs(args);
         conformance_cmd.addArgs(args);
         docs_check_cmd.addArgs(args);
         examples_check_cmd.addArgs(args);
