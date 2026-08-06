@@ -348,7 +348,13 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
             const descend = try callback(self.ctx, ev);
             if (!descend) {
-                if (!self_closing and !tags.isVoidTagWithKey(tag_name, tag.key)) self.i = self.skipSubtree(tag_name, tag.key, self.i);
+                if (tags.isPlainTextTagWithKey(tag_name, tag.key)) {
+                    self.i = self.source.len;
+                } else if (tags.isRawTextTagWithKey(tag_name, tag.key)) {
+                    self.i = if (self.findRawTextClose(tag_name, tag.key, self.i)) |close| close.close_end else self.source.len;
+                } else if (!self_closing and !tags.isVoidTagWithKey(tag_name, tag.key)) {
+                    self.i = self.skipSubtree(tag_name, tag.key, self.i);
+                }
                 return;
             }
 
@@ -645,5 +651,21 @@ test "streaming parser callback can skip subtree" {
 
     var ctx: Ctx = .{};
     try parse(std.testing.allocator, "<main>a<section>skip<span>x</span></section>b</main>", &ctx, Ctx.cb);
+    try std.testing.expectEqual(@as(usize, 2), ctx.text_count);
+}
+
+test "streaming parser skip subtree treats raw text as opaque" {
+    const Ctx = struct {
+        text_count: usize = 0,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "script")) return false;
+            if (ev.kind == .text) self.text_count += 1;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<main>a<script>var s = \"<div>\";</script>b</main>", &ctx, Ctx.cb);
     try std.testing.expectEqual(@as(usize, 2), ctx.text_count);
 }
