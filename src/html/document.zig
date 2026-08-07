@@ -1158,11 +1158,11 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Runs debug selector matching from a document or node scope.
-        fn debugFirstMatchFrom(self: *const @This(), sel: ast.Selector, scope_root: IndexInt) DebugQueryResultType {
+        fn debugFirstMatchFrom(self: *const @This(), sel: ast.Selector, scope_root: IndexInt) !DebugQueryResultType {
             var report: common.QueryDebugReport = .{};
             var scratch = std.heap.ArenaAllocator.init(self.allocator);
             defer scratch.deinit();
-            const idx = (matcher_debug.explainFirstMatch(@This(), self, scratch.allocator(), sel, scope_root, &report) catch @panic("debug query matcher allocation failed")) orelse {
+            const idx = (try matcher_debug.explainFirstMatch(@This(), self, scratch.allocator(), sel, scope_root, &report)) orelse {
                 return .{ .report = report };
             };
             return .{
@@ -2991,14 +2991,14 @@ test "query debug reports near misses and matched index" {
     var html = "<div><a id='x' class='k'></a><a id='y'></a></div>".*;
     try resetParsed(.{}, &doc, &html);
 
-    const miss = doc.debugFirstMatchFrom(comptime ast.Selector.compile("a[href^=https]"), InvalidIndex);
+    const miss = try doc.debugFirstMatchFrom(comptime ast.Selector.compile("a[href^=https]"), InvalidIndex);
     try std.testing.expect(miss.err == null);
     try std.testing.expect(miss.node == null);
     try std.testing.expect(miss.report.visited_elements > 0);
     try std.testing.expect(miss.report.near_miss_len > 0);
     try std.testing.expect(miss.report.near_misses[0].reason.kind != .none);
 
-    const hit = doc.debugFirstMatchFrom(comptime ast.Selector.compile("a#x"), InvalidIndex);
+    const hit = try doc.debugFirstMatchFrom(comptime ast.Selector.compile("a#x"), InvalidIndex);
     const hit_node = hit.node orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(hit_node.index, hit.report.matched_index);
     try std.testing.expectEqual(@as(u16, 0), hit.report.matched_group);
@@ -3016,12 +3016,30 @@ test "node-scoped runtime debug query reports scope/combinator failures" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const sel = try ast.Selector.compileRuntime(arena.allocator(), "> span#inside");
-    const found = doc.debugFirstMatchFrom(sel, root.index);
+    const found = try doc.debugFirstMatchFrom(sel, root.index);
     try std.testing.expect(found.err == null);
     try std.testing.expect(found.node == null);
     try std.testing.expect(found.report.scope_root == root.index);
     try std.testing.expect(found.report.near_miss_len > 0);
     try std.testing.expect(found.report.near_misses[0].reason.kind != .none);
+}
+
+test "debug query propagates matcher allocation failure" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div></div>".*;
+    try resetParsed(.{}, &doc, &html);
+
+    var selector_arena = std.heap.ArenaAllocator.init(alloc);
+    defer selector_arena.deinit();
+    const selector_text = "div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div";
+    const sel = try ast.Selector.compileRuntime(selector_arena.allocator(), selector_text);
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    doc.allocator = failing.allocator();
+    defer doc.allocator = alloc;
+    try std.testing.expectError(error.OutOfMemory, doc.debugFirstMatchFrom(sel, InvalidIndex));
 }
 
 const HookProbe = struct {
