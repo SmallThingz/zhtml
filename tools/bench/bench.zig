@@ -20,10 +20,10 @@ fn nowNs(io: std.Io) i96 {
 
 fn firstQuery(iter: anytype) @TypeOf(blk: {
     var it = iter;
-    break :blk it.next();
+    break :blk it.next() catch unreachable;
 }) {
     var it = iter;
-    return it.next();
+    return it.next() catch unreachable;
 }
 
 /// Runs a built-in synthetic parse/query workload and prints elapsed ns.

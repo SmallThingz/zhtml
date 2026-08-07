@@ -5,10 +5,10 @@ const Document = default_options.Document();
 
 fn firstQuery(iter: anytype) @TypeOf(blk: {
     var it = iter;
-    break :blk it.next();
+    break :blk it.next() catch unreachable;
 }) {
     var it = iter;
-    return it.next();
+    return it.next() catch unreachable;
 }
 
 test "document helpers find html/head/body on full documents and return null for fragments" {
@@ -82,7 +82,7 @@ test "query yields matches in document preorder" {
     var it = doc.query("*[id]");
     const expected = [_][]const u8{ "a", "b", "c", "d" };
     var idx: usize = 0;
-    while (it.next()) |node| {
+    while (try it.next()) |node| {
         if (idx >= expected.len) return error.TestUnexpectedResult;
         const id = (try node.getAttributeValue(std.testing.allocator, "id")) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqualStrings(expected[idx], id.value);

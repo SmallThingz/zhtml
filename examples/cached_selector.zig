@@ -18,7 +18,7 @@ pub fn run() !void {
 
     const sel = try html.Selector.compileRuntime(arena.allocator(), "a[href^=https][class~=button]");
     var buttons = doc.queryRuntime(sel);
-    const first = buttons.next() orelse return error.TestUnexpectedResult;
+    const first = (try buttons.next()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a1", (try first.getAttributeValue(std.testing.allocator, "id")).?.value);
 }
 

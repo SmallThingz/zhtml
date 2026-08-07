@@ -12,14 +12,14 @@ pub fn run() !void {
 
     const primary = try html.Selector.compileRuntime(runtime_arena.allocator(), "a.primary");
     var primary_links = doc.queryRuntime(primary);
-    const one = primary_links.next();
+    const one = try primary_links.next();
     try std.testing.expect(one != null);
 
     const links = try html.Selector.compileRuntime(runtime_arena.allocator(), "a[href]");
     var it = doc.queryRuntime(links);
-    try std.testing.expect(it.next() != null);
-    try std.testing.expect(it.next() != null);
-    try std.testing.expect(it.next() == null);
+    try std.testing.expect(try it.next() != null);
+    try std.testing.expect(try it.next() != null);
+    try std.testing.expect(try it.next() == null);
 }
 
 test "runtime selector APIs" {

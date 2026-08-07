@@ -105,7 +105,7 @@ pub fn parseRawValue(source: []const u8, span_end: usize, eq_index: usize) RawVa
 /// Destructive documents compact a complete tag's attributes on first access.
 /// The compact form is `name[=decoded-value]NUL ... >`; empty assignments and
 /// valueless attributes both use `nameNUL`.
-pub fn materializeAttributes(source: []u8, name_end: usize) void {
+pub fn materializeAttributes(comptime full_named_entities: bool, source: []u8, name_end: usize) void {
     if (name_end >= source.len or !tables.WhitespaceTable[source[name_end]]) return;
 
     var read = name_end;
@@ -148,7 +148,10 @@ pub fn materializeAttributes(source: []u8, name_end: usize) void {
             const raw = parseRawValue(source, end, delim);
             read = raw.next_start;
             if (raw.kind != .empty and raw.end > raw.start) {
-                const decoded_len = entities.decodeAttributeInPlace(source[raw.start..raw.end], null);
+                const decoded_len = if (comptime full_named_entities)
+                    entities.decodeAttributeInPlaceFull(source[raw.start..raw.end], null)
+                else
+                    entities.decodeAttributeInPlace(source[raw.start..raw.end], null);
                 source[write] = '=';
                 write += 1;
                 std.mem.copyForwards(u8, source[write .. write + decoded_len], source[raw.start .. raw.start + decoded_len]);
@@ -224,7 +227,7 @@ pub fn collectSelectedValues(
     if (selected_names.len != out_values.len) return;
 
     const name_end: usize = node.name_or_text.end();
-    materializeAttributes(source, name_end);
+    materializeAttributes(Doc.Options.full_named_entities, source, name_end);
     var i = name_end;
     const end = source.len;
     var remaining: usize = 0;
@@ -260,7 +263,7 @@ pub fn collectSelectedValues(
 inline fn getAttrValueDestructive(doc: anytype, node: anytype, name: []const u8) ?[]const u8 {
     const source: []u8 = @constCast(doc).source;
     const name_end: usize = node.name_or_text.end();
-    materializeAttributes(source, name_end);
+    materializeAttributes(@TypeOf(doc.*).Options.full_named_entities, source, name_end);
     return getCompactAttrValue(source, name_end, name);
 }
 
@@ -297,7 +300,7 @@ inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allo
             if (is_target) {
                 return switch (comptime mode) {
                     .raw => source[raw.start..raw.end],
-                    .non_destructive => try materializeRawValueOwned(allocator, source, raw),
+                    .non_destructive => try materializeRawValueOwned(@TypeOf(doc.*).Options.full_named_entities, allocator, source, raw),
                 };
             }
             i = raw.next_start;
@@ -335,17 +338,23 @@ fn getCompactAttrValue(source: []const u8, start: usize, name: []const u8) ?[]co
 }
 
 /// Returns decoded raw value for non-destructive documents, allocating only when needed.
-fn materializeRawValueOwned(allocator: std.mem.Allocator, source: []const u8, raw: RawValue) ![]const u8 {
+fn materializeRawValueOwned(comptime full_named_entities: bool, allocator: std.mem.Allocator, source: []const u8, raw: RawValue) ![]const u8 {
     if (raw.kind == .empty) return "";
 
     const slice = source[raw.start..raw.end];
-    const first = entities.firstDecodableEntity(slice, 0);
+    const first = if (comptime full_named_entities)
+        entities.firstDecodableEntityFull(true, slice, 0)
+    else
+        entities.firstDecodableEntity(slice, 0);
     if (first == null and std.mem.indexOfScalar(u8, slice, 0) == null) return slice;
 
     const copied = try allocator.dupe(u8, slice);
     errdefer allocator.free(copied);
 
-    const new_len = entities.decodeAttributeInPlace(copied, first);
+    const new_len = if (comptime full_named_entities)
+        entities.decodeAttributeInPlaceFull(copied, first)
+    else
+        entities.decodeAttributeInPlace(copied, first);
     if (new_len == copied.len) return copied;
     return try allocator.realloc(copied, new_len);
 }
@@ -478,7 +487,7 @@ test "parseRawValue handles quoted, naked, empty, and unterminated" {
 
 test "materializeAttributes compacts and decodes the complete list" {
     var buf = "<a b = \"x&amp;y\" c d='a>b'>".*;
-    materializeAttributes(&buf, 2);
+    materializeAttributes(false, &buf, 2);
     try std.testing.expectEqualSlices(u8, "b=x&y\x00c\x00d=a>b\x00>", buf[2..17]);
     try std.testing.expectEqualStrings("x&y", getCompactAttrValue(&buf, 2, "b").?);
     try std.testing.expectEqualStrings("", getCompactAttrValue(&buf, 2, "c").?);
@@ -487,11 +496,11 @@ test "materializeAttributes compacts and decodes the complete list" {
 
 test "materializeAttributes preserves slash values and collapses empty assignments" {
     var slash = "<a b=/>".*;
-    materializeAttributes(&slash, 2);
+    materializeAttributes(false, &slash, 2);
     try std.testing.expectEqualSlices(u8, "b=/\x00>", slash[2..]);
 
     var empty = "<a b=>".*;
-    materializeAttributes(&empty, 2);
+    materializeAttributes(false, &empty, 2);
     try std.testing.expectEqualSlices(u8, "b\x00>>", empty[2..]);
 }
 
@@ -500,7 +509,7 @@ test "RW compaction preserves invalid value bytes and sanitizes invalid name lea
     const raw = scanAttrNameOrSkip(&buf, buf.len, 3);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x80, 'b' }, raw.name.?);
 
-    materializeAttributes(&buf, 2);
+    materializeAttributes(false, &buf, 2);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 'b', '=', 0xff, 'x', 0, '>' }, buf[2..]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xff, 'x' }, getCompactAttrValue(&buf, 2, &[_]u8{ 0x01, 'b' }).?);
 }

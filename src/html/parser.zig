@@ -22,7 +22,9 @@ const MaxInitialNodeReserve: usize = 1 << 20;
 // In destructive mode tag names are normalized in-place. In non-destructive mode
 // parsing is read-only and any lazy decode work happens outside this file.
 
-/// Parses `input` and returns a fully owned document for `opts`.
+/// Parses borrowed `input` and returns a document that owns its node storage.
+/// The caller must keep `input` alive until the document is no longer used and
+/// remains responsible for freeing it. Destructive mode may mutate `input`.
 pub fn parse(comptime opts: ParseOptions, allocator: std.mem.Allocator, input: opts.Input()) !opts.Document() {
     if (!common.lenFits(input.len)) return error.InputTooLarge;
     if (input.len == 0) return error.InvalidInput;
@@ -587,7 +589,7 @@ test "malformed short comment does not swallow following nodes" {
     try resetParsed(DefaultTestOptions, &doc, &html);
 
     var iter = doc.query("div");
-    try std.testing.expect(iter.next() != null);
+    try std.testing.expect(try iter.next() != null);
 }
 
 fn expectDocumentStructureValid(doc: anytype) !void {
@@ -671,10 +673,10 @@ fn expectEquivalentStructures(a: *const TestDocument, b: *const NonDestructiveTe
 
 fn firstQuery(iter: anytype) @TypeOf(blk: {
     var it = iter;
-    break :blk it.next();
+    break :blk it.next() catch unreachable;
 }) {
     var it = iter;
-    return it.next();
+    return it.next() catch unreachable;
 }
 
 fn runtimeFirst(scope: anytype, allocator: std.mem.Allocator, selector: []const u8) !@TypeOf(firstQuery(scope.query("*"))) {
@@ -1027,8 +1029,8 @@ test "svg subtrees are skipped and stored as one text child payload" {
     try std.testing.expectEqualStrings("<g><svg id='inner'><rect id='r'/></svg><circle id='c'/></g>", svg_text.value);
 
     var svg_it = doc.query("svg");
-    try std.testing.expect(svg_it.next() != null);
-    try std.testing.expect(svg_it.next() == null);
+    try std.testing.expect(try svg_it.next() != null);
+    try std.testing.expect(try svg_it.next() == null);
 
     try std.testing.expect(firstQuery(doc.query("#before")) != null);
     try std.testing.expect(firstQuery(doc.query("#after")) != null);
@@ -1225,8 +1227,8 @@ test "raw-text and svg scanners respect spaced quoted end delimiters" {
     try std.testing.expect(firstQuery(doc.query("script")) != null);
     try std.testing.expect(firstQuery(doc.query("div#after")) != null);
     var svg_it = doc.query("svg");
-    try std.testing.expect(svg_it.next() != null);
-    try std.testing.expect(svg_it.next() == null);
+    try std.testing.expect(try svg_it.next() != null);
+    try std.testing.expect(try svg_it.next() == null);
 }
 
 test "attribute parsing still builds the DOM" {

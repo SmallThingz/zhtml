@@ -35,7 +35,7 @@ test "basic parse + query" {
     defer doc.deinit();
 
     var links = doc.query("div#app > a.nav");
-    const a = links.next() orelse return error.TestUnexpectedResult;
+    const a = (try links.next()) orelse return error.TestUnexpectedResult;
     const href = (try a.getAttributeValue(std.testing.allocator, "href")) orelse return error.TestUnexpectedResult;
     defer href.free(&doc, std.testing.allocator);
     try std.testing.expectEqualStrings("/docs", href.value);
@@ -59,18 +59,19 @@ All examples are verified by running `zig build examples-check`
 - `doc.clear()`
 - destructive options accept mutable input and parse it in place
 - non-destructive options accept read-only input and parse directly from the original bytes
+- documents own node storage and borrow input; callers retain input ownership and must keep it alive
 - maximum parseable input size is controlled at build time with `-Dintlen`
 
 ### Query APIs
 
 - Compile-time selectors:
-  - `var it = doc.query(comptime selector); it.next()`
+  - `var it = doc.query(comptime selector); try it.next()`
   - `doc.query(comptime selector)`
 - Runtime selectors:
-  - `var it = doc.queryRuntime(compiled_selector); it.next()`
+  - `var it = doc.queryRuntime(compiled_selector); try it.next()`
   - `doc.queryRuntime(compiled_selector)`
 - Cached runtime selectors:
-  - `var it = doc.queryRuntime(selector); it.next()`
+  - `var it = doc.queryRuntime(selector); try it.next()`
   - `doc.queryRuntime(selector)`
   - selector created via `try Selector.compileRuntime(allocator, source)`
 
@@ -129,7 +130,8 @@ All examples are verified by running `zig build examples-check`
 - destructive decoding changes literal NUL bytes to spaces and numeric NUL references to U+FFFD; malformed leading UTF-8 bytes in attribute names are replaced with an internal marker
 - tag and attribute names use delimiter blacklists rather than identifier whitelists, allowing framework names such as `@click`, `*ngIf`, `(change)`, and `[value]`
 - destructive text spans use an in-bounds NUL byte immediately after the span to remember that entity decoding already occurred; terminal text without spare capacity may be checked again
-- `writeHtml(writer, comptime encode_entities)` can materialize and escape RW text as `&amp;`, `&lt;`, and `&gt;`; `format` deliberately passes `false` to retain its existing behavior
+- `writeHtml(writer, comptime entities)` accepts `.never`, `.auto`, or `.force`; `.auto` re-encodes already-decoded destructive text, `.force` canonicalizes escapable text and attributes, and `format` uses `.never`
+- the common named references (`nbsp`, `copy`, `reg`, `mdash`, `ndash`, and `hellip`) are always decoded; `.full_named_entities = true` enables the generated complete WHATWG table
 - `script` and `style` are parsed as raw text and never entity-decoded; `title` and `textarea` are parsed opaquely as escapable raw text and do decode character references during extraction
 - query-time decoding keeps parse throughput high by avoiding eager entity decode and whitespace normalization for bytes that may never be read
 

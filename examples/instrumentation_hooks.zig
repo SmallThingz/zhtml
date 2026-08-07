@@ -34,7 +34,7 @@ pub fn run() !void {
     try std.testing.expectEqual(@as(usize, 0), hooks.parse_end_calls);
 
     var it = html.queryWithHooks(std.testing.io, &doc, "span#x", &hooks);
-    try std.testing.expect(it.next() != null);
+    try std.testing.expect(try it.next() != null);
     try std.testing.expectEqual(@as(usize, 1), hooks.query_start_calls);
     try std.testing.expectEqual(@as(usize, 1), hooks.query_end_calls);
 }

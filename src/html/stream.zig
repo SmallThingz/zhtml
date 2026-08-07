@@ -364,7 +364,18 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             const token_start = self.i;
             self.i += 2;
             if (!self.options.track_nesting) {
-                self.i = (std.mem.indexOfScalarPos(u8, self.source, self.i, '>') orelse (self.source.len - 1)) + 1;
+                const tag = self.scanTagName(self.i);
+                const token_end = (std.mem.indexOfScalarPos(u8, self.source, tag.end, '>') orelse (self.source.len - 1)) + 1;
+                self.i = token_end;
+                if (self.options.emit_end_tags and tag.end != tag.start) {
+                    _ = try callback(self.ctx, .{
+                        .source = self.source,
+                        .kind = .end_tag,
+                        .depth = 0,
+                        .name = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) },
+                        .token = .{ .start = @intCast(token_start), .len = @intCast(token_end - token_start) },
+                    });
+                }
                 return;
             }
             const tag = self.scanTagName(self.i);
@@ -518,18 +529,50 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             var i = start;
             while (std.mem.indexOfScalarPos(u8, self.source, i, '<')) |lt| {
                 if (lt + 1 >= self.source.len) return self.source.len;
+
+                if (std.mem.startsWith(u8, self.source[lt..], "<!--")) {
+                    i = if (std.mem.indexOfPos(u8, self.source, lt + 4, "-->")) |end| end + 3 else self.source.len;
+                    continue;
+                }
+
+                if (self.source[lt + 1] == '!') {
+                    i = self.findBangEnd(lt + 2);
+                    continue;
+                }
+
+                if (self.source[lt + 1] == '?') {
+                    i = (std.mem.indexOfScalarPos(u8, self.source, lt + 2, '>') orelse (self.source.len - 1)) + 1;
+                    continue;
+                }
+
                 if (self.source[lt + 1] == '/') {
                     const close = self.scanTagName(lt + 2);
-                    if (tags.equalByLenAndKeyIgnoreCase(self.source[close.start..close.end], close.key, name, key)) {
-                        depth -= 1;
-                        const end = (std.mem.indexOfScalarPos(u8, self.source, close.end, '>') orelse (self.source.len - 1)) + 1;
-                        if (depth == 0) return end;
-                        i = end;
+                    if (close.end == close.start) {
+                        i = lt + 1;
                         continue;
                     }
+                    const end = if (self.findTagEnd(close.end)) |tag_end| tag_end + 1 else self.source.len;
+                    if (tags.equalByLenAndKeyIgnoreCase(self.source[close.start..close.end], close.key, name, key)) {
+                        depth -= 1;
+                        if (depth == 0) return end;
+                    }
+                    i = end;
+                    continue;
                 } else if (tables.TagNameCharTable[self.source[lt + 1]]) {
                     const child = self.scanTagName(lt + 1);
-                    if (tags.equalByLenAndKeyIgnoreCase(self.source[child.start..child.end], child.key, name, key)) depth += 1;
+                    const end_pos = self.findTagEnd(child.end) orelse return self.source.len;
+                    const child_name = self.source[child.start..child.end];
+                    const self_closing = end_pos > child.end and self.source[end_pos - 1] == '/';
+                    i = end_pos + 1;
+
+                    if (!self_closing and !tags.isVoidTagWithKey(child_name, child.key)) {
+                        if (tags.equalByLenAndKeyIgnoreCase(child_name, child.key, name, key)) depth += 1;
+                        if (tags.isPlainTextTagWithKey(child_name, child.key)) return self.source.len;
+                        if (tags.isTextOnlyTagWithKey(child_name, child.key)) {
+                            i = if (self.findRawTextClose(child_name, child.key, i)) |raw_close| raw_close.close_end else self.source.len;
+                        }
+                    }
+                    continue;
                 }
                 i = lt + 1;
             }
@@ -749,4 +792,49 @@ test "streaming parser skip subtree treats raw text as opaque" {
     var ctx: Ctx = .{};
     try parse(std.testing.allocator, "<main>a<script>var s = \"<div>\";</script>b</main>", &ctx, Ctx.cb);
     try std.testing.expectEqual(@as(usize, 2), ctx.text_count);
+}
+
+test "streaming parser skip ancestor ignores fake closes in opaque syntax" {
+    const Ctx = struct {
+        text: std.ArrayList(u8) = .empty,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "section")) return false;
+            if (ev.kind == .text) try self.text.appendSlice(std.testing.allocator, ev.valueSlice());
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    defer ctx.text.deinit(std.testing.allocator);
+    const input =
+        "a<section><!-- </section> --><div title='</section>'></div>" ++
+        "<script>\"</section>\"</script><p>skip</p></section>b";
+    try parse(std.testing.allocator, input, &ctx, Ctx.cb);
+    try std.testing.expectEqualStrings("ab", ctx.text.items);
+}
+
+test "streaming parser emits syntactic end tags without nesting" {
+    const Ctx = struct {
+        names: std.ArrayList(u8) = .empty,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .end_tag) {
+                if (self.names.items.len != 0) try self.names.append(std.testing.allocator, ',');
+                try self.names.appendSlice(std.testing.allocator, ev.nameSlice());
+                try std.testing.expectEqual(@as(u32, 0), ev.depth);
+            }
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    defer ctx.names.deinit(std.testing.allocator);
+    try (Parser{ .options = .{ .track_nesting = false, .emit_end_tags = true } }).parse(
+        std.testing.allocator,
+        "<a></a><b></b>",
+        &ctx,
+        Ctx.cb,
+    );
+    try std.testing.expectEqualStrings("a,b", ctx.names.items);
 }

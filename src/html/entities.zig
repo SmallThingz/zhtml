@@ -11,6 +11,7 @@ test {
 }
 const IndexInt = @import("../common.zig").IndexInt;
 const tables = @import("tables.zig");
+const named_entities = @import("named_entities.zig");
 const InvalidDigit = 0xff;
 const ReplacementUtf8 = [3]u8{ 0xEF, 0xBF, 0xBD };
 
@@ -19,7 +20,7 @@ pub const Decoded = struct {
     /// Number of source bytes consumed from the entity prefix.
     consumed: IndexInt,
     /// UTF-8 bytes produced by the decode.
-    bytes: [4]u8,
+    bytes: [6]u8,
     /// Number of valid bytes in `bytes`.
     len: u3,
     /// True only for a numeric reference whose codepoint is zero.
@@ -37,17 +38,33 @@ pub const Decoded = struct {
 
 /// Decodes entities in-place over entire slice and returns new length.
 pub fn decodeInPlace(comptime normalize_whitespace: bool, slice: []u8) usize {
+    return decodeInPlaceMode(normalize_whitespace, false, slice);
+}
+
+pub fn decodeInPlaceFull(comptime normalize_whitespace: bool, slice: []u8) usize {
+    return decodeInPlaceMode(normalize_whitespace, true, slice);
+}
+
+fn decodeInPlaceMode(comptime normalize_whitespace: bool, comptime full_named: bool, slice: []u8) usize {
     const first = std.mem.indexOfScalar(u8, slice, '&') orelse {
         return if (comptime normalize_whitespace) normalizeWhitespaceInPlace(slice) else slice.len;
     };
-    return decodeInPlaceFrom(normalize_whitespace, slice, first);
+    return decodeInPlaceFromMode(normalize_whitespace, full_named, slice, first);
 }
 
 /// Returns the first `&` offset that begins a decodable entity.
 pub fn firstDecodableEntity(slice: []const u8, start: usize) ?usize {
+    return firstDecodableEntityMode(false, false, slice, start);
+}
+
+pub fn firstDecodableEntityFull(comptime attribute: bool, slice: []const u8, start: usize) ?usize {
+    return firstDecodableEntityMode(true, attribute, slice, start);
+}
+
+fn firstDecodableEntityMode(comptime full_named: bool, comptime attribute: bool, slice: []const u8, start: usize) ?usize {
     var i = start;
     while (std.mem.indexOfScalarPos(u8, slice, i, '&')) |amp| {
-        if (decodeEntity(slice[amp + 1 ..]) != null) {
+        if (decodeEntityMode(slice[amp + 1 ..], full_named, attribute) != null) {
             @branchHint(.likely);
             return amp;
         } else {
@@ -60,18 +77,30 @@ pub fn firstDecodableEntity(slice: []const u8, start: usize) ?usize {
 
 /// Decodes entities in-place starting at a known `&` offset.
 pub fn decodeInPlaceFrom(comptime normalize_whitespace: bool, slice: []u8, first: usize) usize {
+    return decodeInPlaceFromMode(normalize_whitespace, false, slice, first);
+}
+
+fn decodeInPlaceFromMode(comptime normalize_whitespace: bool, comptime full_named: bool, slice: []u8, first: usize) usize {
     std.debug.assert(first < slice.len);
     std.debug.assert(slice[first] == '&');
-    if (comptime normalize_whitespace) return decodeNormalizeInPlaceFrom(slice, first);
-    return decodePlainInPlaceFrom(slice, first, false);
+    if (comptime normalize_whitespace) return decodeNormalizeInPlaceFrom(slice, first, full_named);
+    return decodePlainInPlaceFrom(slice, first, false, full_named, false);
 }
 
 /// Decodes an attribute value, replacing numeric references to codepoint zero
 /// with U+FFFD and literal NUL bytes with ASCII spaces. `first` may be supplied by callers
 /// that already searched for a decodable entity.
 pub fn decodeAttributeInPlace(slice: []u8, first: ?usize) usize {
-    const new_len = if (first orelse firstDecodableEntity(slice, 0)) |amp|
-        decodePlainInPlaceFrom(slice, amp, false)
+    return decodeAttributeInPlaceMode(false, slice, first);
+}
+
+pub fn decodeAttributeInPlaceFull(slice: []u8, first: ?usize) usize {
+    return decodeAttributeInPlaceMode(true, slice, first);
+}
+
+fn decodeAttributeInPlaceMode(comptime full_named: bool, slice: []u8, first: ?usize) usize {
+    const new_len = if (first orelse firstDecodableEntityMode(full_named, true, slice, 0)) |amp|
+        decodePlainInPlaceFrom(slice, amp, false, full_named, true)
     else
         slice.len;
     for (slice[0..new_len]) |*c| {
@@ -80,12 +109,12 @@ pub fn decodeAttributeInPlace(slice: []u8, first: ?usize) usize {
     return new_len;
 }
 
-fn decodePlainInPlaceFrom(slice: []u8, first: usize, comptime null_as_space: bool) usize {
+fn decodePlainInPlaceFrom(slice: []u8, first: usize, comptime null_as_space: bool, comptime full_named: bool, comptime attribute: bool) usize {
     var r: usize = first;
     var w: usize = first;
 
     while (true) {
-        if (decodeEntity(slice[r + 1 ..])) |decoded| {
+        if (decodeEntityMode(slice[r + 1 ..], full_named, attribute)) |decoded| {
             @branchHint(.likely);
             writeDecoded(slice, w, decoded, null_as_space);
             r += decoded.consumed;
@@ -117,7 +146,7 @@ fn decodePlainInPlaceFrom(slice: []u8, first: usize, comptime null_as_space: boo
         }
 
         r = next_amp;
-        if (decodeEntity(slice[r + 1 ..])) |decoded| {
+        if (decodeEntityMode(slice[r + 1 ..], full_named, attribute)) |decoded| {
             writeDecoded(slice, w, decoded, null_as_space);
             r += decoded.consumed;
             w += decodedLen(decoded, null_as_space);
@@ -157,7 +186,7 @@ const WhitespaceState = struct {
     wrote_any: bool = false,
 };
 
-fn decodeNormalizeInPlaceFrom(bytes: []u8, first: usize) usize {
+fn decodeNormalizeInPlaceFrom(bytes: []u8, first: usize, comptime full_named: bool) usize {
     var state: WhitespaceState = .{};
     var r: usize = first;
     var w: usize = 0;
@@ -172,7 +201,7 @@ fn decodeNormalizeInPlaceFrom(bytes: []u8, first: usize) usize {
             continue;
         }
 
-        if (decodeEntity(bytes[r + 1 ..])) |decoded| {
+        if (decodeEntityMode(bytes[r + 1 ..], full_named, false)) |decoded| {
             appendNormalizedBytes(bytes, &w, &state, decoded.bytes[0..decoded.len]);
             r += decoded.consumed;
         } else {
@@ -234,7 +263,30 @@ fn decodeReferenceAlloc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     return try out.toOwnedSlice(alloc);
 }
 
-fn decodeEntity(rem: []const u8) ?Decoded {
+pub fn decodeEntity(rem: []const u8) ?Decoded {
+    return decodeEntityMode(rem, false, false);
+}
+
+pub fn decodeEntityFull(comptime attribute: bool, rem: []const u8) ?Decoded {
+    return decodeEntityMode(rem, true, attribute);
+}
+
+fn decodeEntityMode(rem: []const u8, comptime full_named: bool, comptime attribute: bool) ?Decoded {
+    if (rem.len < 2) return null;
+
+    if (rem[0] == '#') return switch (rem[1]) {
+        'x', 'X' => parseNumericHex(rem[2..]),
+        else => parseNumericDecimal(rem[1..]),
+    };
+
+    if (comptime full_named) {
+        if (named_entities.longestPrefix(rem, attribute)) |named| {
+            var out: [6]u8 = undefined;
+            @memcpy(out[0..named.value.len], named.value);
+            return .{ .consumed = named.consumed, .bytes = out, .len = @intCast(named.value.len) };
+        }
+        return null;
+    }
     if (rem.len < 3) return null;
 
     return switch (rem[0]) {
@@ -247,10 +299,11 @@ fn decodeEntity(rem: []const u8) ?Decoded {
         'l' => if (rem[1] == 't' and rem[2] == ';') literalDecoded(4, '<') else null,
         'g' => if (rem[1] == 't' and rem[2] == ';') literalDecoded(4, '>') else null,
         'q' => if (rem.len >= 5 and rem[1] == 'u' and rem[2] == 'o' and rem[3] == 't' and rem[4] == ';') literalDecoded(6, '"') else null,
-        '#' => switch (rem[1]) {
-            'x', 'X' => parseNumericHex(rem[2..]),
-            else => parseNumericDecimal(rem[1..]),
-        },
+        'n' => if (std.mem.startsWith(u8, rem, "nbsp;")) bytesDecoded(6, "\xc2\xa0") else if (std.mem.startsWith(u8, rem, "ndash;")) bytesDecoded(7, "\xe2\x80\x93") else null,
+        'c' => if (std.mem.startsWith(u8, rem, "copy;")) bytesDecoded(6, "\xc2\xa9") else null,
+        'r' => if (std.mem.startsWith(u8, rem, "reg;")) bytesDecoded(5, "\xc2\xae") else null,
+        'm' => if (std.mem.startsWith(u8, rem, "mdash;")) bytesDecoded(7, "\xe2\x80\x94") else null,
+        'h' => if (std.mem.startsWith(u8, rem, "hellip;")) bytesDecoded(8, "\xe2\x80\xa6") else null,
         else => null,
     };
 }
@@ -258,15 +311,21 @@ fn decodeEntity(rem: []const u8) ?Decoded {
 fn literalDecoded(consumed: usize, c: u8) Decoded {
     return .{
         .consumed = @intCast(consumed),
-        .bytes = .{ c, undefined, undefined, undefined },
+        .bytes = .{ c, undefined, undefined, undefined, undefined, undefined },
         .len = 1,
     };
+}
+
+fn bytesDecoded(consumed: usize, value: []const u8) Decoded {
+    var out: [6]u8 = undefined;
+    @memcpy(out[0..value.len], value);
+    return .{ .consumed = @intCast(consumed), .bytes = out, .len = @intCast(value.len) };
 }
 
 fn replacementDecoded(consumed: usize) Decoded {
     return .{
         .consumed = @intCast(consumed),
-        .bytes = .{ ReplacementUtf8[0], ReplacementUtf8[1], ReplacementUtf8[2], undefined },
+        .bytes = .{ ReplacementUtf8[0], ReplacementUtf8[1], ReplacementUtf8[2], undefined, undefined, undefined },
         .len = 3,
     };
 }
@@ -330,15 +389,17 @@ fn parseNumericHex(rem: []const u8) ?Decoded {
 
 inline fn finishNumeric(value: u32, consumed: usize) Decoded {
     if (value == 0) return numericNullDecoded(consumed);
-    var out: [4]u8 = undefined;
+    var encoded: [4]u8 = undefined;
     const codepoint = std.math.cast(u21, value) orelse {
         @branchHint(.unlikely);
         return replacementDecoded(consumed);
     };
-    const len = std.unicode.utf8Encode(codepoint, &out) catch {
+    const len = std.unicode.utf8Encode(codepoint, &encoded) catch {
         @branchHint(.unlikely);
         return replacementDecoded(consumed);
     };
+    var out: [6]u8 = undefined;
+    @memcpy(out[0..len], encoded[0..len]);
     return .{ .consumed = @intCast(consumed), .bytes = out, .len = len };
 }
 
@@ -534,11 +595,23 @@ test "decode entities keeps plain text unchanged" {
     try std.testing.expectEqualStrings("plain text", buf[0..n]);
 }
 
+test "common named entities decode without full table" {
+    var buf = "&nbsp;&copy;&reg;&mdash;&ndash;&hellip;".*;
+    const n = decodeInPlace(false, &buf);
+    try std.testing.expectEqualStrings("\xc2\xa0\xc2\xa9\xc2\xae\xe2\x80\x94\xe2\x80\x93\xe2\x80\xa6", buf[0..n]);
+}
+
+test "full named entity mode decodes uncommon and two-codepoint values" {
+    var buf = "&eacute; &NotNestedGreaterGreater;".*;
+    const n = decodeInPlaceFull(false, &buf);
+    try std.testing.expectEqualStrings("\xc3\xa9 \xe2\xaa\xa2\xcc\xb8", buf[0..n]);
+}
+
 test "format decoded entity" {
     const alloc = std.testing.allocator;
     const decoded: Decoded = .{
         .consumed = 3,
-        .bytes = .{ 1, 2, 3, 4 },
+        .bytes = .{ 1, 2, 3, 4, 5, 6 },
         .len = 2,
     };
     const rendered = try std.fmt.allocPrint(alloc, "{f}", .{decoded});

@@ -20,8 +20,9 @@ pub const RawTextClose = struct {
 };
 
 /// Scans an HTML tag name and builds its lowercase first-eight-byte key.
-/// Destructive DOM parsing specializes `normalize_first8` to true; streaming
-/// parsing specializes it to false and never writes to the source.
+/// Destructive DOM parsing specializes `normalize_first8` to true and
+/// canonicalizes the complete name; streaming parsing specializes it to false
+/// and never writes to the source.
 pub inline fn scanTagName(source: []const u8, start: usize, comptime normalize_first8: bool) TagName {
     var i = start;
     var key: u64 = 0;
@@ -32,7 +33,9 @@ pub inline fn scanTagName(source: []const u8, start: usize, comptime normalize_f
         key |= @as(u64, c) << @as(u6, @intCast(off * 8));
         i += 1;
     } else {
-        while (i < source.len and tables.TagNameCharTable[source[i]]) : (i += 1) {}
+        while (i < source.len and tables.TagNameCharTable[source[i]]) : (i += 1) {
+            if (comptime normalize_first8) @constCast(source)[i] = std.ascii.toLower(source[i]);
+        }
     }
     return .{ .start = start, .end = i, .key = key };
 }
@@ -104,13 +107,13 @@ pub inline fn findRawTextClose(
 }
 
 test "shared tag scanner preserves mode-specific normalization" {
-    var destructive = "ScRiPt-long ".*;
+    var destructive = "ScRiPt-lOnG ".*;
     const rw = scanTagName(&destructive, 0, true);
     try std.testing.expectEqualStrings("script-long", destructive[0..rw.end]);
 
-    const read_only = "ScRiPt-long ";
+    const read_only = "ScRiPt-lOnG ";
     const ro = scanTagName(read_only, 0, false);
-    try std.testing.expectEqualStrings("ScRiPt-long", read_only[0..ro.end]);
+    try std.testing.expectEqualStrings("ScRiPt-lOnG", read_only[0..ro.end]);
     try std.testing.expectEqual(rw.key, ro.key);
 }
 

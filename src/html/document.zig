@@ -21,6 +21,16 @@ const IndexInt = common.IndexInt;
 
 /// Sentinel used for missing node indexes and invalid spans.
 pub const InvalidIndex: IndexInt = common.InvalidIndex;
+
+/// Controls entity handling during HTML serialization.
+pub const EntityEncoding = enum {
+    /// Serialize the currently stored bytes without additional entity work.
+    never,
+    /// Re-encode only text already decoded in a destructive document.
+    auto,
+    /// Decode and canonically re-encode escapable text and attribute values.
+    force,
+};
 /// Inclusive-exclusive byte span into the document source buffer.
 pub const Span = struct {
     /// Inclusive start byte offset in the document source.
@@ -74,6 +84,9 @@ pub const ParseOptions = struct {
     /// keeping lazy attr/text decoding out of the input buffer.
     /// This is off by default so the destructive hot path stays unchanged.
     non_destructive: bool = false,
+    /// Enables the complete WHATWG named-character-reference table. The
+    /// compact common-entity set and numeric references remain available when false.
+    full_named_entities: bool = false,
     /// Persist direct last-child links for O(1) `children().last()`.
     /// Off by default because first child and next sibling are already bounded.
     store_last_child: bool = false,
@@ -85,7 +98,7 @@ pub const ParseOptions = struct {
         return if (options.non_destructive) []const u8 else []u8;
     }
 
-    /// Parses `input` and returns a fully-owned document for this option set.
+    /// Parses borrowed `input`; the returned document owns node storage only.
     pub fn parse(comptime options: @This(), gpa: std.mem.Allocator, input: options.Input()) !options.Document() {
         return parser.parse(options, gpa, input);
     }
@@ -122,9 +135,10 @@ pub const ParseOptions = struct {
 
     /// Formats parse options for human-readable output.
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("ParseOptions{{drop_whitespace_text_nodes={s}, non_destructive={}, store_last_child={}, store_prev_sibling={}}}", .{
+        try writer.print("ParseOptions{{drop_whitespace_text_nodes={s}, non_destructive={}, full_named_entities={}, store_last_child={}, store_prev_sibling={}}}", .{
             @tagName(self.drop_whitespace_text_nodes),
             self.non_destructive,
+            self.full_named_entities,
             self.store_last_child,
             self.store_prev_sibling,
         });
@@ -418,7 +432,10 @@ fn GetNode(comptime options: ParseOptions) type {
             out.appendSliceAssumeCapacity(slice);
             if (comptime options.non_destructive and opts.unescape) {
                 if (!isRawTextNode(doc, idx)) {
-                    const decoded_len = entities.decodeInPlace(false, out.items[start..]);
+                    const decoded_len = if (comptime options.full_named_entities)
+                        entities.decodeInPlaceFull(false, out.items[start..])
+                    else
+                        entities.decodeInPlace(false, out.items[start..]);
                     out.items.len = start + decoded_len;
                 }
             }
@@ -433,7 +450,10 @@ fn GetNode(comptime options: ParseOptions) type {
             comptime already_normalized: bool,
         ) ![]const u8 {
             if (comptime opts.unescape and !already_decoded) {
-                out.items.len = entities.decodeInPlace(opts.normalize_whitespace and !already_normalized, out.items);
+                out.items.len = if (comptime options.full_named_entities)
+                    entities.decodeInPlaceFull(opts.normalize_whitespace and !already_normalized, out.items)
+                else
+                    entities.decodeInPlace(opts.normalize_whitespace and !already_normalized, out.items);
             } else if (comptime opts.normalize_whitespace and !already_normalized) {
                 out.items.len = entities.normalizeWhitespaceInPlace(out.items);
             }
@@ -454,7 +474,10 @@ fn GetNode(comptime options: ParseOptions) type {
                 errdefer out.deinit(gpa);
                 try out.appendSlice(gpa, node_raw.name_or_text.slice(doc.source));
                 if (comptime options.non_destructive and opts.unescape) {
-                    if (!isRawTextNode(doc, self.index)) out.items.len = entities.decodeInPlace(false, out.items);
+                    if (!isRawTextNode(doc, self.index)) out.items.len = if (comptime options.full_named_entities)
+                        entities.decodeInPlaceFull(false, out.items)
+                    else
+                        entities.decodeInPlace(false, out.items);
                 }
                 return try finishInnerTextOwned(
                     &out,
@@ -474,7 +497,7 @@ fn GetNode(comptime options: ParseOptions) type {
                 });
             }
 
-            return "";
+            return try gpa.alloc(u8, 0);
         }
 
         /// Decodes and/or normalizes one RW text span and records decoded state
@@ -488,7 +511,10 @@ fn GetNode(comptime options: ParseOptions) type {
 
             if (comptime unescape) {
                 if (!was_decoded and !isRawTextNode(doc, idx)) {
-                    const new_len = entities.decodeInPlace(false, node.name_or_text.sliceMut(doc.source));
+                    const new_len = if (comptime options.full_named_entities)
+                        entities.decodeInPlaceFull(false, node.name_or_text.sliceMut(doc.source))
+                    else
+                        entities.decodeInPlace(false, node.name_or_text.sliceMut(doc.source));
                     node.name_or_text.len = @intCast(new_len);
                     decoded = true;
                 }
@@ -567,18 +593,18 @@ fn GetNode(comptime options: ParseOptions) type {
         };
 
         /// Writes HTML serialization of this node and its subtree to `writer`.
-        pub fn writeHtml(self: @This(), writer: anytype, comptime encode_entities: bool) WriterError(@TypeOf(writer))!void {
-            try writeNodeHtml(self.doc, self.index, self.raw(), writer, true, encode_entities);
+        pub fn writeHtml(self: @This(), writer: anytype, comptime entity_encoding: EntityEncoding) WriterError(@TypeOf(writer))!void {
+            try writeNodeHtml(self.doc, self.index, self.raw(), writer, true, entity_encoding);
         }
 
         /// Writes HTML serialization of this node only, excluding its children.
-        pub fn writeSelfHtml(self: @This(), writer: anytype, comptime encode_entities: bool) WriterError(@TypeOf(writer))!void {
-            try writeNodeHtml(self.doc, self.index, self.raw(), writer, false, encode_entities);
+        pub fn writeSelfHtml(self: @This(), writer: anytype, comptime entity_encoding: EntityEncoding) WriterError(@TypeOf(writer))!void {
+            try writeNodeHtml(self.doc, self.index, self.raw(), writer, false, entity_encoding);
         }
 
         /// Default formatter uses HTML serialization for this node.
         pub fn format(self: *const @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            return self.writeHtml(writer, false);
+            return self.writeHtml(writer, .never);
         }
 
         /// Writes one node as HTML, optionally including its full subtree.
@@ -588,14 +614,17 @@ fn GetNode(comptime options: ParseOptions) type {
             noalias node_raw: anytype,
             writer: anytype,
             include_children: bool,
-            comptime encode_entities: bool,
+            comptime entity_encoding: EntityEncoding,
         ) WriterError(@TypeOf(writer))!void {
             if (node_raw.isText(idx)) {
                 const raw_text = isRawTextNode(doc, idx);
-                if (comptime encode_entities and !options.non_destructive) materializeRwText(doc, idx, true, false);
+                if (comptime entity_encoding == .force and !options.non_destructive) materializeRwText(doc, idx, true, false);
                 const text_bytes = node_raw.name_or_text.slice(doc.source);
-                if (comptime encode_entities and !options.non_destructive) {
-                    if (raw_text) try writer.writeAll(text_bytes) else try writeEscapedText(writer, text_bytes);
+                const decoded = !options.non_destructive and node_raw.name_or_text.end() < doc.source.len and doc.source[node_raw.name_or_text.end()] == 0;
+                if (comptime entity_encoding == .force and options.non_destructive) {
+                    if (raw_text) try writer.writeAll(text_bytes) else try writeDecodedEscaped(writer, text_bytes, false);
+                } else if (comptime entity_encoding == .force or (entity_encoding == .auto and !options.non_destructive)) {
+                    if (raw_text or !decoded) try writer.writeAll(text_bytes) else try writeEscapedText(writer, text_bytes);
                 } else {
                     try writer.writeAll(text_bytes);
                 }
@@ -603,7 +632,7 @@ fn GetNode(comptime options: ParseOptions) type {
             }
 
             if (idx != 0) {
-                try writeElementOpenHtml(doc, node_raw, writer);
+                try writeElementOpenHtml(doc, node_raw, writer, entity_encoding);
                 if (!include_children or isVoidElement(doc, node_raw)) return;
             }
 
@@ -622,17 +651,20 @@ fn GetNode(comptime options: ParseOptions) type {
                 const child = &doc.nodes[next_idx];
                 if (child.isText(next_idx)) {
                     const raw_text = isRawTextNode(doc, next_idx);
-                    if (comptime encode_entities and !options.non_destructive) materializeRwText(doc, next_idx, true, false);
+                    if (comptime entity_encoding == .force and !options.non_destructive) materializeRwText(doc, next_idx, true, false);
                     const text_bytes = child.name_or_text.slice(doc.source);
-                    if (comptime encode_entities and !options.non_destructive) {
-                        if (raw_text) try writer.writeAll(text_bytes) else try writeEscapedText(writer, text_bytes);
+                    const decoded = !options.non_destructive and child.name_or_text.end() < doc.source.len and doc.source[child.name_or_text.end()] == 0;
+                    if (comptime entity_encoding == .force and options.non_destructive) {
+                        if (raw_text) try writer.writeAll(text_bytes) else try writeDecodedEscaped(writer, text_bytes, false);
+                    } else if (comptime entity_encoding == .force or (entity_encoding == .auto and !options.non_destructive)) {
+                        if (raw_text or !decoded) try writer.writeAll(text_bytes) else try writeEscapedText(writer, text_bytes);
                     } else {
                         try writer.writeAll(text_bytes);
                     }
                     continue;
                 }
 
-                try writeElementOpenHtml(doc, child, writer);
+                try writeElementOpenHtml(doc, child, writer, entity_encoding);
                 if (isVoidElement(doc, child)) continue;
                 if (child.subtree_end == next_idx) {
                     try writeElementCloseHtml(doc, child, writer);
@@ -649,11 +681,11 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         /// Writes an element start tag and its serialized attributes.
-        fn writeElementOpenHtml(doc: anytype, noalias node_raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
+        fn writeElementOpenHtml(doc: anytype, noalias node_raw: anytype, writer: anytype, comptime entity_encoding: EntityEncoding) WriterError(@TypeOf(writer))!void {
             const name = node_raw.name_or_text.slice(doc.source);
             try writeByte(writer, '<');
             try writer.writeAll(name);
-            try writeAttrsHtml(doc, node_raw, writer);
+            try writeAttrsHtml(doc, node_raw, writer, entity_encoding);
             try writeByte(writer, '>');
         }
 
@@ -671,10 +703,10 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         /// Writes serialized attributes from raw or destructively parsed attr bytes.
-        fn writeAttrsHtml(doc: anytype, noalias node_raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
+        fn writeAttrsHtml(doc: anytype, noalias node_raw: anytype, writer: anytype, comptime entity_encoding: EntityEncoding) WriterError(@TypeOf(writer))!void {
             var i: usize = @intCast(node_raw.name_or_text.end());
             if (comptime !options.non_destructive) {
-                attr.materializeAttributes(@constCast(doc).source, i);
+                attr.materializeAttributes(options.full_named_entities, @constCast(doc).source, i);
                 const source: []const u8 = doc.source;
                 while (i < source.len and source[i] != '>') {
                     const name_start = i;
@@ -713,8 +745,15 @@ fn GetNode(comptime options: ParseOptions) type {
                 const delim = source[delim_index];
                 if (delim == '=') {
                     const raw_value = attr.parseRawValue(source, end, delim_index);
-                    try writeByte(writer, ' ');
-                    try writer.writeAll(source[name_start..raw_value.next_start]);
+                    if (comptime entity_encoding == .force) {
+                        try writeAttrName(writer, name);
+                        try writer.writeAll("=\"");
+                        try writeDecodedEscaped(writer, source[raw_value.start..raw_value.end], true);
+                        try writeByte(writer, '"');
+                    } else {
+                        try writeByte(writer, ' ');
+                        try writer.writeAll(source[name_start..raw_value.next_start]);
+                    }
                     i = raw_value.next_start;
                     continue;
                 }
@@ -782,6 +821,30 @@ fn GetNode(comptime options: ParseOptions) type {
                 }
             }
             if (chunk_start < value.len) try writer.writeAll(value[chunk_start..]);
+        }
+
+        fn writeDecodedEscaped(writer: anytype, value: []const u8, comptime attribute: bool) WriterError(@TypeOf(writer))!void {
+            var i: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, value, i, '&')) |amp| {
+                if (amp > i) {
+                    if (comptime attribute) try writeEscapedAttrValue(writer, value[i..amp]) else try writeEscapedText(writer, value[i..amp]);
+                }
+                const decoded_entity_opt = if (comptime options.full_named_entities)
+                    entities.decodeEntityFull(attribute, value[amp + 1 ..])
+                else
+                    entities.decodeEntity(value[amp + 1 ..]);
+                if (decoded_entity_opt) |decoded_entity| {
+                    const decoded = decoded_entity.bytes[0..decoded_entity.len];
+                    if (comptime attribute) try writeEscapedAttrValue(writer, decoded) else try writeEscapedText(writer, decoded);
+                    i = amp + decoded_entity.consumed;
+                } else {
+                    if (comptime attribute) try writeEscapedAttrValue(writer, "&") else try writeEscapedText(writer, "&");
+                    i = amp + 1;
+                }
+            }
+            if (i < value.len) {
+                if (comptime attribute) try writeEscapedAttrValue(writer, value[i..]) else try writeEscapedText(writer, value[i..]);
+            }
         }
 
         /// Writes one byte through the generic writer API.
@@ -897,7 +960,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         }
 
         /// Returns next matching node or `null` when exhausted.
-        pub inline fn next(noalias self: *@This()) ?NodeTypeWrapper {
+        pub inline fn next(noalias self: *@This()) !?NodeTypeWrapper {
             if (self.end_index > self.doc.nodes.len) {
                 @branchHint(.cold);
                 self.next_index = self.end_index;
@@ -910,7 +973,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
             while (self.next_index < self.end_index) : (self.next_index += 1) {
                 if (!self.doc.nodeAt(self.next_index).isElement()) continue;
 
-                if (matcher.matchesSelectorAtWithScratch(DocType, self.doc, self.selector, self.next_index, self.scope_root, &self.scratch.?) catch @panic("query matcher allocation failed")) {
+                if (try matcher.matchesSelectorAtWithScratch(DocType, self.doc, self.selector, self.next_index, self.scope_root, &self.scratch.?)) {
                     defer self.next_index += 1;
                     return self.doc.nodeAt(self.next_index);
                 }
@@ -937,7 +1000,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
 
             var out = std.ArrayList(NodeTypeWrapper).empty;
             errdefer out.deinit(allocator);
-            while (fill_it.next()) |node| try out.append(allocator, node);
+            while (try fill_it.next()) |node| try out.append(allocator, node);
             return out.toOwnedSlice(allocator);
         }
     };
@@ -1143,17 +1206,17 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Writes HTML serialization of this node and its subtree to `writer`.
-        pub fn writeHtml(self: *const @This(), writer: anytype, comptime encode_entities: bool) NodeTypeWrapper.WriterError(@TypeOf(writer))!void {
-            if (comptime options.non_destructive) {
+        pub fn writeHtml(self: *const @This(), writer: anytype, comptime entity_encoding: EntityEncoding) NodeTypeWrapper.WriterError(@TypeOf(writer))!void {
+            if (comptime options.non_destructive and entity_encoding != .force) {
                 try writer.writeAll(self.source);
                 return;
             }
-            return self.root().writeHtml(writer, encode_entities);
+            return self.root().writeHtml(writer, entity_encoding);
         }
 
         /// Default formatter uses HTML serialization for this node.
         pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            return self.writeHtml(writer, false);
+            return self.writeHtml(writer, .never);
         }
     };
 }
@@ -1204,7 +1267,7 @@ test "document source type follows parse mode" {
 fn expectIterIds(iter: anytype, expected_ids: []const []const u8) !void {
     var mut_iter = iter;
     var i: usize = 0;
-    while (mut_iter.next()) |node| {
+    while (try mut_iter.next()) |node| {
         if (i >= expected_ids.len) return error.TestUnexpectedResult;
         const id = (try node.getAttributeValue(std.testing.allocator, "id")) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqualStrings(expected_ids[i], id.value);
@@ -1216,10 +1279,10 @@ fn expectIterIds(iter: anytype, expected_ids: []const []const u8) !void {
 /// Test helper that returns the first item from an iterator copy.
 fn firstQuery(iter: anytype) @TypeOf(blk: {
     var it = iter;
-    break :blk it.next();
+    break :blk it.next() catch unreachable;
 }) {
     var it = iter;
-    return it.next();
+    return it.next() catch unreachable;
 }
 
 /// Test helper that compiles a runtime selector and returns its first match.
@@ -1338,7 +1401,7 @@ test "document parse + query basics" {
     try std.testing.expectEqualStrings("div", one.tagName());
 
     var it = doc.query("body > *");
-    try std.testing.expect(it.next() != null);
+    try std.testing.expect(try it.next() != null);
 }
 
 test "non-destructive parse preserves caller bytes and formats exact original source" {
@@ -1540,9 +1603,9 @@ test "runtime query iterator is stable across runtime query calls" {
     // This uses a different arena and must not invalidate `it`.
     _ = try runtimeFirst(&doc, alloc, "div");
 
-    try std.testing.expect(it.next() != null);
-    try std.testing.expect(it.next() != null);
-    try std.testing.expect(it.next() == null);
+    try std.testing.expect(try it.next() != null);
+    try std.testing.expect(try it.next() != null);
+    try std.testing.expect(try it.next() == null);
 }
 
 test "runtime query iterators compiled from runtime selectors remain independent" {
@@ -1558,10 +1621,10 @@ test "runtime query iterators compiled from runtime selectors remain independent
     var old_it = try runtimeQuery(&doc, runtime_arena.allocator(), "span.x");
     var new_it = try runtimeQuery(&doc, runtime_arena.allocator(), "span.y");
 
-    try std.testing.expect(old_it.next() != null);
-    try std.testing.expect(old_it.next() == null);
-    try std.testing.expect(new_it.next() != null);
-    try std.testing.expect(new_it.next() == null);
+    try std.testing.expect(try old_it.next() != null);
+    try std.testing.expect(try old_it.next() == null);
+    try std.testing.expect(try new_it.next() != null);
+    try std.testing.expect(try new_it.next() == null);
 }
 
 test "runtime query iterator is invalidated by clear and reparsing" {
@@ -1576,16 +1639,16 @@ test "runtime query iterator is invalidated by clear and reparsing" {
     defer runtime_arena.deinit();
     var old_it = try runtimeQuery(&doc, runtime_arena.allocator(), "span.x");
     doc.clear();
-    try std.testing.expect(old_it.next() == null);
+    try std.testing.expect(try old_it.next() == null);
     try std.testing.expectEqual(@as(usize, 0), doc.nodes.len);
 
     var html_b = "<div><span class='y'></span></div>".*;
     try resetParsed(.{}, &doc, &html_b);
-    try std.testing.expect(old_it.next() == null);
+    try std.testing.expect(try old_it.next() == null);
 
     var new_it = try runtimeQuery(&doc, runtime_arena.allocator(), "span.y");
-    try std.testing.expect(new_it.next() != null);
-    try std.testing.expect(new_it.next() == null);
+    try std.testing.expect(try new_it.next() != null);
+    try std.testing.expect(try new_it.next() == null);
 }
 
 test "matcher firstMatchIndex rejects invalid scope roots safely" {
@@ -1999,7 +2062,7 @@ test "RW serialization reconstructs markup replaced by a text marker" {
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try p.writeHtml(&out.writer, false);
+    try p.writeHtml(&out.writer, .never);
     try std.testing.expectEqualStrings("<p>a&b</p>", out.written());
 }
 
@@ -2013,7 +2076,7 @@ test "writeHtml optionally encodes materialized text while format keeps raw beha
 
     var encoded: std.Io.Writer.Allocating = .init(alloc);
     defer encoded.deinit();
-    try div.writeHtml(&encoded.writer, true);
+    try div.writeHtml(&encoded.writer, .force);
     try std.testing.expectEqualStrings("<div>a&lt;b &amp; c &gt; d</div>", encoded.written());
 
     const formatted = try std.fmt.allocPrint(alloc, "{f}", .{div});
@@ -2030,7 +2093,7 @@ test "read-only writeHtml keeps exact encoded source for either encoding choice"
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try doc.writeHtml(&out.writer, true);
+    try doc.writeHtml(&out.writer, .force);
     try std.testing.expectEqualStrings(html, out.written());
 }
 
@@ -2053,12 +2116,12 @@ test "raw and escapable raw text use distinct decode and serialization rules" {
 
     var script_out: std.Io.Writer.Allocating = .init(alloc);
     defer script_out.deinit();
-    try script.writeHtml(&script_out.writer, true);
+    try script.writeHtml(&script_out.writer, .force);
     try std.testing.expectEqualStrings("<script>a&amp;<b</script>", script_out.written());
 
     var title_out: std.Io.Writer.Allocating = .init(alloc);
     defer title_out.deinit();
-    try title.writeHtml(&title_out.writer, true);
+    try title.writeHtml(&title_out.writer, .force);
     try std.testing.expectEqualStrings("<title>e&amp;&lt;f</title>", title_out.written());
 }
 
@@ -2090,6 +2153,41 @@ test "read-only extraction decodes escapable raw text but not raw text" {
     try std.testing.expectEqualStrings("a&amp;<b", script_text);
     try std.testing.expectEqualStrings("c&<d", title_text);
     try std.testing.expectEqualStrings(html, doc.source);
+}
+
+test "full named entity parse option applies to text and attributes" {
+    const alloc = std.testing.allocator;
+    const opts: ParseOptions = .{ .full_named_entities = true };
+    var doc = opts.Document().init(alloc);
+    defer doc.deinit();
+    var html = "<div title='&eacute;'>&NotNestedGreaterGreater;</div>".*;
+    try resetParsed(opts, &doc, &html);
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
+    const title = (try div.getAttributeValue(alloc, "title")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("\xc3\xa9", title.value);
+    const text = try div.innerTextOwnedWithOptions(alloc, .{ .normalize_whitespace = false });
+    defer alloc.free(text);
+    try std.testing.expectEqualStrings("\xe2\xaa\xa2\xcc\xb8", text);
+}
+
+test "entity serialization modes preserve auto and force contracts" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div>a&lt;b & c</div>".*;
+    try resetParsed(.{}, &doc, &html);
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
+
+    var before: std.Io.Writer.Allocating = .init(alloc);
+    defer before.deinit();
+    try div.writeHtml(&before.writer, .auto);
+    try std.testing.expectEqualStrings("<div>a&lt;b & c</div>", before.written());
+
+    _ = try div.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+    var after: std.Io.Writer.Allocating = .init(alloc);
+    defer after.deinit();
+    try div.writeHtml(&after.writer, .auto);
+    try std.testing.expectEqualStrings("<div>a&lt;b &amp; c</div>", after.written());
 }
 
 test "inplace attribute parser treats explicit empty assignment as name-only" {
@@ -2383,27 +2481,27 @@ test "runtime selector supports nth-child shorthand variants" {
 
     var c_odd: usize = 0;
     var it_odd = try runtimeQuery(&doc, runtime_arena.allocator(), "#pseudos :nth-child(odd)");
-    while (it_odd.next()) |_| c_odd += 1;
+    while (try it_odd.next()) |_| c_odd += 1;
     try std.testing.expectEqual(@as(usize, 4), c_odd);
 
     var c_plus: usize = 0;
     var it_plus = try runtimeQuery(&doc, runtime_arena.allocator(), "#pseudos :nth-child(3n+1)");
-    while (it_plus.next()) |_| c_plus += 1;
+    while (try it_plus.next()) |_| c_plus += 1;
     try std.testing.expectEqual(@as(usize, 3), c_plus);
 
     var c_signed: usize = 0;
     var it_signed = try runtimeQuery(&doc, runtime_arena.allocator(), "#pseudos :nth-child(+3n-2)");
-    while (it_signed.next()) |_| c_signed += 1;
+    while (try it_signed.next()) |_| c_signed += 1;
     try std.testing.expectEqual(@as(usize, 3), c_signed);
 
     var c_neg_a: usize = 0;
     var it_neg_a = try runtimeQuery(&doc, runtime_arena.allocator(), "#pseudos :nth-child(-n+6)");
-    while (it_neg_a.next()) |_| c_neg_a += 1;
+    while (try it_neg_a.next()) |_| c_neg_a += 1;
     try std.testing.expectEqual(@as(usize, 6), c_neg_a);
 
     var c_neg_b: usize = 0;
     var it_neg_b = try runtimeQuery(&doc, runtime_arena.allocator(), "#pseudos :nth-child(-n+5)");
-    while (it_neg_b.next()) |_| c_neg_b += 1;
+    while (try it_neg_b.next()) |_| c_neg_b += 1;
     try std.testing.expectEqual(@as(usize, 5), c_neg_b);
 }
 
@@ -2421,12 +2519,12 @@ test "leading child combinator works in node-scoped queries" {
 
     var it_em = try runtimeQuery(frag_root, runtime_arena.allocator(), "> div p em");
     var em_count: usize = 0;
-    while (it_em.next()) |_| em_count += 1;
+    while (try it_em.next()) |_| em_count += 1;
     try std.testing.expectEqual(@as(usize, 2), em_count);
 
     var it_oooo = try runtimeQuery(frag_root, runtime_arena.allocator(), "> div #oooo");
     var oooo_count: usize = 0;
-    while (it_oooo.next()) |_| oooo_count += 1;
+    while (try it_oooo.next()) |_| oooo_count += 1;
     try std.testing.expectEqual(@as(usize, 1), oooo_count);
 
     var doc_ctx = GetDocument(.{}).init(alloc);
@@ -2438,7 +2536,7 @@ test "leading child combinator works in node-scoped queries" {
 
     var it_hsoob = try runtimeQuery(ctx_root, runtime_arena.allocator(), "> #hsoob");
     var hsoob_count: usize = 0;
-    while (it_hsoob.next()) |_| hsoob_count += 1;
+    while (try it_hsoob.next()) |_| hsoob_count += 1;
     try std.testing.expectEqual(@as(usize, 1), hsoob_count);
 }
 
@@ -2665,7 +2763,7 @@ test "writeHtml handles deep documents without recursive calls" {
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try doc.writeHtml(&out.writer, false);
+    try doc.writeHtml(&out.writer, .never);
     try std.testing.expectEqualStrings(input, out.written());
 }
 
@@ -2880,7 +2978,7 @@ test "instrumentation wrappers invoke compile-time hooks and preserve results" {
     try std.testing.expect(hooks.last_parse_stats.node_count >= 2);
 
     var runtime_it = instrumentation.queryWithHooks(std.testing.io, &doc, "a#x", &hooks);
-    try std.testing.expect(runtime_it.next() != null);
+    try std.testing.expect(try runtime_it.next() != null);
     try std.testing.expectEqual(instrumentation.QueryInstrumentationKind.query, hooks.last_query_kind);
     try std.testing.expectEqual(@as(?bool, null), hooks.last_query_stats.matched);
 
@@ -2901,7 +2999,7 @@ test "format document types" {
     const opts: ParseOptions = .{ .drop_whitespace_text_nodes = .none };
     const opts_out = try std.fmt.allocPrint(alloc, "{f}", .{opts});
     defer alloc.free(opts_out);
-    try std.testing.expectEqualStrings("ParseOptions{drop_whitespace_text_nodes=none, non_destructive=false, store_last_child=false, store_prev_sibling=false}", opts_out);
+    try std.testing.expectEqualStrings("ParseOptions{drop_whitespace_text_nodes=none, non_destructive=false, full_named_entities=false, store_last_child=false, store_prev_sibling=false}", opts_out);
 
     const span: Span = .{ .start = 2, .len = 3 };
     const span_out = try std.fmt.allocPrint(alloc, "{f}", .{span});
@@ -2944,19 +3042,19 @@ test "query iterator lifecycle releases scratch and copies independently" {
     }
 
     var early = doc.query("span");
-    try std.testing.expect(early.next() != null);
+    try std.testing.expect(try early.next() != null);
     try std.testing.expect(early.scratch != null);
     early.deinit();
     try std.testing.expect(early.scratch == null);
 
     var exhausted = doc.query(".missing");
-    try std.testing.expect(exhausted.next() == null);
+    try std.testing.expect(try exhausted.next() == null);
     try std.testing.expect(exhausted.scratch == null);
 
     var original = doc.query("span");
     var copied = original;
-    const original_first = original.next() orelse return error.TestUnexpectedResult;
-    const copied_first = copied.next() orelse return error.TestUnexpectedResult;
+    const original_first = (try original.next()) orelse return error.TestUnexpectedResult;
+    const copied_first = (try copied.next()) orelse return error.TestUnexpectedResult;
     defer original.deinit();
     defer copied.deinit();
     try std.testing.expectEqual(original_first.index, copied_first.index);
@@ -2966,6 +3064,30 @@ test "query iterator lifecycle releases scratch and copies independently" {
     try std.testing.expectEqual(@as(usize, 2), remaining.len);
     try std.testing.expectEqualStrings("b", (try remaining[0].getAttributeValue(alloc, "id")).?.value);
     try std.testing.expectEqualStrings("c", (try remaining[1].getAttributeValue(alloc, "id")).?.value);
+}
+
+test "query iterator reports matcher allocation failure" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var src = "<div></div>".*;
+    try resetParsed(.{}, &doc, &src);
+
+    var selector_source = std.ArrayList(u8).empty;
+    defer selector_source.deinit(alloc);
+    for (0..49) |i| {
+        if (i != 0) try selector_source.append(alloc, ' ');
+        try selector_source.appendSlice(alloc, "div");
+    }
+    var selector = try ast.Selector.compileRuntime(alloc, selector_source.items);
+    defer selector.deinit(alloc);
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    doc.allocator = failing.allocator();
+    defer doc.allocator = alloc;
+    var it = doc.queryRuntime(selector);
+    defer it.deinit();
+    try std.testing.expectError(error.OutOfMemory, it.next());
 }
 
 test "query collect frees partial output when growth fails" {
@@ -2997,7 +3119,7 @@ test "serialization state matrix after attribute and text decoding" {
 
     var before: std.Io.Writer.Allocating = .init(alloc);
     defer before.deinit();
-    try div.writeHtml(&before.writer, false);
+    try div.writeHtml(&before.writer, .never);
     try std.testing.expectEqualStrings(
         "<div title=\"a&amp;b &quot;c&quot;\">a&amp;b   a&lt;b</div>",
         before.written(),
@@ -3008,7 +3130,7 @@ test "serialization state matrix after attribute and text decoding" {
 
     var after_attr: std.Io.Writer.Allocating = .init(alloc);
     defer after_attr.deinit();
-    try div.writeHtml(&after_attr.writer, false);
+    try div.writeHtml(&after_attr.writer, .never);
     try std.testing.expectEqualStrings(before.written(), after_attr.written());
 
     const decoded = try div.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
@@ -3016,7 +3138,7 @@ test "serialization state matrix after attribute and text decoding" {
 
     var raw: std.Io.Writer.Allocating = .init(alloc);
     defer raw.deinit();
-    try div.writeHtml(&raw.writer, false);
+    try div.writeHtml(&raw.writer, .never);
     try std.testing.expectEqualStrings(
         "<div title=\"a&amp;b &quot;c&quot;\">a&b   a<b</div>",
         raw.written(),
@@ -3027,7 +3149,7 @@ test "serialization state matrix after attribute and text decoding" {
 
     var encoded: std.Io.Writer.Allocating = .init(alloc);
     defer encoded.deinit();
-    try div.writeHtml(&encoded.writer, true);
+    try div.writeHtml(&encoded.writer, .force);
     try std.testing.expectEqualStrings(
         "<div title=\"a&amp;b &quot;c&quot;\">a&amp;b a&lt;b</div>",
         encoded.written(),
@@ -3058,7 +3180,7 @@ test "chunked escaping preserves large sparse attribute and text spans" {
 
     var output: std.Io.Writer.Allocating = .init(alloc);
     defer output.deinit();
-    try doc.writeHtml(&output.writer, true);
+    try doc.writeHtml(&output.writer, .force);
     try std.testing.expectEqualSlices(u8, expected, output.written());
 
     const CountingWriter = struct {
@@ -3072,7 +3194,7 @@ test "chunked escaping preserves large sparse attribute and text spans" {
         }
     };
     var counter: CountingWriter = .{};
-    try doc.writeHtml(&counter, true);
+    try doc.writeHtml(&counter, .force);
     try std.testing.expectEqual(expected.len, counter.bytes);
     try std.testing.expect(counter.calls < 64);
 }

@@ -122,7 +122,7 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
     switch (parsed) {
         .strictest => |*fixture| {
             var it = fixture.doc.queryRuntime(sel);
-            while (it.next()) |node| {
+            while (try it.next()) |node| {
                 if ((try node.getAttributeValue(alloc, "id"))) |id| {
                     try out_ids.append(alloc, id.value);
                 }
@@ -130,7 +130,7 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
         },
         .fastest => |*fixture| {
             var it = fixture.doc.queryRuntime(sel);
-            while (it.next()) |node| {
+            while (try it.next()) |node| {
                 if ((try node.getAttributeValue(alloc, "id"))) |id| {
                     try out_ids.append(alloc, id.value);
                 }
@@ -138,7 +138,7 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
         },
         .full => |*fixture| {
             var it = fixture.doc.queryRuntime(sel);
-            while (it.next()) |node| {
+            while (try it.next()) |node| {
                 if ((try node.getAttributeValue(alloc, "id"))) |id| try out_ids.append(alloc, id.value);
             }
         },
@@ -162,15 +162,15 @@ fn runSelectorCount(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixtu
     switch (parsed) {
         .strictest => |*fixture| {
             var it = fixture.doc.queryRuntime(sel);
-            while (it.next()) |_| count += 1;
+            while (try it.next()) |_| count += 1;
         },
         .fastest => |*fixture| {
             var it = fixture.doc.queryRuntime(sel);
-            while (it.next()) |_| count += 1;
+            while (try it.next()) |_| count += 1;
         },
         .full => |*fixture| {
             var it = fixture.doc.queryRuntime(sel);
-            while (it.next()) |_| count += 1;
+            while (try it.next()) |_| count += 1;
         },
     }
 
@@ -192,19 +192,19 @@ fn runSelectorCountScopeTag(io: std.Io, alloc: std.mem.Allocator, mode: ParseMod
         .strictest => |*fixture| {
             if (fixture.doc.findFirstTag(scope_tag)) |scope| {
                 var it = scope.queryRuntime(sel);
-                while (it.next()) |_| count += 1;
+                while (try it.next()) |_| count += 1;
             }
         },
         .fastest => |*fixture| {
             if (fixture.doc.findFirstTag(scope_tag)) |scope| {
                 var it = scope.queryRuntime(sel);
-                while (it.next()) |_| count += 1;
+                while (try it.next()) |_| count += 1;
             }
         },
         .full => |*fixture| {
             if (fixture.doc.findFirstTag(scope_tag)) |scope| {
                 var it = scope.queryRuntime(sel);
-                while (it.next()) |_| count += 1;
+                while (try it.next()) |_| count += 1;
             }
         },
     }

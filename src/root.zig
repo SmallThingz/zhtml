@@ -16,6 +16,8 @@ pub const ParseInt = common.IndexInt;
 pub const ParseOptions = document.ParseOptions;
 /// Options controlling whitespace normalization behavior in text extraction APIs.
 pub const TextOptions = document.TextOptions;
+/// Entity handling mode used by HTML serialization APIs.
+pub const EntityEncoding = document.EntityEncoding;
 /// Allocation-free event parser for streaming-style HTML scans.
 pub const StreamingParser = stream.Parser;
 pub const StreamingEvent = stream.Event;
@@ -44,10 +46,10 @@ pub const queryRuntimeWithHooks = instrumentation.queryRuntimeWithHooks;
 
 fn firstQuery(iter: anytype) @TypeOf(blk: {
     var it = iter;
-    break :blk it.next();
+    break :blk it.next() catch unreachable;
 }) {
     var it = iter;
-    return it.next();
+    return it.next() catch unreachable;
 }
 
 fn runtimeFirst(scope: anytype, allocator: std.mem.Allocator, selector: []const u8) !@TypeOf(firstQuery(scope.query("*"))) {
@@ -108,7 +110,7 @@ test "writeHtml serializes node subtree" {
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try div.writeHtml(&out.writer, false);
+    try div.writeHtml(&out.writer, .never);
     try std.testing.expectEqualStrings("<div id=\"a\"><span>v</span></div>", out.written());
 }
 
@@ -125,7 +127,7 @@ test "writeHtml respects in-place attr parsing and void tags" {
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try img.writeHtml(&out.writer, false);
+    try img.writeHtml(&out.writer, .never);
     try std.testing.expectEqualStrings("<img id=\"i\" class=\"x\" data-q=\"1>2\">", out.written());
 }
 
@@ -142,7 +144,7 @@ test "writeHtml reflects in-place text decoding" {
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try p.writeHtml(&out.writer, false);
+    try p.writeHtml(&out.writer, .never);
     try std.testing.expectEqualStrings("<p>& <</p>", out.written());
 }
 
@@ -157,7 +159,7 @@ test "writeHtml drops whitespace-only text nodes when configured" {
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try div.writeHtml(&out.writer, false);
+    try div.writeHtml(&out.writer, .never);
     try std.testing.expectEqualStrings("<div>a <span>b </span>c </div>", out.written());
 }
 
@@ -221,6 +223,6 @@ test "writeHtmlSelf excludes children" {
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try div.writeSelfHtml(&out.writer, false);
+    try div.writeSelfHtml(&out.writer, .never);
     try std.testing.expectEqualStrings("<div id=\"a\">", out.written());
 }

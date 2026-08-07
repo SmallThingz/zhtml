@@ -8,7 +8,7 @@ pub fn run() !void {
     defer doc.deinit();
 
     var mains = doc.query("main#m");
-    const main = mains.next() orelse return error.TestUnexpectedResult;
+    const main = (try mains.next()) orelse return error.TestUnexpectedResult;
     var first_child = main.children();
     const first = first_child.next() orelse return error.TestUnexpectedResult;
 

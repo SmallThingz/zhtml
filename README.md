@@ -61,14 +61,14 @@ test "basic parse + query" {
     defer doc.deinit();
 
     var links = doc.query("div#app > a.nav");
-    const a = links.next() orelse return error.TestUnexpectedResult;
+    const a = (try links.next()) orelse return error.TestUnexpectedResult;
     const href = (try a.getAttributeValue(std.testing.allocator, "href")) orelse return error.TestUnexpectedResult;
     defer href.free(&doc, std.testing.allocator);
     try std.testing.expectEqualStrings("/docs", href.value);
 }
 ```
 
-Parsing goes through `options.parse(...)`. Use `const options: html.ParseOptions = .{ .non_destructive = true };` when the caller bytes must remain unchanged, including file-backed memory maps. This mode reads the original source directly and does not make a full-source copy.
+Parsing goes through `options.parse(...)`. Documents own their node storage but borrow the input, which must remain alive until the document is no longer used. Use `const options: html.ParseOptions = .{ .non_destructive = true };` when caller bytes must remain unchanged, including file-backed memory maps. This mode reads the original source directly and does not make a full-source copy.
 
 Raw nodes are compact by default. `store_last_child` enables O(1) `children().last()`, while `store_prev_sibling` enables O(1) previous-sibling traversal instead of fallback scans.
 

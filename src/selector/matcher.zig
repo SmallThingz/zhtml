@@ -187,6 +187,7 @@ pub fn firstMatchIndex(comptime Doc: type, noalias doc: *const Doc, selector: as
 
 /// Returns whether `node_index` matches any selector group within scope.
 pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt) !bool {
+    if (node_index >= doc.nodes.len) return false;
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
     var scratch = std.heap.ArenaAllocator.init(doc.allocator);
     defer scratch.deinit();
@@ -195,6 +196,7 @@ pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: 
 }
 
 pub fn matchesSelectorAtWithScratch(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) !bool {
+    if (node_index >= doc.nodes.len) return false;
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
 
     for (selector.groups) |group| {
@@ -738,4 +740,5 @@ test "matcher direct selector entry points handle attrs classes pseudos and not"
     try std.testing.expectEqual(@as(?IndexInt, 2), try firstMatchIndex(@TypeOf(doc), &doc, sel, InvalidIndex));
     try std.testing.expect(try matchesSelectorAt(@TypeOf(doc), &doc, sel, 2, InvalidIndex));
     try std.testing.expect(!try matchesSelectorAt(@TypeOf(doc), &doc, sel, 4, InvalidIndex));
+    try std.testing.expect(!try matchesSelectorAt(@TypeOf(doc), &doc, sel, @intCast(doc.nodes.len), InvalidIndex));
 }
