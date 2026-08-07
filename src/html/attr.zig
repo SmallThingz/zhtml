@@ -210,12 +210,7 @@ pub fn collectSelectedValues(
 ) !void {
     const Doc = @TypeOf(doc_ptr.*);
     if (comptime hasConstSource(Doc)) {
-        var idx: usize = 0;
-        while (idx < selected_names.len) : (idx += 1) {
-            if (out_values[idx] != null) continue;
-            out_values[idx] = try getAttrValueNonDestructive(doc_ptr, node, selected_names[idx], allocator);
-        }
-        return;
+        return collectSelectedValuesNonDestructive(doc_ptr, node, selected_names, out_values, allocator);
     }
 
     const mut_doc = @constCast(doc_ptr);
@@ -253,6 +248,73 @@ pub fn collectSelectedValues(
             remaining -= 1;
             if (remaining == 0) return;
         }
+    }
+}
+
+fn collectSelectedValuesNonDestructive(
+    noalias doc_ptr: anytype,
+    node: anytype,
+    selected_names: []const []const u8,
+    out_values: []?[]const u8,
+    allocator: std.mem.Allocator,
+) !void {
+    if (selected_names.len == 0 or selected_names.len != out_values.len) return;
+
+    var remaining: usize = 0;
+    for (out_values) |value| {
+        if (value == null) remaining += 1;
+    }
+    if (remaining == 0) return;
+
+    const source = doc_ptr.source;
+    var i: usize = node.name_or_text.end();
+    const end = source.len;
+    if (i >= end) return;
+
+    // A const-source document is never attribute-compacted, but preserve the
+    // old fallback in case this helper is reused with a custom document type.
+    if (!tables.WhitespaceTable[source[i]]) {
+        var selected: usize = 0;
+        while (selected < selected_names.len) : (selected += 1) {
+            if (out_values[selected] != null) continue;
+            out_values[selected] = try getAttrValueNonDestructive(doc_ptr, node, selected_names[selected], allocator);
+        }
+        return;
+    }
+
+    while (i < end and remaining != 0) {
+        skipWhitespace(source, end, &i);
+        if (i >= end) return;
+
+        const scanned = scanAttrNameOrSkip(source, end, i);
+        const attr_name = scanned.name orelse return;
+        i = scanned.next_start;
+        if (attr_name.len == 0) continue;
+
+        const selected_idx = firstUnresolvedMatch(selected_names, out_values, attr_name);
+        const delim_index = valueDelimiterIndex(source, end, i);
+        if (delim_index >= end) {
+            if (selected_idx) |idx| out_values[idx] = "";
+            return;
+        }
+
+        const delim = source[delim_index];
+        if (delim == '=') {
+            const raw = parseRawValue(source, end, delim_index);
+            if (selected_idx) |idx| {
+                out_values[idx] = try materializeRawValueOwned(@TypeOf(doc_ptr.*).Options.entity_decoding, allocator, source, raw);
+                remaining -= 1;
+            }
+            i = raw.next_start;
+            continue;
+        }
+
+        if (selected_idx) |idx| {
+            out_values[idx] = "";
+            remaining -= 1;
+        }
+        if (delim == '>' or delim == '/') return;
+        i = if (delim_index == i) i + 1 else delim_index;
     }
 }
 

@@ -327,8 +327,9 @@ fn ParseState(comptime opts: ParseOptions) type {
 
             if (self.i < self.input.len and self.input[self.i] == '>') {
                 self.i += 1;
-            } else {
-                self.i = 1 + (std.mem.indexOfScalarPos(u8, self.input, self.i, '>') orelse (self.input.len - 1));
+            } else if (self.findTagEndRespectAttrQuotes() == null) {
+                // Unterminated end tag consumes the rest of the input.
+                self.i = self.input.len;
             }
 
             if (close_name.len == 0 or self.parse_stack.items.len == 0) { // same behavior as browser; skip this
@@ -1172,6 +1173,19 @@ test "self-closing svg is stored as regular element with no text child" {
     try std.testing.expect(svg_children.next() == null);
 
     try std.testing.expect(firstQuery(doc.query("#before")) != null);
+    try std.testing.expect(firstQuery(doc.query("#after")) != null);
+}
+
+test "closing tag attributes respect quoted greater-than" {
+    const alloc = std.testing.allocator;
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+
+    var html = "<div></div data-x=\"a>b\"><p id='after'></p>".*;
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    // Synthetic root + div + p. The `b\">` suffix must not leak out as text.
+    try std.testing.expectEqual(@as(usize, 3), doc.nodes.len);
     try std.testing.expect(firstQuery(doc.query("#after")) != null);
 }
 

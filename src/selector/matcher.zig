@@ -52,6 +52,10 @@ pub fn tagMatches(comptime Doc: type, selector_source: []const u8, comp: ast.Com
 }
 
 pub fn evalAttrOp(raw: []const u8, value: []const u8, op: ast.AttrOp, case: ast.AttrCase) bool {
+    // Selectors 4: empty substring operands for ^=, $= and *= match nothing.
+    // std.mem/std.ascii helpers intentionally consider the empty string a
+    // prefix/suffix/substring, so reject it before either case mode.
+    if (value.len == 0 and (op == .prefix or op == .suffix or op == .contains)) return false;
     if (case == .insensitive_ascii) return evalAttrOpIgnoreCase(raw, value, op);
     return switch (op) {
         .exists => true,
@@ -417,9 +421,10 @@ pub const PredicatePlan = struct {
         errdefer self.deinit(allocator);
         self.state_ids = try allocator.alloc(u32, selector.compounds.len);
         self.representatives = try allocator.alloc(IndexInt, selector.compounds.len);
-        if (self.word_count != 0) self.masks = try allocator.alloc(u64, selector.compounds.len * self.word_count);
-        @memset(self.masks, 0);
 
+        // First intern predicates. Allocate dense state masks only after the
+        // actual unique-predicate count is known; allocating N rows here makes
+        // repeated selectors such as `div div ...` consume O(N^2 / word_bits).
         for (selector.compounds, 0..) |_, absolute| {
             var predicate_id: usize = 0;
             while (predicate_id < self.count) : (predicate_id += 1) {
@@ -431,7 +436,14 @@ pub const PredicatePlan = struct {
                 self.count += 1;
             }
             self.state_ids[absolute] = @intCast(predicate_id);
-            setWordBit(self.predicateMask(predicate_id), absolute);
+        }
+
+        if (self.count != 0 and self.word_count != 0) {
+            self.masks = try allocator.alloc(u64, self.count * self.word_count);
+            @memset(self.masks, 0);
+            for (self.state_ids, 0..) |predicate_id, absolute| {
+                setWordBit(self.predicateMask(predicate_id), absolute);
+            }
         }
         return self;
     }
@@ -1102,6 +1114,32 @@ test "matcher attr operators cover sensitive and ascii-insensitive semantics" {
     try std.testing.expect(!evalAttrOp("alphabet", "alpha", .includes, .sensitive));
     try std.testing.expect(evalAttrOp("en-US", "EN", .dash_match, .insensitive_ascii));
     try std.testing.expect(!evalAttrOp("english", "en", .dash_match, .sensitive));
+}
+
+test "predicate plan sizes masks by unique predicate count" {
+    const alloc = std.testing.allocator;
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(alloc);
+    for (0..65) |i| {
+        if (i != 0) try source.appendSlice(alloc, " ");
+        try source.appendSlice(alloc, "div");
+    }
+
+    var selector = try ast.Selector.compileRuntime(alloc, source.items);
+    defer selector.deinit(alloc);
+    var plan = try PredicatePlan.init(alloc, selector);
+    defer plan.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), plan.count);
+    try std.testing.expectEqual(plan.word_count, plan.masks.len);
+}
+
+test "empty substring attribute operands match nothing" {
+    inline for (.{ ast.AttrOp.prefix, ast.AttrOp.suffix, ast.AttrOp.contains }) |op| {
+        try std.testing.expect(!evalAttrOp("", "", op, .sensitive));
+        try std.testing.expect(!evalAttrOp("abc", "", op, .sensitive));
+        try std.testing.expect(!evalAttrOp("AbC", "", op, .insensitive_ascii));
+    }
 }
 
 test "matcher ascii-insensitive token include respects token boundaries" {

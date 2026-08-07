@@ -386,7 +386,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             self.i += 2;
             if (!self.options.track_nesting) {
                 const tag = self.scanTagName(self.i);
-                const token_end = (std.mem.indexOfScalarPos(u8, self.source, tag.end, '>') orelse (self.source.len - 1)) + 1;
+                const token_end = if (self.findTagEnd(tag.end)) |end| end + 1 else self.source.len;
                 self.i = token_end;
                 if (self.options.emit_end_tags and tag.end != tag.start) {
                     _ = try callback(self.ctx, .{
@@ -401,7 +401,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             }
             const tag = self.scanTagName(self.i);
             self.i = tag.end;
-            const token_end = (std.mem.indexOfScalarPos(u8, self.source, self.i, '>') orelse (self.source.len - 1)) + 1;
+            const token_end = if (self.findTagEnd(self.i)) |end| end + 1 else self.source.len;
             self.i = token_end;
             if (tag.end == tag.start or self.stack.items.len <= 1) return;
 
@@ -1022,6 +1022,24 @@ test "streaming parser skip ancestor ignores fake closes in opaque syntax" {
         "<script>\"</section>\"</script><p>skip</p></section>b";
     try parse(std.testing.allocator, input, &ctx, Ctx.cb);
     try std.testing.expectEqualStrings("ab", ctx.text.items);
+}
+
+test "streaming end-tag token respects quoted greater-than" {
+    const Ctx = struct {
+        saw_div_close: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .end_tag and std.mem.eql(u8, ev.nameSlice(), "div")) {
+                try std.testing.expectEqualStrings("</div data-x=\"a>b\">", ev.token.slice(ev.source));
+                self.saw_div_close = true;
+            }
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<div></div data-x=\"a>b\"><p></p>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.saw_div_close);
 }
 
 test "streaming parser emits syntactic end tags without nesting" {

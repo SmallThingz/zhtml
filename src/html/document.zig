@@ -987,11 +987,11 @@ fn GetQueryIter(comptime options: ParseOptions) type {
             while (self.next_index < self.end_index) : (self.next_index += 1) {
                 const matched = switch (self.engine) {
                     .simple, .forward => |*executor| try executor.process(self.next_index),
-                    .wide => |*executor| blk: {
-                        if (!self.doc.nodeAt(self.next_index).isElement()) break :blk false;
-                        if (!matcher.candidateCouldMatch(DocType, self.doc, self.selector, self.next_index)) break :blk false;
-                        break :blk try executor.process(self.next_index);
-                    },
+                    // Wide forward matching is stateful: every element can establish
+                    // ancestry/sibling state for a later rightmost candidate. Do not
+                    // apply candidateCouldMatch here; that predicate is only safe for
+                    // the final candidate in an RTL/local match.
+                    .wide => |*executor| try executor.process(self.next_index),
                 };
                 if (matched) {
                     defer self.next_index += 1;
@@ -3246,7 +3246,7 @@ test "query iterator reports matcher allocation failure" {
     try std.testing.expectError(error.OutOfMemory, it.next());
 }
 
-test "rightmost tag prefilter avoids deep-selector workspace allocation" {
+test "wide forward query processes all elements without a rightmost candidate prefilter" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);
     defer doc.deinit();
@@ -3263,13 +3263,13 @@ test "rightmost tag prefilter avoids deep-selector workspace allocation" {
     var selector = try ast.Selector.compileRuntime(alloc, selector_source.items);
     defer selector.deinit(alloc);
 
-    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
-    doc.allocator = failing.allocator();
-    defer doc.allocator = alloc;
     var it = doc.queryRuntime(selector);
     defer it.deinit();
     try std.testing.expect(try it.next() == null);
-    try std.testing.expect(it.engine.wide.masks.len == 0);
+    // Wide forward matching is stateful: every element establishes ancestry
+    // state, so both divs were processed even though `span` is absent and the
+    // rightmost compound can never match. No candidate prefilter is applied.
+    try std.testing.expectEqual(@as(usize, 2), it.engine.wide.stats.nodes_processed);
 }
 
 test "deep-selector workspace frame allocation is reused across candidates" {
@@ -3443,6 +3443,41 @@ test "forward plan boundary uses inline state through 64 compounds and wide stat
     var wide_count: usize = 0;
     while (try wide_it.next()) |_| wide_count += 1;
     try std.testing.expectEqual(@as(usize, 0), wide_count);
+}
+
+test "wide forward query processes intermediate tags that cannot be final candidates" {
+    const alloc = std.testing.allocator;
+    var html_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer html_writer.deinit();
+    for (0..64) |_| try html_writer.writer.writeAll("<div>");
+    try html_writer.writer.writeAll("<span id=target></span>");
+    for (0..64) |_| try html_writer.writer.writeAll("</div>");
+    const html = try html_writer.toOwnedSlice();
+    defer alloc.free(html);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    try resetParsed(.{}, &doc, html);
+
+    var selector_source = std.ArrayList(u8).empty;
+    defer selector_source.deinit(alloc);
+    for (0..64) |i| {
+        if (i != 0) try selector_source.appendSlice(alloc, " > ");
+        try selector_source.appendSlice(alloc, "div");
+    }
+    try selector_source.appendSlice(alloc, " > span#target");
+    var selector = try ast.Selector.compileRuntime(alloc, selector_source.items);
+    defer selector.deinit(alloc);
+    try std.testing.expectEqual(forward.Kind.wide, forward.buildPlan(selector).kind);
+
+    const target: IndexInt = @intCast(doc.nodes.len - 1);
+    try std.testing.expect(try matcher.matchesSelectorAt(GetDocument(.{}), &doc, selector, target, 0));
+
+    var it = doc.queryRuntime(selector);
+    defer it.deinit();
+    const hit = (try it.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(target, hit.index);
+    try std.testing.expect(try it.next() == null);
 }
 
 test "forward automaton processes and emits nested matches exactly once" {
