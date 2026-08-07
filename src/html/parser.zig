@@ -10,6 +10,7 @@ const scanner = @import("scanner.zig");
 const common = @import("../common.zig");
 const document = @import("document.zig");
 const ast = @import("../selector/ast.zig");
+const open_tag_index = @import("open_tag_index.zig");
 
 const ParseOptions = document.ParseOptions;
 
@@ -61,6 +62,8 @@ fn ParseState(comptime opts: ParseOptions) type {
         nodes: *std.ArrayListUnmanaged(RawNode),
         /// Open-element stack used only while building the tree.
         parse_stack: std.ArrayListUnmanaged(OpenElem) = .empty,
+        /// Case-insensitive tag name to topmost matching stack position.
+        open_by_tag: open_tag_index.Map = .empty,
 
         const Self = @This();
         const RawNode = opts.RawNode();
@@ -73,6 +76,8 @@ fn ParseState(comptime opts: ParseOptions) type {
             tag_len: IndexInt = 0,
             /// Last direct element child seen while this element is open.
             last_child: IndexInt = InvalidIndex,
+            /// Previous stack position with the same full case-insensitive name.
+            prev_same_tag: u32 = open_tag_index.none,
         };
         const TagNameScan = scanner.TagName;
 
@@ -111,11 +116,13 @@ fn ParseState(comptime opts: ParseOptions) type {
                 .tag_key = 0,
                 .tag_len = 0,
                 .last_child = InvalidIndex,
+                .prev_same_tag = open_tag_index.none,
             });
         }
 
         inline fn parse(noalias self: *Self) !void {
             defer self.parse_stack.deinit(self.doc.allocator);
+            defer self.open_by_tag.deinit(self.doc.allocator);
             try self.initContainers();
 
             // Main tokenization loop. Text spans and tags are dispatched here,
@@ -308,7 +315,7 @@ fn ParseState(comptime opts: ParseOptions) type {
 
             // Non-void, non-raw elements stay on the open stack until an
             // explicit close, an optional-close rule, or EOF pops them.
-            try self.parse_stack.append(self.doc.allocator, .{
+            try self.pushOpen(.{
                 .idx = @intCast(node_idx),
                 .tag_key = tag_name_key,
                 .tag_len = @intCast(tag_name.len),
@@ -341,27 +348,18 @@ fn ParseState(comptime opts: ParseOptions) type {
             // Fast path: most closing tags match the current open element.
             if (self.openElemMatchesClose(top, close_name, close_key)) {
                 @branchHint(.likely);
-                _ = self.parse_stack.pop();
+                _ = self.popOpen();
                 var node = &self.nodes.items[top.idx];
                 node.subtree_end = @intCast(self.nodes.items.len - 1);
                 return;
             }
 
-            var found: ?usize = null;
-            var s = self.parse_stack.items.len - 1;
-            while (s > 1) {
-                s -= 1;
-                const open = self.parse_stack.items[s];
-                if (!self.openElemMatchesClose(open, close_name, close_key)) continue;
-                found = s;
-                break;
-            }
-
-            if (found) |pos| {
+            if (self.open_by_tag.get(close_name)) |found_pos| {
                 @branchHint(.likely);
+                const pos: usize = found_pos;
                 // Permissive recovery: pop everything above the matched opener.
                 while (self.parse_stack.items.len > pos) {
-                    const open = self.parse_stack.pop().?;
+                    const open = self.popOpen();
                     var node = &self.nodes.items[open.idx];
                     node.subtree_end = @intCast(self.nodes.items.len - 1);
                 }
@@ -378,10 +376,34 @@ fn ParseState(comptime opts: ParseOptions) type {
 
                 // Optional-close rules rewrite nesting into sibling structure
                 // before the incoming tag is appended.
-                _ = self.parse_stack.pop();
+                _ = self.popOpen();
                 var n = &self.nodes.items[top.idx];
                 n.subtree_end = @intCast(self.nodes.items.len - 1);
             }
+        }
+
+        fn pushOpen(noalias self: *Self, open_value: OpenElem) !void {
+            std.debug.assert(self.parse_stack.items.len < std.math.maxInt(u32));
+            var open = open_value;
+            const name = self.nodes.items[open.idx].name_or_text.slice(self.input);
+            const result = try self.open_by_tag.getOrPut(self.doc.allocator, name);
+            open.prev_same_tag = if (result.found_existing) result.value_ptr.* else open_tag_index.none;
+            const position: u32 = @intCast(self.parse_stack.items.len);
+            result.value_ptr.* = position;
+            try self.parse_stack.append(self.doc.allocator, open);
+        }
+
+        fn popOpen(noalias self: *Self) OpenElem {
+            const open = self.parse_stack.pop().?;
+            std.debug.assert(open.idx != 0);
+            const name = self.nodes.items[open.idx].name_or_text.slice(self.input);
+            if (open.prev_same_tag == open_tag_index.none) {
+                std.debug.assert(self.open_by_tag.remove(name));
+            } else {
+                const top = self.open_by_tag.getPtr(name) orelse unreachable;
+                top.* = open.prev_same_tag;
+            }
+            return open;
         }
 
         inline fn addNode(noalias self: *Self, name_or_text: anytype, is_element: bool, overrides: anytype) !void {
@@ -1282,6 +1304,24 @@ test "parser randomized structural sweep" {
             };
         }
     }
+}
+
+test "closing-tag index tracks duplicate names and rejects unmatched tags" {
+    const alloc = std.testing.allocator;
+    var source: std.Io.Writer.Allocating = .init(alloc);
+    defer source.deinit();
+    try source.writer.writeAll("<A><b><a></A><c>");
+    for (0..2048) |_| try source.writer.writeAll("</never-opened>");
+    try source.writer.writeAll("</A>");
+
+    const input = try source.toOwnedSlice();
+    defer alloc.free(input);
+    var doc = try (ParseOptions{}).parse(alloc, input);
+    defer doc.deinit();
+
+    const c = firstQuery(doc.query("c")) orelse return error.TestUnexpectedResult;
+    const parent = c.parentNode() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("b", parent.tagName());
 }
 
 fn runStreamPropertyCase(alloc: std.mem.Allocator, input: []const u8) !void {

@@ -14,6 +14,7 @@ const IndexInt = common.IndexInt;
 
 const RawClose = scanner.RawTextClose;
 const TagScan = scanner.TagName;
+const open_tag_index = @import("open_tag_index.zig");
 
 fn findGtScanOnly(source: []const u8, start: usize) usize {
     var i = start;
@@ -205,6 +206,7 @@ pub const Parser = struct {
         };
         if (self.options.track_nesting) try p.stack.append(allocator, .{ .name = .{}, .key = 0, .depth = 0 });
         defer p.stack.deinit(allocator);
+        defer p.open_by_tag.deinit(allocator);
         try p.run();
     }
 };
@@ -218,6 +220,7 @@ const OpenTag = struct {
     key: u64,
     depth: u32,
     foreign: bool = false,
+    prev_same_tag: u32 = open_tag_index.none,
 };
 
 fn State(comptime Ctx: type, comptime callback: anytype) type {
@@ -228,6 +231,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         options: Options,
         i: usize = 0,
         stack: std.ArrayList(OpenTag) = .empty,
+        open_by_tag: open_tag_index.Map = .empty,
 
         const Self = @This();
 
@@ -266,7 +270,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
             if (self.options.track_nesting and self.options.emit_implicit_end_tags) {
                 while (self.stack.items.len > 1) {
-                    const open = self.stack.pop().?;
+                    const open = self.popOpen();
                     try self.emitEnd(open, self.i, self.i, true);
                 }
             }
@@ -321,7 +325,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 }
 
                 if (self.options.track_nesting and !closes_immediately) {
-                    try self.stack.append(self.allocator, .{ .name = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) }, .key = tag.key, .depth = depth, .foreign = foreign_element });
+                    try self.pushOpen(.{ .name = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) }, .key = tag.key, .depth = depth, .foreign = foreign_element });
                 }
                 return;
             }
@@ -361,7 +365,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 return;
             }
 
-            if (self.options.track_nesting) try self.stack.append(self.allocator, .{ .name = ev.name, .key = tag.key, .depth = depth, .foreign = foreign_element });
+            if (self.options.track_nesting) try self.pushOpen(.{ .name = ev.name, .key = tag.key, .depth = depth, .foreign = foreign_element });
         }
 
         /// Returns whether a new start tag is parsed in foreign content. SVG's
@@ -398,17 +402,22 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             self.i = token_end;
             if (tag.end == tag.start or self.stack.items.len <= 1) return;
 
-            var pos = self.stack.items.len - 1;
-            while (pos > 0) : (pos -= 1) {
-                const open = self.stack.items[pos];
-                if (self.openMatches(open, tag)) {
-                    while (self.stack.items.len - 1 >= pos) {
-                        const implicit = self.stack.items.len - 1 != pos;
-                        const popped = self.stack.pop().?;
-                        try self.emitEnd(popped, token_start, token_end, implicit);
-                    }
-                    return;
+            const top_pos = self.stack.items.len - 1;
+            const top = self.stack.items[top_pos];
+            if (self.openMatches(top, tag)) {
+                const popped = self.popOpen();
+                try self.emitEnd(popped, token_start, token_end, false);
+                return;
+            }
+
+            if (self.open_by_tag.get(self.source[tag.start..tag.end])) |found_pos| {
+                const pos: usize = @intCast(found_pos);
+                while (self.stack.items.len - 1 >= pos) {
+                    const implicit = self.stack.items.len - 1 != pos;
+                    const popped = self.popOpen();
+                    try self.emitEnd(popped, token_start, token_end, implicit);
                 }
+                return;
             }
         }
 
@@ -511,9 +520,33 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 const top = self.stack.items[self.stack.items.len - 1];
                 if (!tags.isImplicitCloseSourceWithLenAndKey(top.name.len, top.key)) break;
                 if (!tags.shouldImplicitlyCloseWithLenAndKey(top.name.len, top.key, new_tag, new_key)) break;
-                const popped = self.stack.pop().?;
+                const popped = self.popOpen();
                 if (self.options.emit_implicit_end_tags) try self.emitEnd(popped, pos, pos, true);
             }
+        }
+
+        fn pushOpen(self: *Self, open_value: OpenTag) !void {
+            std.debug.assert(self.stack.items.len < std.math.maxInt(u32));
+            var open = open_value;
+            const name = open.name.slice(self.source);
+            const result = try self.open_by_tag.getOrPut(self.allocator, name);
+            open.prev_same_tag = if (result.found_existing) result.value_ptr.* else open_tag_index.none;
+            const position: u32 = @intCast(self.stack.items.len);
+            result.value_ptr.* = position;
+            try self.stack.append(self.allocator, open);
+        }
+
+        fn popOpen(self: *Self) OpenTag {
+            const open = self.stack.pop().?;
+            std.debug.assert(open.name.len != 0);
+            const name = open.name.slice(self.source);
+            if (open.prev_same_tag == open_tag_index.none) {
+                std.debug.assert(self.open_by_tag.remove(name));
+            } else {
+                const top = self.open_by_tag.getPtr(name) orelse unreachable;
+                top.* = open.prev_same_tag;
+            }
+            return open;
         }
 
         fn scanTagName(self: *Self, start: usize) TagScan {
@@ -923,4 +956,23 @@ test "streaming parser emits syntactic end tags without nesting" {
         Ctx.cb,
     );
     try std.testing.expectEqualStrings("a,b", ctx.names.items);
+}
+
+test "streaming closing-tag index maintains previous duplicate links" {
+    const Ctx = struct {
+        implicit_c: bool = false,
+        closed_outer_a: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .end_tag) return true;
+            if (ev.implicit and std.mem.eql(u8, ev.nameSlice(), "c")) self.implicit_c = true;
+            if (!ev.implicit and std.ascii.eqlIgnoreCase(ev.nameSlice(), "a") and ev.depth == 0) self.closed_outer_a = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<A><b><a></A><c></A>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.implicit_c);
+    try std.testing.expect(ctx.closed_outer_a);
 }
