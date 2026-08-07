@@ -1,6 +1,11 @@
 // I am satisfied with how this ended up.
 // Tho i wonder, could there be an even faster way to do this?
 const std = @import("std");
+const declaration_testing = @import("../testing.zig");
+
+test {
+    declaration_testing.refAllDeclsRecursive(@This());
+}
 const tables = @import("tables.zig");
 
 /// Packs the first up-to-8 tag bytes into a key.

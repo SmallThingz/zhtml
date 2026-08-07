@@ -1,4 +1,9 @@
 const std = @import("std");
+const declaration_testing = @import("../testing.zig");
+
+test {
+    declaration_testing.refAllDeclsRecursive(@This());
+}
 const ast = @import("../selector/ast.zig");
 /// Query operation kind passed to instrumentation hooks.
 pub const QueryInstrumentationKind = enum(u8) {

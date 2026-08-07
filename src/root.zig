@@ -1,4 +1,9 @@
 const std = @import("std");
+const declaration_testing = @import("testing.zig");
+
+test {
+    declaration_testing.refAllDeclsRecursive(@This());
+}
 const common = @import("common.zig");
 const instrumentation = @import("debug/instrumentation.zig");
 const document = @import("html/document.zig");

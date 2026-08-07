@@ -4,6 +4,11 @@
 //
 // other than that, attempts to optimize anything in here will likely fail.
 const std = @import("std");
+const declaration_testing = @import("../testing.zig");
+
+test {
+    declaration_testing.refAllDeclsRecursive(@This());
+}
 const IndexInt = @import("../common.zig").IndexInt;
 const tables = @import("tables.zig");
 const InvalidDigit = 0xff;

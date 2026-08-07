@@ -1,5 +1,9 @@
 const std = @import("std");
 
+test {
+    refAllDeclsRecursive(@This());
+}
+
 fn ArgsTuple(comptime Function: type) ?type {
     @setEvalBranchQuota(1000_000);
     const info = @typeInfo(Function);
@@ -10,6 +14,7 @@ fn ArgsTuple(comptime Function: type) ?type {
 
     var argument_field_list: [function_info.params.len]type = undefined;
     inline for (function_info.params, 0..) |arg, i| {
+        if (arg.is_generic) return null;
         const T = arg.type orelse return null;
         if (T == type or @typeInfo(T) == .@"fn") return null;
         argument_field_list[i] = T;
@@ -73,7 +78,9 @@ pub fn refAllDeclsRecursive(comptime T: type) void {
                 else => {},
             }
         } else if (@typeInfo(@TypeOf(field)) == .@"fn") {
-            if (should_run) {
+            // Comptime compile APIs intentionally reject fabricated input and
+            // are covered by focused tests with meaningful source strings.
+            if (should_run and !comptime std.mem.startsWith(u8, decl.name, "compile")) {
                 if (ArgsTuple(@TypeOf(field))) |Args| {
                     _ = &@call(.auto, field, comptime initType(Args));
                 }

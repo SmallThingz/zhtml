@@ -1,4 +1,9 @@
 const std = @import("std");
+const declaration_testing = @import("../testing.zig");
+
+test {
+    declaration_testing.refAllDeclsRecursive(@This());
+}
 
 /// Builds a 256-entry boolean lookup table from a predicate.
 pub fn makeClassTable(comptime predicate: fn (u8) bool) [256]bool {

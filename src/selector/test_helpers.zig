@@ -1,4 +1,9 @@
 const std = @import("std");
+const declaration_testing = @import("../testing.zig");
+
+test {
+    declaration_testing.refAllDeclsRecursive(@This());
+}
 const ast = @import("ast.zig");
 
 pub fn expectAllAttributeOps(sel: anytype) !void {

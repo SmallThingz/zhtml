@@ -1,6 +1,11 @@
 // we can reduce the size of the raw node further!?
 // doubt it's possible; Would be crazy tho.
 const std = @import("std");
+const declaration_testing = @import("../testing.zig");
+
+test {
+    declaration_testing.refAllDeclsRecursive(@This());
+}
 const tables = @import("tables.zig");
 const attr = @import("attr.zig");
 const entities = @import("entities.zig");
