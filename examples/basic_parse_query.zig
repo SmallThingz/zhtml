@@ -8,6 +8,7 @@ pub fn run() !void {
     defer doc.deinit();
 
     var links = doc.query("div#app > a.nav");
+    defer links.deinit();
     const a = (try links.next()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("/docs", (try a.getAttributeValue(std.testing.allocator, "href")).?.value);
 }

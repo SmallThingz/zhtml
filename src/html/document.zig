@@ -13,6 +13,7 @@ const tags = @import("tags.zig");
 const runtime_selector = @import("../selector/runtime.zig");
 const ast = @import("../selector/ast.zig");
 const matcher = @import("../selector/matcher.zig");
+const forward = @import("../selector/forward.zig");
 const matcher_debug = @import("../selector/matcher_debug.zig");
 const instrumentation = @import("../debug/instrumentation.zig");
 const parser = @import("parser.zig");
@@ -874,41 +875,29 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Call `deinit` when stopping before exhaustion to release retained matcher scratch.
         pub fn query(self: @This(), comptime selector: []const u8) QueryIterType {
             const sel = comptime ast.Selector.compile(selector);
-            if (self.doc.nodes.len == 0) return self.emptyQueryIter(sel);
+            const plan = comptime forward.buildPlan(sel);
+            if (self.doc.nodes.len == 0) return self.emptyQueryIter(sel, plan);
             self.assertContainer();
-            return self.queryIter(sel);
+            return self.queryIter(sel, plan);
         }
 
         /// Returns lazy descendant iterator for already compiled selector.
         /// Call `deinit` when stopping before exhaustion to release retained matcher scratch.
         pub fn queryRuntime(self: @This(), sel: ast.Selector) QueryIterType {
-            if (self.doc.nodes.len == 0) return self.emptyQueryIter(sel);
+            const plan = forward.buildPlan(sel);
+            if (self.doc.nodes.len == 0) return self.emptyQueryIter(sel, plan);
             self.assertContainer();
-            return self.queryIter(sel);
+            return self.queryIter(sel, plan);
         }
 
         /// Creates an exhausted iterator for empty documents.
-        fn emptyQueryIter(self: @This(), sel: ast.Selector) QueryIterType {
-            return .{
-                .doc = self.doc,
-                .selector = sel,
-                .scope_root = InvalidIndex,
-                .next_index = 1,
-                .end_index = 1,
-                .workspace = matcher.MatchWorkspace.init(self.doc.allocator),
-            };
+        fn emptyQueryIter(self: @This(), sel: ast.Selector, plan: forward.Plan) QueryIterType {
+            return QueryIterType.init(self.doc, sel, plan, InvalidIndex, 1, 1);
         }
 
         /// Creates a scoped query iterator rooted at this node.
-        fn queryIter(self: *const @This(), sel: ast.Selector) QueryIterType {
-            return .{
-                .doc = self.doc,
-                .selector = sel,
-                .scope_root = self.index,
-                .next_index = self.index + 1, // Node 0 will work too since it's index = 0
-                .end_index = self.raw().subtree_end + 1, // Node 0 should work too sinde it's subtree_end should be last node
-                .workspace = matcher.MatchWorkspace.init(self.doc.allocator),
-            };
+        fn queryIter(self: *const @This(), sel: ast.Selector, plan: forward.Plan) QueryIterType {
+            return QueryIterType.init(self.doc, sel, plan, self.index, self.index + 1, self.raw().subtree_end + 1);
         }
     };
 }
@@ -941,6 +930,11 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         //! Matcher scratch is retained across `next` calls and freed on exhaustion or `deinit`.
         const DocType = options.Document();
         const NodeTypeWrapper = options.Node();
+        const ForwardExecutor = forward.Executor(DocType);
+        const Engine = union(enum) {
+            automaton: ForwardExecutor,
+            rtl: matcher.MatchWorkspace,
+        };
 
         /// Owning document pointer.
         doc: *const DocType,
@@ -952,12 +946,30 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         next_index: IndexInt = 1,
         /// Exclusive traversal bound for `next_index`.
         end_index: IndexInt = 1,
-        /// Lazily initialized matcher scratch and reusable deep-selector frames.
-        workspace: matcher.MatchWorkspace,
+        plan: forward.Plan,
+        engine: Engine,
+
+        fn init(doc: *const DocType, selector: ast.Selector, plan: forward.Plan, scope_root: IndexInt, next_index: IndexInt, end_index: IndexInt) @This() {
+            return .{
+                .doc = doc,
+                .selector = selector,
+                .scope_root = scope_root,
+                .next_index = next_index,
+                .end_index = end_index,
+                .plan = plan,
+                .engine = if (plan.kind == .rtl)
+                    .{ .rtl = matcher.MatchWorkspace.init(doc.allocator) }
+                else
+                    .{ .automaton = ForwardExecutor.init(doc, selector, plan, scope_root) },
+            };
+        }
 
         /// Releases matcher scratch if iteration stops before exhaustion.
         pub fn deinit(noalias self: *@This()) void {
-            self.workspace.deinit();
+            switch (self.engine) {
+                .automaton => |*executor| executor.deinit(),
+                .rtl => |*workspace| workspace.deinit(),
+            }
         }
 
         /// Returns next matching node or `null` when exhausted.
@@ -970,10 +982,15 @@ fn GetQueryIter(comptime options: ParseOptions) type {
             }
 
             while (self.next_index < self.end_index) : (self.next_index += 1) {
-                if (!self.doc.nodeAt(self.next_index).isElement()) continue;
-                if (!matcher.candidateCouldMatch(DocType, self.doc, self.selector, self.next_index)) continue;
-
-                if (try matcher.matchesSelectorAtWithWorkspace(DocType, self.doc, self.selector, self.next_index, self.scope_root, &self.workspace)) {
+                const matched = switch (self.engine) {
+                    .automaton => |*executor| try executor.process(self.next_index),
+                    .rtl => |*workspace| blk: {
+                        if (!self.doc.nodeAt(self.next_index).isElement()) break :blk false;
+                        if (!matcher.candidateCouldMatch(DocType, self.doc, self.selector, self.next_index)) break :blk false;
+                        break :blk try matcher.matchesSelectorAtWithWorkspace(DocType, self.doc, self.selector, self.next_index, self.scope_root, workspace);
+                    },
+                };
+                if (matched) {
                     defer self.next_index += 1;
                     return self.doc.nodeAt(self.next_index);
                 }
@@ -993,14 +1010,10 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         /// Allocates and returns all remaining matches.
         /// Allocator param is separate from doc.allocator; callers must free the
         /// returned slice with same allocator passed here (not doc.allocator).
-        pub fn collect(self: @This(), allocator: std.mem.Allocator) ![]NodeTypeWrapper {
-            var fill_it = self;
-            fill_it.workspace = matcher.MatchWorkspace.init(self.doc.allocator);
-            defer fill_it.deinit();
-
+        pub fn collect(noalias self: *@This(), allocator: std.mem.Allocator) ![]NodeTypeWrapper {
             var out = std.ArrayList(NodeTypeWrapper).empty;
             errdefer out.deinit(allocator);
-            while (try fill_it.next()) |node| try out.append(allocator, node);
+            while (try self.next()) |node| try out.append(allocator, node);
             return out.toOwnedSlice(allocator);
         }
     };
@@ -1152,7 +1165,7 @@ fn GetDocument(comptime options: ParseOptions) type {
         /// Returns lazy iterator over matches for already compiled selector.
         /// Call iterator `deinit` when stopping before exhaustion.
         pub fn queryRuntime(self: *const @This(), sel: ast.Selector) QueryIterType {
-            return self.root().queryIter(sel);
+            return self.root().queryIter(sel, forward.buildPlan(sel));
         }
 
         /// Runs debug selector matching from a document or node scope.
@@ -1282,6 +1295,7 @@ fn firstQuery(iter: anytype) @TypeOf(blk: {
     break :blk it.next() catch unreachable;
 }) {
     var it = iter;
+    defer it.deinit();
     return it.next() catch unreachable;
 }
 
@@ -1401,6 +1415,7 @@ test "document parse + query basics" {
     try std.testing.expectEqualStrings("div", one.tagName());
 
     var it = doc.query("body > *");
+    defer it.deinit();
     try std.testing.expect(try it.next() != null);
 }
 
@@ -3176,18 +3191,18 @@ test "query iterator lifecycle releases scratch and copies independently" {
     // Dropping an iterator before its first next() is allocation-free.
     {
         const unused = doc.query("span");
-        try std.testing.expect(unused.workspace.scratch == null);
+        try std.testing.expect(!unused.engine.automaton.initialized);
     }
 
     var early = doc.query("span");
     try std.testing.expect(try early.next() != null);
-    try std.testing.expect(early.workspace.scratch != null);
+    try std.testing.expect(early.engine.automaton.initialized);
     early.deinit();
-    try std.testing.expect(early.workspace.scratch == null);
+    try std.testing.expect(!early.engine.automaton.initialized);
 
     var exhausted = doc.query(".missing");
     try std.testing.expect(try exhausted.next() == null);
-    try std.testing.expect(exhausted.workspace.scratch == null);
+    try std.testing.expect(!exhausted.engine.automaton.initialized);
 
     var original = doc.query("span");
     var copied = original;
@@ -3251,7 +3266,7 @@ test "rightmost tag prefilter avoids deep-selector workspace allocation" {
     var it = doc.queryRuntime(selector);
     defer it.deinit();
     try std.testing.expect(try it.next() == null);
-    try std.testing.expect(it.workspace.scratch == null);
+    try std.testing.expect(it.engine.rtl.scratch == null);
 }
 
 test "deep-selector workspace frame allocation is reused across candidates" {
@@ -3281,7 +3296,106 @@ test "deep-selector workspace frame allocation is reused across candidates" {
     var it = doc.queryRuntime(selector);
     defer it.deinit();
     try std.testing.expect(try it.next() != null);
-    try std.testing.expectEqual(@as(usize, 65), it.workspace.heap_frames.len);
+    try std.testing.expectEqual(@as(usize, 65), it.engine.rtl.heap_frames.len);
+}
+
+test "forward query results agree with RTL matching across combinators and structural pseudos" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var src = ("<main class=outside><section id=scope>" ++
+        "<ul><li id=a class=x></li> text <li id=b></li><li id=c class=y><span id=inner></span></li></ul>" ++
+        "<article><p id=p1></p><p id=p2 class=x></p><em id=e></em></article>" ++
+        "</section></main>").*;
+    try resetParsed(.{}, &doc, &src);
+
+    const selectors = [_][]const u8{
+        "ul > li",
+        "main li span",
+        "li + li",
+        ".x ~ li",
+        "main > section ul > li + li",
+        "li:first-child",
+        "li:nth-child(2)",
+        "li:nth-child(2n+1)",
+        "li:nth-child(-n+2)",
+        "li:last-child span",
+        "p + em, li.y",
+        "main > section, p.x + em",
+    };
+
+    for (selectors) |source| {
+        var selector = try ast.Selector.compileRuntime(alloc, source);
+        defer selector.deinit(alloc);
+
+        var expected = std.ArrayList(IndexInt).empty;
+        defer expected.deinit(alloc);
+        var idx: IndexInt = 1;
+        while (idx < doc.nodes.len) : (idx += 1) {
+            if (try matcher.matchesSelectorAt(GetDocument(.{}), &doc, selector, idx, 0)) try expected.append(alloc, idx);
+        }
+
+        var it = doc.queryRuntime(selector);
+        defer it.deinit();
+        var actual = std.ArrayList(IndexInt).empty;
+        defer actual.deinit(alloc);
+        while (try it.next()) |node| try actual.append(alloc, node.index);
+        try std.testing.expectEqualSlices(IndexInt, expected.items, actual.items);
+    }
+}
+
+test "forward iterator preserves sibling and ancestry state across yields" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var src = "<div><i class=x><b class=x></b></i><i class=y></i><i class=y></i></div>".*;
+    try resetParsed(.{}, &doc, &src);
+
+    var paused = doc.query(".x, .x + .y, .x .x, .y + .y");
+    defer paused.deinit();
+    const first = (try paused.next()) orelse return error.TestUnexpectedResult;
+    const second = (try paused.next()) orelse return error.TestUnexpectedResult;
+    const third = (try paused.next()) orelse return error.TestUnexpectedResult;
+    const fourth = (try paused.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(IndexInt, &.{ 2, 3, 4, 5 }, &.{ first.index, second.index, third.index, fourth.index });
+    try std.testing.expect(try paused.next() == null);
+}
+
+test "scoped forward query seeds selector prefixes from outside ancestors" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var src = "<body class=outside><div id=scope><span id=inside></span><div><em id=deep></em></div></div></body>".*;
+    try resetParsed(.{}, &doc, &src);
+    const scope = firstQuery(doc.query("#scope")) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqualStrings("inside", (firstQuery(scope.query(".outside span")) orelse return error.TestUnexpectedResult).getAttributeValueRaw("id").?);
+    try std.testing.expect(firstQuery(scope.query("> span")) != null);
+    try std.testing.expect(firstQuery(scope.query("> div em")) != null);
+    try std.testing.expect(firstQuery(scope.query("body > #scope em")) != null);
+}
+
+test "forward plan boundary uses automaton through 64 compounds and RTL after it" {
+    const alloc = std.testing.allocator;
+    var source64 = std.ArrayList(u8).empty;
+    defer source64.deinit(alloc);
+    for (0..64) |i| {
+        if (i != 0) try source64.append(alloc, ' ');
+        try source64.appendSlice(alloc, "div");
+    }
+    var selector64 = try ast.Selector.compileRuntime(alloc, source64.items);
+    defer selector64.deinit(alloc);
+    try std.testing.expectEqual(forward.Kind.forward, forward.buildPlan(selector64).kind);
+
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(alloc);
+    for (0..65) |i| {
+        if (i != 0) try source.append(alloc, ' ');
+        try source.appendSlice(alloc, "div");
+    }
+    var selector = try ast.Selector.compileRuntime(alloc, source.items);
+    defer selector.deinit(alloc);
+    try std.testing.expectEqual(forward.Kind.rtl, forward.buildPlan(selector).kind);
 }
 
 test "query collect frees partial output when growth fails" {
@@ -3299,7 +3413,7 @@ test "query collect frees partial output when growth fails" {
     try resetParsed(.{}, &doc, doc_source);
 
     var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 1 });
-    const it = doc.query("span");
+    var it = doc.query("span");
     try std.testing.expectError(error.OutOfMemory, it.collect(failing.allocator()));
 }
 

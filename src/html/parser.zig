@@ -708,6 +708,7 @@ fn firstQuery(iter: anytype) @TypeOf(blk: {
     break :blk it.next() catch unreachable;
 }) {
     var it = iter;
+    defer it.deinit();
     return it.next() catch unreachable;
 }
 

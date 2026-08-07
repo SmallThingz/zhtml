@@ -225,6 +225,28 @@ pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Do
     return false;
 }
 
+/// Matches one left-to-right group prefix at a specific node using the RTL engine.
+/// Used once when seeding a scoped forward query from ancestors outside its scan.
+pub fn matchesPrefixAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, prefix_len: usize, node_index: IndexInt, workspace: *MatchWorkspace) !bool {
+    if (prefix_len == 0 or prefix_len > group.compound_len or node_index >= doc.nodes.len) return false;
+    try workspace.ensureReady(selector);
+    const partial: ast.Group = .{
+        .compound_start = group.compound_start,
+        .compound_len = @intCast(prefix_len),
+    };
+    return matchGroupFromRight(
+        Doc,
+        doc,
+        selector,
+        partial,
+        @intCast(prefix_len - 1),
+        node_index,
+        InvalidIndex,
+        &workspace.scratch.?,
+        workspace.heap_frames,
+    );
+}
+
 const MatchFramePhase = enum(u8) {
     enter,
     scan_descendant,
@@ -389,15 +411,44 @@ fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: as
     return false;
 }
 
+pub const ForwardNodeContext = struct {
+    scratch: ?std.heap.ArenaAllocator = null,
+    probe: AttrProbe = .{},
+    child_position: usize = 0,
+    last_child_cache: ?bool = null,
+
+    pub fn begin(self: *@This(), allocator: std.mem.Allocator, child_position: usize) void {
+        if (self.scratch == null) self.scratch = std.heap.ArenaAllocator.init(allocator);
+        _ = self.scratch.?.reset(.retain_capacity);
+        self.probe = .{};
+        self.child_position = child_position;
+        self.last_child_cache = null;
+    }
+
+    pub fn deinit(self: *@This()) void {
+        if (self.scratch) |*scratch| scratch.deinit();
+        self.scratch = null;
+    }
+};
+
+const PseudoMode = enum { rtl, forward };
+
 fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, scratch: *std.heap.ArenaAllocator) !bool {
     if (!doc.nodes[node_index].isElement(node_index)) return false;
-    const node = &doc.nodes[node_index];
     _ = scratch.reset(.retain_capacity);
-    const scratch_alloc = scratch.allocator();
-    // Per-node memo for attribute probes inside one compound match.
-    // This preserves selector-order short-circuiting while avoiding repeated
-    // full attribute traversals for the same name.
     var attr_probe: AttrProbe = .{};
+    var last_child_cache: ?bool = null;
+    return matchesCompoundCore(Doc, doc, selector, comp, node_index, scratch.allocator(), &attr_probe, .rtl, 0, &last_child_cache);
+}
+
+pub fn matchesCompoundForward(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, ctx: *ForwardNodeContext) !bool {
+    std.debug.assert(ctx.scratch != null);
+    return matchesCompoundCore(Doc, doc, selector, comp, node_index, ctx.scratch.?.allocator(), &ctx.probe, .forward, ctx.child_position, &ctx.last_child_cache);
+}
+
+fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, scratch_alloc: std.mem.Allocator, attr_probe: *AttrProbe, pseudo_mode: PseudoMode, child_position: usize, last_child_cache: *?bool) !bool {
+    if (!doc.nodes[node_index].isElement(node_index)) return false;
+    const node = &doc.nodes[node_index];
     var collected_attrs: CollectedAttrs = .{};
     const use_collected = prepareCollectedAttrs(selector, comp, &collected_attrs);
     const collected_ptr: ?*CollectedAttrs = if (use_collected) &collected_attrs else null;
@@ -413,7 +464,7 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
             doc,
             node,
             scratch_alloc,
-            &attr_probe,
+            attr_probe,
             collected_ptr,
             "id",
         ) orelse return false;
@@ -425,7 +476,7 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
             doc,
             node,
             scratch_alloc,
-            &attr_probe,
+            attr_probe,
             collected_ptr,
             "class",
         ) orelse return false;
@@ -435,19 +486,30 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
     var attr_i: IndexInt = 0;
     while (attr_i < comp.attr_len) : (attr_i += 1) {
         const attr_sel = selector.attrs[comp.attr_start + attr_i];
-        if (!try matchesAttrSelector(doc, node, scratch_alloc, &attr_probe, collected_ptr, selector.source, attr_sel)) return false;
+        if (!try matchesAttrSelector(doc, node, scratch_alloc, attr_probe, collected_ptr, selector.source, attr_sel)) return false;
     }
 
     var pseudo_i: IndexInt = 0;
     while (pseudo_i < comp.pseudo_len) : (pseudo_i += 1) {
         const pseudo = selector.pseudos[comp.pseudo_start + pseudo_i];
-        if (!matchesPseudo(doc, node_index, pseudo)) return false;
+        const pseudo_matches = switch (pseudo_mode) {
+            .rtl => matchesPseudo(doc, node_index, pseudo),
+            .forward => switch (pseudo.kind) {
+                .first_child => child_position == 1,
+                .nth_child => pseudo.nth.matches(child_position),
+                .last_child => blk: {
+                    if (last_child_cache.* == null) last_child_cache.* = nextElementSibling(doc, node_index) == null;
+                    break :blk last_child_cache.*.?;
+                },
+            },
+        };
+        if (!pseudo_matches) return false;
     }
 
     var not_i: IndexInt = 0;
     while (not_i < comp.not_len) : (not_i += 1) {
         const item = selector.not_items[comp.not_start + not_i];
-        if (try matchesNotSimple(doc, node, scratch_alloc, &attr_probe, collected_ptr, selector.source, item)) return false;
+        if (try matchesNotSimple(doc, node, scratch_alloc, attr_probe, collected_ptr, selector.source, item)) return false;
     }
 
     return true;
