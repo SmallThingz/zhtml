@@ -2585,23 +2585,23 @@ fn runHtml5libParserSuite(io: std.Io, alloc: std.mem.Allocator, mode: []const u8
 }
 
 fn runWptParserSuite(io: std.Io, alloc: std.mem.Allocator, mode: []const u8, max_cases: usize) !ParserSuiteResult {
-    const wpt_dir = SUITES_DIR ++ "/wpt/html/syntax/parsing";
-    var dir = try std.Io.Dir.cwd().openDir(io, wpt_dir, .{ .iterate = true });
+    // Current WPT wrappers load the canonical html5lib tree-construction
+    // vectors from resources/*.dat at runtime. Consume that source format
+    // directly instead of trying to extract vectors from the wrapper HTML.
+    const resources_dir = SUITES_DIR ++ "/wpt/html/syntax/parsing/resources";
+    var dir = try std.Io.Dir.cwd().openDir(io, resources_dir, .{ .iterate = true });
     defer dir.close(io);
 
-    var html_names = std.ArrayList([]const u8).empty;
-    defer deinitOwnedStringList(alloc, &html_names);
-    var walker = try dir.walk(alloc);
-    defer walker.deinit();
-    while (try walker.next(io)) |entry| {
+    var dat_names = std.ArrayList([]const u8).empty;
+    defer deinitOwnedStringList(alloc, &dat_names);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.path, ".html")) continue;
-        const base = std.fs.path.basename(entry.path);
-        if (!std.mem.startsWith(u8, base, "html5lib_")) continue;
-        const path_copy = try alloc.dupe(u8, entry.path);
-        try appendOwnedString(alloc, &html_names, path_copy);
+        if (!std.mem.endsWith(u8, entry.name, ".dat")) continue;
+        const name = try alloc.dupe(u8, entry.name);
+        try appendOwnedString(alloc, &dat_names, name);
     }
-    std.mem.sort([]const u8, html_names.items, {}, struct {
+    std.mem.sort([]const u8, dat_names.items, {}, struct {
         fn lt(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.lessThan(u8, a, b);
         }
@@ -2610,48 +2610,11 @@ fn runWptParserSuite(io: std.Io, alloc: std.mem.Allocator, mode: []const u8, max
     var cases = std.ArrayList(ParserCase).empty;
     defer deinitParserCaseList(alloc, &cases);
 
-    for (html_names.items) |name| {
-        const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ wpt_dir, name });
+    for (dat_names.items) |name| {
+        const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ resources_dir, name });
         defer alloc.free(path);
-        const parsed_cases = try parseWptHtmlSuiteFile(io, alloc, path);
+        const parsed_cases = try parseHtml5libDat(io, alloc, path);
         try transferOwnedParserCases(alloc, &cases, parsed_cases);
-    }
-
-    if (cases.items.len == 0 and html_names.items.len != 0) {
-        const total = @min(max_cases, html_names.items.len);
-        var examples = std.ArrayList([]const u8).empty;
-        defer examples.deinit(alloc);
-        const msg = try std.fmt.allocPrint(
-            alloc,
-            "{s}: {d} html files found but no static parser vectors extracted",
-            .{ "WPT html5lib_*", html_names.items.len },
-        );
-        try examples.append(alloc, msg);
-
-        var failures = std.ArrayList(ParserFailure).empty;
-        defer failures.deinit(alloc);
-        var i: usize = 0;
-        while (i < total) : (i += 1) {
-            const preview = try std.fmt.allocPrint(alloc, "<unsupported-test-file:{s}>", .{html_names.items[i]});
-            const empty: []const []const u8 = &.{};
-            try failures.append(alloc, .{
-                .case_index = i,
-                .input_preview = preview,
-                .input_len = 0,
-                .expected = empty,
-                .actual = empty,
-                .error_msg = "unsupported-wpt-testharness-format",
-            });
-        }
-
-        return .{
-            .summary = .{
-                .total = total,
-                .passed = 0,
-                .examples = try examples.toOwnedSlice(alloc),
-            },
-            .failures = try failures.toOwnedSlice(alloc),
-        };
     }
 
     return runParserCases(io, alloc, mode, cases.items, max_cases);

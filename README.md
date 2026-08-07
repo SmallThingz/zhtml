@@ -34,7 +34,7 @@ lol-html     │██████░░░░░░░░░░░░░░│ 
 
 | Profile | nwmatcher | qwery_contextual | html5lib subset | WHATWG HTML parsing |
 |---|---:|---:|---:|---:|
-| `strictest/fastest` | 20/20 (0 failed) | 54/54 (0 failed) | 543/600 (57 failed) | 0/3 (3 failed) |
+| `strictest/fastest` | 20/20 (0 failed) | 54/54 (0 failed) | 543/600 (57 failed) | 454/500 (46 failed) |
 
 Source: `bench/results/external_suite_report.json`
 <!-- README_AUTO_SUMMARY:END -->
