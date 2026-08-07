@@ -393,22 +393,30 @@ fn GetNode(comptime options: ParseOptions) type {
             var out = try std.ArrayList(u8).initCapacity(gpa, total);
             errdefer out.deinit(gpa);
 
-            {
-                out.appendSliceAssumeCapacity(doc.nodes[scan.first_idx].name_or_text.slice(doc.source));
-
-                var idx = scan.resume_idx;
-                while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
-                    if (!doc.nodeAt(idx).isText()) continue;
-                    const slice = doc.nodes[idx].name_or_text.slice(doc.source);
-                    if (slice.len == 0) continue;
-                    if (out.items.len != 0 and !tables.WhitespaceTable[out.items[out.items.len - 1]]) {
-                        out.appendAssumeCapacity(' ');
-                    }
-                    out.appendSliceAssumeCapacity(slice);
-                }
+            appendOwnedText(&out, doc, scan.first_idx, opts);
+            var idx = scan.resume_idx;
+            while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
+                if (!doc.nodeAt(idx).isText()) continue;
+                appendOwnedText(&out, doc, idx, opts);
             }
 
-            return try finishInnerTextOwned(&out, gpa, opts, !options.non_destructive and opts.unescape, false);
+            return try finishInnerTextOwned(&out, gpa, opts, opts.unescape, false);
+        }
+
+        /// Appends one text node to an owned result, decoding RO text per node
+        /// so raw-text parents never pass through the entity decoder.
+        fn appendOwnedText(out: *std.ArrayList(u8), doc: anytype, idx: IndexInt, comptime opts: Self.TextOptions) void {
+            const slice = doc.nodes[idx].name_or_text.slice(doc.source);
+            if (slice.len == 0) return;
+            if (out.items.len != 0 and !tables.WhitespaceTable[out.items[out.items.len - 1]]) out.appendAssumeCapacity(' ');
+            const start = out.items.len;
+            out.appendSliceAssumeCapacity(slice);
+            if (comptime options.non_destructive and opts.unescape) {
+                if (!isRawTextNode(doc, idx)) {
+                    const decoded_len = entities.decodeInPlace(false, out.items[start..]);
+                    out.items.len = start + decoded_len;
+                }
+            }
         }
 
         /// Applies final text decoding/normalization and transfers buffer ownership.
@@ -440,11 +448,14 @@ fn GetNode(comptime options: ParseOptions) type {
                 var out = std.ArrayList(u8).empty;
                 errdefer out.deinit(gpa);
                 try out.appendSlice(gpa, node_raw.name_or_text.slice(doc.source));
+                if (comptime options.non_destructive and opts.unescape) {
+                    if (!isRawTextNode(doc, self.index)) out.items.len = entities.decodeInPlace(false, out.items);
+                }
                 return try finishInnerTextOwned(
                     &out,
                     gpa,
                     opts,
-                    !options.non_destructive and opts.unescape,
+                    opts.unescape,
                     false,
                 );
             }
@@ -471,7 +482,7 @@ fn GetNode(comptime options: ParseOptions) type {
             var decoded = was_decoded;
 
             if (comptime unescape) {
-                if (!was_decoded) {
+                if (!was_decoded and !isRawTextNode(doc, idx)) {
                     const new_len = entities.decodeInPlace(false, node.name_or_text.sliceMut(doc.source));
                     node.name_or_text.len = @intCast(new_len);
                     decoded = true;
@@ -484,6 +495,14 @@ fn GetNode(comptime options: ParseOptions) type {
 
             const new_end: usize = node.name_or_text.end();
             if (decoded and new_end < doc.source.len) doc.source[new_end] = 0;
+        }
+
+        /// Raw-text children of script/style keep entity syntax literal.
+        fn isRawTextNode(doc: anytype, idx: IndexInt) bool {
+            const parent = doc.nodes[idx].parent;
+            if (parent == InvalidIndex or parent == 0 or parent >= doc.nodes.len) return false;
+            const parent_name = doc.nodes[parent].name_or_text.slice(doc.source);
+            return tags.isRawTextTagWithKey(parent_name, tags.first8KeyWithMode(parent_name, options.non_destructive));
         }
 
         /// Returns decoded attribute value for `name`, if present.
@@ -567,10 +586,11 @@ fn GetNode(comptime options: ParseOptions) type {
             comptime encode_entities: bool,
         ) WriterError(@TypeOf(writer))!void {
             if (node_raw.isText(idx)) {
+                const raw_text = isRawTextNode(doc, idx);
                 if (comptime encode_entities and !options.non_destructive) materializeRwText(doc, idx, true, false);
                 const text_bytes = node_raw.name_or_text.slice(doc.source);
                 if (comptime encode_entities and !options.non_destructive) {
-                    try writeEscapedText(writer, text_bytes);
+                    if (raw_text) try writer.writeAll(text_bytes) else try writeEscapedText(writer, text_bytes);
                 } else {
                     try writer.writeAll(text_bytes);
                 }
@@ -596,10 +616,11 @@ fn GetNode(comptime options: ParseOptions) type {
 
                 const child = &doc.nodes[next_idx];
                 if (child.isText(next_idx)) {
+                    const raw_text = isRawTextNode(doc, next_idx);
                     if (comptime encode_entities and !options.non_destructive) materializeRwText(doc, next_idx, true, false);
                     const text_bytes = child.name_or_text.slice(doc.source);
                     if (comptime encode_entities and !options.non_destructive) {
-                        try writeEscapedText(writer, text_bytes);
+                        if (raw_text) try writer.writeAll(text_bytes) else try writeEscapedText(writer, text_bytes);
                     } else {
                         try writer.writeAll(text_bytes);
                     }
@@ -2000,6 +2021,64 @@ test "read-only writeHtml keeps exact encoded source for either encoding choice"
     defer out.deinit();
     try doc.writeHtml(&out.writer, true);
     try std.testing.expectEqualStrings(html, out.written());
+}
+
+test "raw and escapable raw text use distinct decode and serialization rules" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<script>a&amp;<b</script><style>c&amp;<d</style><title>e&amp;<f</title><textarea>g&amp;<h</textarea>".*;
+    try resetParsed(.{}, &doc, &html);
+
+    const script = firstQuery(doc.query("script")) orelse return error.TestUnexpectedResult;
+    const style = firstQuery(doc.query("style")) orelse return error.TestUnexpectedResult;
+    const title = firstQuery(doc.query("title")) orelse return error.TestUnexpectedResult;
+    const textarea = firstQuery(doc.query("textarea")) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqualStrings("a&amp;<b", (try script.innerTextWithOptions(alloc, .{ .normalize_whitespace = false })).value);
+    try std.testing.expectEqualStrings("c&amp;<d", (try style.innerTextWithOptions(alloc, .{ .normalize_whitespace = false })).value);
+    try std.testing.expectEqualStrings("e&<f", (try title.innerTextWithOptions(alloc, .{ .normalize_whitespace = false })).value);
+    try std.testing.expectEqualStrings("g&<h", (try textarea.innerTextWithOptions(alloc, .{ .normalize_whitespace = false })).value);
+
+    var script_out: std.Io.Writer.Allocating = .init(alloc);
+    defer script_out.deinit();
+    try script.writeHtml(&script_out.writer, true);
+    try std.testing.expectEqualStrings("<script>a&amp;<b</script>", script_out.written());
+
+    var title_out: std.Io.Writer.Allocating = .init(alloc);
+    defer title_out.deinit();
+    try title.writeHtml(&title_out.writer, true);
+    try std.testing.expectEqualStrings("<title>e&amp;&lt;f</title>", title_out.written());
+}
+
+test "mixed subtree text decoding leaves script entities literal" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div>x&amp;<script>y&amp;</script><title>z&amp;</title></div>".*;
+    try resetParsed(.{}, &doc, &html);
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
+    const value = try div.innerTextOwnedWithOptions(alloc, .{ .normalize_whitespace = false });
+    defer alloc.free(value);
+    try std.testing.expectEqualStrings("x& y&amp; z&", value);
+}
+
+test "read-only extraction decodes escapable raw text but not raw text" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{ .non_destructive = true }).init(alloc);
+    defer doc.deinit();
+    const html = "<script>a&amp;<b</script><title>c&amp;<d</title>";
+    try resetParsed(.{ .non_destructive = true }, &doc, html);
+
+    const script = firstQuery(doc.query("script")) orelse return error.TestUnexpectedResult;
+    const title = firstQuery(doc.query("title")) orelse return error.TestUnexpectedResult;
+    const script_text = try script.innerTextOwnedWithOptions(alloc, .{ .normalize_whitespace = false });
+    defer alloc.free(script_text);
+    const title_text = try title.innerTextOwnedWithOptions(alloc, .{ .normalize_whitespace = false });
+    defer alloc.free(title_text);
+    try std.testing.expectEqualStrings("a&amp;<b", script_text);
+    try std.testing.expectEqualStrings("c&<d", title_text);
+    try std.testing.expectEqualStrings(html, doc.source);
 }
 
 test "inplace attribute parser treats explicit empty assignment as name-only" {

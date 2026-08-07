@@ -267,7 +267,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 }
                 self.i = self.input.len;
                 return;
-            } else if (tags.isRawTextTagWithKey(tag_name, tag_name_key)) {
+            } else if (tags.isTextOnlyTagWithKey(tag_name, tag_name_key)) {
                 // Raw-text tags stay structured as elements, but their contents are
                 // copied as one opaque text child up to the matching close tag.
                 const parent_idx: IndexInt = @intCast(self.nodes.items.len);

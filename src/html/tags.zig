@@ -133,18 +133,28 @@ pub fn isVoidTagWithKey(name: []const u8, key: u64) bool {
     };
 }
 
-/// Returns whether tag is HTML text-only tag closed by explicit end-tag.
-///
-/// This intentionally includes `title` and `textarea` in addition to raw-text
-/// tags to keep parser behavior closer to HTML tokenization semantics while
-/// staying in this parser's simplified state machine.
+/// Returns whether tag content is raw text: tags and entities are both literal.
 pub fn isRawTextTagWithKey(name: []const u8, key: u64) bool {
     return switch (name.len) {
-        5 => key == KEY.STYLE or key == KEY.TITLE,
+        5 => key == KEY.STYLE,
         6 => key == KEY.SCRIPT,
+        else => false,
+    };
+}
+
+/// Returns whether tag content is escapable raw text: tags are literal but
+/// character references are decoded.
+pub fn isEscapableRawTextTagWithKey(name: []const u8, key: u64) bool {
+    return switch (name.len) {
+        5 => key == KEY.TITLE,
         8 => key == KEY.TEXTAREA,
         else => false,
     };
+}
+
+/// Returns whether tag content is consumed opaquely up to its matching close.
+pub inline fn isTextOnlyTagWithKey(name: []const u8, key: u64) bool {
+    return isRawTextTagWithKey(name, key) or isEscapableRawTextTagWithKey(name, key);
 }
 
 /// Fast check for `<plaintext>` by `(len,key)`.
@@ -346,6 +356,11 @@ pub inline fn isSvgWithKey(name: []const u8, key: u64) bool {
 test "tag helpers on canonical lowercase names" {
     try std.testing.expect(isVoidTagWithKey("img", first8Key("img")));
     try std.testing.expect(isRawTextTagWithKey("script", first8Key("script")));
+    try std.testing.expect(isRawTextTagWithKey("style", first8Key("style")));
+    try std.testing.expect(!isRawTextTagWithKey("title", first8Key("title")));
+    try std.testing.expect(isEscapableRawTextTagWithKey("title", first8Key("title")));
+    try std.testing.expect(isEscapableRawTextTagWithKey("textarea", first8Key("textarea")));
+    try std.testing.expect(isTextOnlyTagWithKey("textarea", first8Key("textarea")));
     try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "blockquote", KEY.BLOCKQUOTE));
 }
 

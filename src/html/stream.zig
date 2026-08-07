@@ -60,7 +60,7 @@ fn scanOnly(source: []const u8) void {
                 const tag = scanOnlyTagName(source, lt + 1);
                 const name = source[tag.start..tag.end];
                 if (lower == 'p' and tags.isPlainTextTagWithKey(name, tag.key)) return;
-                if ((lower == 's' or lower == 't') and tags.isRawTextTagWithKey(name, tag.key)) {
+                if ((lower == 's' or lower == 't') and tags.isTextOnlyTagWithKey(name, tag.key)) {
                     if (scanOnlyFindRawTextClose(source, name, tag.key, i)) |close| {
                         i = close.close_end;
                     } else {
@@ -347,7 +347,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     return;
                 }
 
-                if (tags.isRawTextTagWithKey(tag_name, tag.key)) {
+                if (tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
                     try self.parseRawText(tag, depth, token_start);
                     return;
                 }
@@ -372,7 +372,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             if (!descend) {
                 if (tags.isPlainTextTagWithKey(tag_name, tag.key)) {
                     self.i = self.source.len;
-                } else if (tags.isRawTextTagWithKey(tag_name, tag.key)) {
+                } else if (tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
                     self.i = if (self.findRawTextClose(tag_name, tag.key, self.i)) |close| close.close_end else self.source.len;
                 } else if (!self_closing and !tags.isVoidTagWithKey(tag_name, tag.key)) {
                     self.i = self.skipSubtree(tag_name, tag.key, self.i);
@@ -388,7 +388,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 return;
             }
 
-            if (tags.isRawTextTagWithKey(tag_name, tag.key)) {
+            if (tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
                 try self.parseRawText(tag, depth, token_start);
                 return;
             }
@@ -719,6 +719,27 @@ test "streaming raw-text close respects attributes with spaced assignment" {
     var ctx: Ctx = .{};
     try parse(std.testing.allocator, "<script>x</script data-x = \"a>b\"><div></div>", &ctx, Ctx.cb);
     try std.testing.expect(ctx.saw_after);
+}
+
+test "streaming parser keeps raw and escapable raw tag contents opaque" {
+    const Ctx = struct {
+        script_text: bool = false,
+        title_text: bool = false,
+        nested_b: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "b")) self.nested_b = true;
+            if (ev.kind == .text and std.mem.eql(u8, ev.valueSlice(), "a&amp;<b>")) self.script_text = true;
+            if (ev.kind == .text and std.mem.eql(u8, ev.valueSlice(), "c&amp;<b>")) self.title_text = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<script>a&amp;<b></script><title>c&amp;<b></title>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.script_text);
+    try std.testing.expect(ctx.title_text);
+    try std.testing.expect(!ctx.nested_b);
 }
 
 test "streaming parser callback can skip subtree" {

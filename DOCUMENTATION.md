@@ -129,6 +129,7 @@ All examples are verified by running `zig build examples-check`
 - destructive decoding changes literal NUL bytes to spaces and numeric NUL references to U+FFFD; malformed leading UTF-8 bytes in attribute names are replaced with an internal marker
 - destructive text spans use an in-bounds NUL byte immediately after the span to remember that entity decoding already occurred; terminal text without spare capacity may be checked again
 - `writeHtml(writer, comptime encode_entities)` can materialize and escape RW text as `&amp;`, `&lt;`, and `&gt;`; `format` deliberately passes `false` to retain its existing behavior
+- `script` and `style` are parsed as raw text and never entity-decoded; `title` and `textarea` are parsed opaquely as escapable raw text and do decode character references during extraction
 - query-time decoding keeps parse throughput high by avoiding eager entity decode and whitespace normalization for bytes that may never be read
 
 ## Non-Destructive Parsing
