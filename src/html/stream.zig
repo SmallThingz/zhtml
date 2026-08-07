@@ -217,6 +217,7 @@ const OpenTag = struct {
     name: Span,
     key: u64,
     depth: u32,
+    foreign: bool = false,
 };
 
 fn State(comptime Ctx: type, comptime callback: anytype) type {
@@ -294,8 +295,11 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             };
             const self_closing = tag_end > tag.start and self.source[tag_end - 1] == '/';
             const tag_name = self.source[tag.start..tag.end];
+            const foreign_element = self.currentForeignContext() or tags.isSvgWithKey(tag_name, tag.key) or tags.isMathWithKey(tag_name, tag.key);
+            const void_element = !foreign_element and tags.isVoidTagWithKey(tag_name, tag.key);
+            const closes_immediately = void_element or (foreign_element and self_closing);
 
-            if (self.options.track_nesting and self.stack.items.len > 1 and tags.mayTriggerImplicitCloseWithKey(tag_name, tag.key)) {
+            if (self.options.track_nesting and !foreign_element and self.stack.items.len > 1 and tags.mayTriggerImplicitCloseWithKey(tag_name, tag.key)) {
                 try self.applyImplicitClosures(tag_name, tag.key, token_start);
             }
 
@@ -305,19 +309,19 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             self.i = tag_end + 1;
 
             if (!self.options.emit_start_tags) {
-                if (tags.isPlainTextTagWithKey(tag_name, tag.key)) {
+                if (!foreign_element and tags.isPlainTextTagWithKey(tag_name, tag.key)) {
                     if (self.options.emit_text and self.i < self.source.len) try self.emitText(self.i, self.source.len);
                     self.i = self.source.len;
                     return;
                 }
 
-                if (tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
+                if (!foreign_element and tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
                     try self.parseRawText(tag, depth, token_start);
                     return;
                 }
 
-                if (self.options.track_nesting and !tags.isVoidTagWithKey(tag_name, tag.key)) {
-                    try self.stack.append(self.allocator, .{ .name = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) }, .key = tag.key, .depth = depth });
+                if (self.options.track_nesting and !closes_immediately) {
+                    try self.stack.append(self.allocator, .{ .name = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) }, .key = tag.key, .depth = depth, .foreign = foreign_element });
                 }
                 return;
             }
@@ -334,30 +338,40 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
             const descend = try callback(self.ctx, ev);
             if (!descend) {
-                if (tags.isPlainTextTagWithKey(tag_name, tag.key)) {
+                if (!foreign_element and tags.isPlainTextTagWithKey(tag_name, tag.key)) {
                     self.i = self.source.len;
-                } else if (tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
+                } else if (!foreign_element and tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
                     self.i = if (self.findRawTextClose(tag_name, tag.key, self.i)) |close| close.close_end else self.source.len;
-                } else if (!tags.isVoidTagWithKey(tag_name, tag.key)) {
-                    self.i = self.skipSubtree(tag_name, tag.key, self.i);
+                } else if (!closes_immediately) {
+                    self.i = self.skipSubtree(tag_name, tag.key, self.i, foreign_element);
                 }
                 return;
             }
 
-            if (tags.isVoidTagWithKey(tag_name, tag.key)) return;
+            if (closes_immediately) return;
 
-            if (tags.isPlainTextTagWithKey(tag_name, tag.key)) {
+            if (!foreign_element and tags.isPlainTextTagWithKey(tag_name, tag.key)) {
                 if (self.i < self.source.len) try self.emitText(self.i, self.source.len);
                 self.i = self.source.len;
                 return;
             }
 
-            if (tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
+            if (!foreign_element and tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
                 try self.parseRawText(tag, depth, token_start);
                 return;
             }
 
-            if (self.options.track_nesting) try self.stack.append(self.allocator, .{ .name = ev.name, .key = tag.key, .depth = depth });
+            if (self.options.track_nesting) try self.stack.append(self.allocator, .{ .name = ev.name, .key = tag.key, .depth = depth, .foreign = foreign_element });
+        }
+
+        /// Returns whether a new start tag is parsed in foreign content. SVG's
+        /// `foreignObject` is an HTML integration point for its children.
+        fn currentForeignContext(self: *const Self) bool {
+            if (!self.options.track_nesting or self.stack.items.len <= 1) return false;
+            const open = self.stack.items[self.stack.items.len - 1];
+            if (!open.foreign) return false;
+            const name = open.name.slice(self.source);
+            return !(name.len == 13 and std.ascii.eqlIgnoreCase(name, "foreignObject"));
         }
 
         fn parseEndTag(self: *Self) !void {
@@ -524,7 +538,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             return scanOnlyFindRawTextClose(self.source, name, key, start);
         }
 
-        fn skipSubtree(self: *Self, name: []const u8, key: u64, start: usize) usize {
+        fn skipSubtree(self: *Self, name: []const u8, key: u64, start: usize, foreign_content: bool) usize {
             var depth: usize = 1;
             var i = start;
             while (std.mem.indexOfScalarPos(u8, self.source, i, '<')) |lt| {
@@ -562,12 +576,14 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     const child = self.scanTagName(lt + 1);
                     const end_pos = self.findTagEnd(child.end) orelse return self.source.len;
                     const child_name = self.source[child.start..child.end];
+                    const self_closing = end_pos > child.end and self.source[end_pos - 1] == '/';
                     i = end_pos + 1;
 
-                    if (!tags.isVoidTagWithKey(child_name, child.key)) {
+                    const closes_immediately = if (foreign_content) self_closing else tags.isVoidTagWithKey(child_name, child.key);
+                    if (!closes_immediately) {
                         if (tags.equalByLenAndKeyIgnoreCase(child_name, child.key, name, key)) depth += 1;
-                        if (tags.isPlainTextTagWithKey(child_name, child.key)) return self.source.len;
-                        if (tags.isTextOnlyTagWithKey(child_name, child.key)) {
+                        if (!foreign_content and tags.isPlainTextTagWithKey(child_name, child.key)) return self.source.len;
+                        if (!foreign_content and tags.isTextOnlyTagWithKey(child_name, child.key)) {
                             i = if (self.findRawTextClose(child_name, child.key, i)) |raw_close| raw_close.close_end else self.source.len;
                         }
                     }
@@ -685,6 +701,62 @@ test "trailing slash does not close non-void HTML elements" {
     var ctx: Ctx = .{};
     try parse(std.testing.allocator, "<div/>x</div>", &ctx, Ctx.cb);
     try std.testing.expectEqual(@as(?usize, 1), ctx.text_depth);
+}
+
+test "streaming self-closing syntax closes SVG and MathML elements" {
+    const Ctx = struct {
+        svg_text_depth: ?usize = null,
+        math_text_depth: ?usize = null,
+        implicit_g_end: bool = false,
+        implicit_mrow_end: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .text and std.mem.eql(u8, ev.valueSlice(), "svg-text")) self.svg_text_depth = ev.depth;
+            if (ev.kind == .text and std.mem.eql(u8, ev.valueSlice(), "math-text")) self.math_text_depth = ev.depth;
+            if (ev.kind == .end_tag and ev.implicit and std.mem.eql(u8, ev.nameSlice(), "g")) self.implicit_g_end = true;
+            if (ev.kind == .end_tag and ev.implicit and std.mem.eql(u8, ev.nameSlice(), "mrow")) self.implicit_mrow_end = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<svg><g/>svg-text</svg><math><mrow/>math-text</math>", &ctx, Ctx.cb);
+    try std.testing.expectEqual(@as(?usize, 1), ctx.svg_text_depth);
+    try std.testing.expectEqual(@as(?usize, 1), ctx.math_text_depth);
+    try std.testing.expect(!ctx.implicit_g_end);
+    try std.testing.expect(!ctx.implicit_mrow_end);
+}
+
+test "SVG foreignObject children use HTML self-closing rules" {
+    const Ctx = struct {
+        text_depth: ?usize = null,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .text and std.mem.eql(u8, ev.valueSlice(), "x")) self.text_depth = ev.depth;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<svg><foreignObject><div/>x</div></foreignObject></svg>", &ctx, Ctx.cb);
+    try std.testing.expectEqual(@as(?usize, 3), ctx.text_depth);
+}
+
+test "skipping SVG honors nested self-closing foreign elements" {
+    const Ctx = struct {
+        saw_after: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .start_tag) return true;
+            if (std.mem.eql(u8, ev.nameSlice(), "svg")) return false;
+            if (std.mem.eql(u8, ev.nameSlice(), "div")) self.saw_after = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<svg><svg/></svg><div></div>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.saw_after);
 }
 
 test "streaming attribute iterator accepts framework attribute names" {

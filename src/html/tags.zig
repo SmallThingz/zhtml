@@ -110,6 +110,7 @@ const KEY = struct {
     const UL = litKey("ul");
 
     const SVG = litKey("svg");
+    const MATH = litKey("math");
 };
 
 /// Fast void-tag check with caller-provided key.
@@ -361,6 +362,11 @@ fn closesPWithKey(new_tag: []const u8, new_key: u64) bool {
 /// Fast check for `svg` tag by `(len,key)`.
 pub inline fn isSvgWithKey(name: []const u8, key: u64) bool {
     return name.len == 3 and key == KEY.SVG;
+}
+
+/// Fast check for the MathML `math` integration root by `(len,key)`.
+pub inline fn isMathWithKey(name: []const u8, key: u64) bool {
+    return name.len == 4 and key == KEY.MATH;
 }
 
 test "tag helpers on canonical lowercase names" {
