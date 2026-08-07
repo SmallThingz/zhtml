@@ -932,7 +932,8 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         const NodeTypeWrapper = options.Node();
         const ForwardExecutor = forward.Executor(DocType);
         const Engine = union(enum) {
-            automaton: ForwardExecutor,
+            simple: ForwardExecutor,
+            forward: ForwardExecutor,
             rtl: matcher.MatchWorkspace,
         };
 
@@ -957,17 +958,18 @@ fn GetQueryIter(comptime options: ParseOptions) type {
                 .next_index = next_index,
                 .end_index = end_index,
                 .plan = plan,
-                .engine = if (plan.kind == .rtl)
-                    .{ .rtl = matcher.MatchWorkspace.init(doc.allocator) }
-                else
-                    .{ .automaton = ForwardExecutor.init(doc, selector, plan, scope_root) },
+                .engine = switch (plan.kind) {
+                    .simple => .{ .simple = ForwardExecutor.init(doc, selector, plan, scope_root) },
+                    .forward => .{ .forward = ForwardExecutor.init(doc, selector, plan, scope_root) },
+                    .rtl => .{ .rtl = matcher.MatchWorkspace.init(doc.allocator) },
+                },
             };
         }
 
         /// Releases matcher scratch if iteration stops before exhaustion.
         pub fn deinit(noalias self: *@This()) void {
             switch (self.engine) {
-                .automaton => |*executor| executor.deinit(),
+                .simple, .forward => |*executor| executor.deinit(),
                 .rtl => |*workspace| workspace.deinit(),
             }
         }
@@ -983,7 +985,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
 
             while (self.next_index < self.end_index) : (self.next_index += 1) {
                 const matched = switch (self.engine) {
-                    .automaton => |*executor| try executor.process(self.next_index),
+                    .simple, .forward => |*executor| try executor.process(self.next_index),
                     .rtl => |*workspace| blk: {
                         if (!self.doc.nodeAt(self.next_index).isElement()) break :blk false;
                         if (!matcher.candidateCouldMatch(DocType, self.doc, self.selector, self.next_index)) break :blk false;
@@ -3191,18 +3193,18 @@ test "query iterator lifecycle releases scratch and copies independently" {
     // Dropping an iterator before its first next() is allocation-free.
     {
         const unused = doc.query("span");
-        try std.testing.expect(!unused.engine.automaton.initialized);
+        try std.testing.expect(!unused.engine.simple.initialized);
     }
 
     var early = doc.query("span");
     try std.testing.expect(try early.next() != null);
-    try std.testing.expect(early.engine.automaton.initialized);
+    try std.testing.expect(early.engine.simple.initialized);
     early.deinit();
-    try std.testing.expect(!early.engine.automaton.initialized);
+    try std.testing.expect(!early.engine.simple.initialized);
 
     var exhausted = doc.query(".missing");
     try std.testing.expect(try exhausted.next() == null);
-    try std.testing.expect(!exhausted.engine.automaton.initialized);
+    try std.testing.expect(!exhausted.engine.simple.initialized);
 
     var original = doc.query("span");
     var copied = original;
@@ -3315,13 +3317,22 @@ test "forward query results agree with RTL matching across combinators and struc
         "li + li",
         ".x ~ li",
         "main > section ul > li + li",
+        "main > section li",
+        "main section > ul",
+        "li + li > span",
+        "li ~ li span",
+        "ul > li + li",
+        "li + li ~ li",
+        "li ~ li + li",
         "li:first-child",
+        "li:nth-child(1)",
         "li:nth-child(2)",
         "li:nth-child(2n+1)",
         "li:nth-child(-n+2)",
         "li:last-child span",
         "p + em, li.y",
         "main > section, p.x + em",
+        "main, section, ul, li, article, p, em, span, body",
     };
 
     for (selectors) |source| {
@@ -3386,6 +3397,37 @@ test "forward plan boundary uses automaton through 64 compounds and RTL after it
     var selector64 = try ast.Selector.compileRuntime(alloc, source64.items);
     defer selector64.deinit(alloc);
     try std.testing.expectEqual(forward.Kind.forward, forward.buildPlan(selector64).kind);
+
+    var source63 = std.ArrayList(u8).empty;
+    defer source63.deinit(alloc);
+    for (0..63) |i| {
+        if (i != 0) try source63.append(alloc, ' ');
+        try source63.appendSlice(alloc, "div");
+    }
+    var selector63 = try ast.Selector.compileRuntime(alloc, source63.items);
+    defer selector63.deinit(alloc);
+    try std.testing.expectEqual(forward.Kind.forward, forward.buildPlan(selector63).kind);
+
+    var html_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer html_writer.deinit();
+    for (0..64) |_| try html_writer.writer.writeAll("<div>");
+    for (0..64) |_| try html_writer.writer.writeAll("</div>");
+    const html = try html_writer.toOwnedSlice();
+    defer alloc.free(html);
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    try resetParsed(.{}, &doc, html);
+
+    var forward_it = doc.queryRuntime(selector64);
+    defer forward_it.deinit();
+    var forward_count: usize = 0;
+    while (try forward_it.next()) |_| forward_count += 1;
+    var rtl_count: usize = 0;
+    var idx: IndexInt = 1;
+    while (idx < doc.nodes.len) : (idx += 1) {
+        if (try matcher.matchesSelectorAt(GetDocument(.{}), &doc, selector64, idx, 0)) rtl_count += 1;
+    }
+    try std.testing.expectEqual(rtl_count, forward_count);
 
     var source = std.ArrayList(u8).empty;
     defer source.deinit(alloc);

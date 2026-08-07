@@ -27,6 +27,62 @@ fn firstQuery(iter: anytype) @TypeOf(blk: {
     return it.next() catch unreachable;
 }
 
+fn timeQueryAll(io: std.Io, doc: anytype, comptime selector: []const u8, iterations: usize) !i96 {
+    var matched: usize = 0;
+    const start = nowNs(io);
+    for (0..iterations) |_| {
+        var it = doc.query(selector);
+        defer it.deinit();
+        while (try it.next()) |_| matched += 1;
+    }
+    const elapsed = nowNs(io) - start;
+    std.mem.doNotOptimizeAway(matched);
+    return elapsed;
+}
+
+fn runForwardQueryScaling(io: std.Io, allocator: std.mem.Allocator, sibling_count: usize, iterations: usize) !void {
+    var source_writer: std.Io.Writer.Allocating = .init(allocator);
+    defer source_writer.deinit();
+    try source_writer.writer.writeAll("<div><span class=a></span>");
+    for (1..sibling_count) |_| try source_writer.writer.writeAll("<span></span>");
+    try source_writer.writer.writeAll("</div>");
+    const source = try source_writer.toOwnedSlice();
+    defer allocator.free(source);
+
+    const options: root.ParseOptions = .{};
+    var doc = try options.parse(allocator, source);
+    defer doc.deinit();
+    inline for (.{
+        ".a + span",
+        ".a ~ span",
+        "span:first-child",
+        "span:nth-child(50000)",
+        "span:nth-child(2n+1)",
+        "span",
+        ".a",
+        "#missing",
+        "span[class]",
+    }) |selector| {
+        const elapsed = try timeQueryAll(io, &doc, selector, iterations);
+        std.debug.print("forward-wide\t{s}\tnodes={}\titerations={}\tns={}\n", .{ selector, sibling_count, iterations, elapsed });
+    }
+
+    inline for (.{ 10, 100, 1000 }) |depth| {
+        var deep_writer: std.Io.Writer.Allocating = .init(allocator);
+        defer deep_writer.deinit();
+        for (0..depth) |i| try deep_writer.writer.writeAll(if (i % 4 == 0) "<div class=a>" else if (i % 4 == 3) "<div class=d>" else "<div>");
+        for (0..depth) |_| try deep_writer.writer.writeAll("</div>");
+        const deep_source = try deep_writer.toOwnedSlice();
+        defer allocator.free(deep_source);
+        var deep_doc = try options.parse(allocator, deep_source);
+        defer deep_doc.deinit();
+        inline for (.{ ".a .d", ".a > div", ".a div div .d" }) |selector| {
+            const elapsed = try timeQueryAll(io, &deep_doc, selector, iterations);
+            std.debug.print("forward-deep\t{s}\tdepth={}\titerations={}\tns={}\n", .{ selector, depth, iterations, elapsed });
+        }
+    }
+}
+
 /// Runs a built-in synthetic parse/query workload and prints elapsed ns.
 pub fn runSynthetic(io: std.Io) !void {
     const alloc = std.heap.smp_allocator;
@@ -282,6 +338,13 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (args.len == 4 and std.mem.eql(u8, args[1], "forward-query")) {
+        const sibling_count = try std.fmt.parseInt(usize, args[2], 10);
+        const iterations = try std.fmt.parseInt(usize, args[3], 10);
+        try runForwardQueryScaling(io, init.arena.allocator(), sibling_count, iterations);
+        return;
+    }
+
     if (args.len == 4 and std.mem.eql(u8, args[1], "query-parse")) {
         const iterations = try std.fmt.parseInt(usize, args[3], 10);
         const total_ns = try runQueryParse(io, args[2], iterations);
@@ -335,8 +398,8 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len != 3) {
         std.debug.print(
-            "usage:\n  {s} protocol\n  {s} <html-file> <iterations>\n  {s} parse <strictest|fastest|full|stream> <html-file> <iterations>\n  {s} query-parse <selector> <iterations>\n  {s} query-match <html-file> <selector> <iterations>\n  {s} query-match <strictest|fastest|full> <html-file> <selector> <iterations>\n  {s} query-cached <html-file> <selector> <iterations>\n  {s} query-cached <strictest|fastest|full> <html-file> <selector> <iterations>\n",
-            .{ args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0] },
+            "usage:\n  {s} protocol\n  {s} forward-query <siblings> <iterations>\n  {s} <html-file> <iterations>\n  {s} parse <strictest|fastest|full|stream> <html-file> <iterations>\n  {s} query-parse <selector> <iterations>\n  {s} query-match <html-file> <selector> <iterations>\n  {s} query-match <strictest|fastest|full> <html-file> <selector> <iterations>\n  {s} query-cached <html-file> <selector> <iterations>\n  {s} query-cached <strictest|fastest|full> <html-file> <selector> <iterations>\n",
+            .{ args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0] },
         );
         std.process.exit(2);
     }
