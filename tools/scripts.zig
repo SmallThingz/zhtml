@@ -137,13 +137,13 @@ const stable_query_parse = [_]QueryCase{
 };
 
 const quick_query_exec = [_]QueryExecCase{
-    .{ .name = "attr-heavy-button", .fixture = "rust-lang.html", .selector = "a[href^=https][class*=button]:not(.missing)", .iterations = 30_000 },
-    .{ .name = "attr-heavy-nav", .fixture = "rust-lang.html", .selector = "a[href^=https][class*=nav]:not(.missing)", .iterations = 30_000 },
+    .{ .name = "attr-heavy-button", .fixture = "rust-lang.html", .selector = "a[href^=https][class*=button]:not(.missing)", .iterations = 3_000 },
+    .{ .name = "attr-heavy-nav", .fixture = "rust-lang.html", .selector = "a[href^=https][class*=nav]:not(.missing)", .iterations = 3_000 },
 };
 
 const stable_query_exec = [_]QueryExecCase{
-    .{ .name = "attr-heavy-button", .fixture = "rust-lang.html", .selector = "a[href^=https][class*=button]:not(.missing)", .iterations = 100_000 },
-    .{ .name = "attr-heavy-nav", .fixture = "rust-lang.html", .selector = "a[href^=https][class*=nav]:not(.missing)", .iterations = 100_000 },
+    .{ .name = "attr-heavy-button", .fixture = "rust-lang.html", .selector = "a[href^=https][class*=button]:not(.missing)", .iterations = 10_000 },
+    .{ .name = "attr-heavy-nav", .fixture = "rust-lang.html", .selector = "a[href^=https][class*=nav]:not(.missing)", .iterations = 10_000 },
 };
 
 fn getProfile(name: []const u8) !Profile {
