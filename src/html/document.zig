@@ -543,18 +543,18 @@ fn GetNode(comptime options: ParseOptions) type {
         };
 
         /// Writes HTML serialization of this node and its subtree to `writer`.
-        pub fn writeHtml(self: @This(), writer: anytype) WriterError(@TypeOf(writer))!void {
-            try writeNodeHtml(self.doc, self.index, self.raw(), writer, true);
+        pub fn writeHtml(self: @This(), writer: anytype, comptime encode_entities: bool) WriterError(@TypeOf(writer))!void {
+            try writeNodeHtml(self.doc, self.index, self.raw(), writer, true, encode_entities);
         }
 
         /// Writes HTML serialization of this node only, excluding its children.
-        pub fn writeSelfHtml(self: @This(), writer: anytype) WriterError(@TypeOf(writer))!void {
-            try writeNodeHtml(self.doc, self.index, self.raw(), writer, false);
+        pub fn writeSelfHtml(self: @This(), writer: anytype, comptime encode_entities: bool) WriterError(@TypeOf(writer))!void {
+            try writeNodeHtml(self.doc, self.index, self.raw(), writer, false, encode_entities);
         }
 
         /// Default formatter uses HTML serialization for this node.
         pub fn format(self: *const @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            return self.writeHtml(writer);
+            return self.writeHtml(writer, false);
         }
 
         /// Writes one node as HTML, optionally including its full subtree.
@@ -564,9 +564,16 @@ fn GetNode(comptime options: ParseOptions) type {
             noalias node_raw: anytype,
             writer: anytype,
             include_children: bool,
+            comptime encode_entities: bool,
         ) WriterError(@TypeOf(writer))!void {
             if (node_raw.isText(idx)) {
-                try writer.writeAll(node_raw.name_or_text.slice(doc.source));
+                if (comptime encode_entities and !options.non_destructive) materializeRwText(doc, idx, true, false);
+                const text_bytes = node_raw.name_or_text.slice(doc.source);
+                if (comptime encode_entities and !options.non_destructive) {
+                    try writeEscapedText(writer, text_bytes);
+                } else {
+                    try writer.writeAll(text_bytes);
+                }
                 return;
             }
 
@@ -589,7 +596,13 @@ fn GetNode(comptime options: ParseOptions) type {
 
                 const child = &doc.nodes[next_idx];
                 if (child.isText(next_idx)) {
-                    try writer.writeAll(child.name_or_text.slice(doc.source));
+                    if (comptime encode_entities and !options.non_destructive) materializeRwText(doc, next_idx, true, false);
+                    const text_bytes = child.name_or_text.slice(doc.source);
+                    if (comptime encode_entities and !options.non_destructive) {
+                        try writeEscapedText(writer, text_bytes);
+                    } else {
+                        try writer.writeAll(text_bytes);
+                    }
                     continue;
                 }
 
@@ -710,6 +723,18 @@ fn GetNode(comptime options: ParseOptions) type {
                     '&' => try writer.writeAll("&amp;"),
                     '<' => try writer.writeAll("&lt;"),
                     '"' => try writer.writeAll("&quot;"),
+                    else => try writeByte(writer, c),
+                }
+            }
+        }
+
+        /// Escapes decoded text bytes that can be interpreted as HTML markup.
+        fn writeEscapedText(writer: anytype, value: []const u8) WriterError(@TypeOf(writer))!void {
+            for (value) |c| {
+                switch (c) {
+                    '&' => try writer.writeAll("&amp;"),
+                    '<' => try writer.writeAll("&lt;"),
+                    '>' => try writer.writeAll("&gt;"),
                     else => try writeByte(writer, c),
                 }
             }
@@ -1086,17 +1111,17 @@ fn GetDocument(comptime options: ParseOptions) type {
         }
 
         /// Writes HTML serialization of this node and its subtree to `writer`.
-        pub fn writeHtml(self: *const @This(), writer: anytype) NodeTypeWrapper.WriterError(@TypeOf(writer))!void {
+        pub fn writeHtml(self: *const @This(), writer: anytype, comptime encode_entities: bool) NodeTypeWrapper.WriterError(@TypeOf(writer))!void {
             if (comptime options.non_destructive) {
                 try writer.writeAll(self.source);
                 return;
             }
-            return self.root().writeHtml(writer);
+            return self.root().writeHtml(writer, encode_entities);
         }
 
         /// Default formatter uses HTML serialization for this node.
         pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            return self.writeHtml(writer);
+            return self.writeHtml(writer, false);
         }
     };
 }
@@ -1942,8 +1967,39 @@ test "RW serialization reconstructs markup replaced by a text marker" {
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try p.writeHtml(&out.writer);
+    try p.writeHtml(&out.writer, false);
     try std.testing.expectEqualStrings("<p>a&b</p>", out.written());
+}
+
+test "writeHtml optionally encodes materialized text while format keeps raw behavior" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div>a&lt;b & c &gt; d</div>".*;
+    try resetParsed(.{}, &doc, &html);
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try div.writeHtml(&encoded.writer, true);
+    try std.testing.expectEqualStrings("<div>a&lt;b &amp; c &gt; d</div>", encoded.written());
+
+    const formatted = try std.fmt.allocPrint(alloc, "{f}", .{div});
+    defer alloc.free(formatted);
+    try std.testing.expectEqualStrings("<div>a<b & c > d</div>", formatted);
+}
+
+test "read-only writeHtml keeps exact encoded source for either encoding choice" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{ .non_destructive = true }).init(alloc);
+    defer doc.deinit();
+    const html = "<div>a&lt;b &amp; c</div>";
+    try resetParsed(.{ .non_destructive = true }, &doc, html);
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try doc.writeHtml(&out.writer, true);
+    try std.testing.expectEqualStrings(html, out.written());
 }
 
 test "inplace attribute parser treats explicit empty assignment as name-only" {
@@ -2504,7 +2560,7 @@ test "writeHtml handles deep documents without recursive calls" {
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try doc.writeHtml(&out.writer);
+    try doc.writeHtml(&out.writer, false);
     try std.testing.expectEqualStrings(input, out.written());
 }
 
