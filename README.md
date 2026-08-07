@@ -7,7 +7,7 @@ High-throughput HTML parser + CSS selector engine for Zig.
 
 ## ⚠️ Conformance Warning
 
-Performance numbers are **not** conformance claims. The parser is intentionally permissive and currently does not fully match browser-grade tree-construction behavior.
+The parser is intentionally permissive and currently does not fully match browser-grade tree-construction behavior.
 
 - Conformance details: [Documentation#conformance-status](./DOCUMENTATION.md#conformance-status)
 - Benchmark methodology: [Documentation#performance-and-benchmarks](./DOCUMENTATION.md#performance-and-benchmarks)
@@ -24,10 +24,10 @@ Source: `bench/results/latest.json` (`stable` profile).
 ### Parse Throughput (Average Across Fixtures)
 
 ```text
-ours-stream  │████████████████████│ 2120.88 MB/s (100.00%)
-ours-compact │███████████████░░░░░│ 1585.63 MB/s (74.76%)
-ours-full    │██████████████░░░░░░│ 1534.22 MB/s (72.34%)
-lol-html     │█████████░░░░░░░░░░░│ 938.27 MB/s (44.24%)
+ours-stream  │████████████████████│ 3381.21 MB/s (100.00%)
+ours-compact │██████████░░░░░░░░░░│ 1644.69 MB/s (48.64%)
+ours-full    │██████████░░░░░░░░░░│ 1630.03 MB/s (48.21%)
+lol-html     │██████░░░░░░░░░░░░░░│ 1034.52 MB/s (30.60%)
 ```
 
 ### Conformance Snapshot
