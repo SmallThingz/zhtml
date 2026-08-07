@@ -336,13 +336,17 @@ fn closesPWithKey(new_tag: []const u8, new_key: u64) bool {
         6 => switch (new_key) {
             KEY.FOOTER,
             KEY.HEADER,
+            => true,
+            else => false,
+        },
+        7 => switch (new_key) {
             KEY.ADDRESS,
             KEY.ARTICLE,
             KEY.SECTION,
             => true,
             else => false,
         },
-        7 => switch (new_key) {
+        8 => switch (new_key) {
             KEY.FIELDSET => true,
             else => false,
         },
@@ -368,6 +372,10 @@ test "tag helpers on canonical lowercase names" {
     try std.testing.expect(isEscapableRawTextTagWithKey("textarea", first8Key("textarea")));
     try std.testing.expect(isTextOnlyTagWithKey("textarea", first8Key("textarea")));
     try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "blockquote", KEY.BLOCKQUOTE));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "address", KEY.ADDRESS));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "article", KEY.ARTICLE));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "section", KEY.SECTION));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "fieldset", KEY.FIELDSET));
 }
 
 test "first8KeyWithMode canonicalizes only in non-destructive mode" {
