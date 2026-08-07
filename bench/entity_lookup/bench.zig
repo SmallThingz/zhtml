@@ -1,5 +1,6 @@
 const std = @import("std");
 const data = @import("data.zig");
+const generated = @import("generated/named_entities.zig");
 
 const Lookup = *const fn ([]const u8) ?[]const u8;
 var std_full: std.StringHashMapUnmanaged(u16) = .empty;
@@ -67,7 +68,7 @@ fn verify() !void {
         const index: u16 = @intCast(i);
         const name = entryName(index);
         const expected = entryValue(index);
-        inline for (.{ lookupHash, lookupHashFull, lookupStdSharded, lookupStdFull, lookupStaticStd }) |lookup| {
+        inline for (.{ lookupHash, lookupHashFull, lookupStdSharded, lookupStdFull, lookupStaticStd, generated.lookup }) |lookup| {
             const actual = lookup(name) orelse return error.MissingEntity;
             if (!std.mem.eql(u8, expected, actual)) return error.WrongEntity;
         }
@@ -140,6 +141,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "std-sharded", lookupStdSharded },
         .{ "std-unsharded", lookupStdFull },
         .{ "static-std-unsharded", lookupStaticStd },
+        .{ "gperf", generated.lookup },
     }) |variant| {
         runCase(init.io, variant[0] ++ "/common", variant[1], &common, iterations);
         runCase(init.io, variant[0] ++ "/uncommon", variant[1], &uncommon, iterations);

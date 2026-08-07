@@ -11,7 +11,7 @@ test {
 }
 const IndexInt = @import("../common.zig").IndexInt;
 const tables = @import("tables.zig");
-const named_entities = @import("named_entities.zig");
+const named_entities = @import("../../bench/entity_lookup/generated/named_entities.zig");
 const InvalidDigit = 0xff;
 const ReplacementUtf8 = [3]u8{ 0xEF, 0xBF, 0xBD };
 comptime {

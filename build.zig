@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
     config_options.addOption(IntLen, "intlen", intlen);
 
     const mod = b.addModule("html", .{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("root.zig"),
         .target = target,
     });
     mod.addOptions("config", config_options);
@@ -62,6 +62,9 @@ pub fn build(b: *std.Build) void {
     const conformance_step = b.step("conformance", "Run external parser/selector conformance suites (strictest+fastest)");
     const docs_check_step = b.step("docs-check", "Validate markdown links and documented commands");
     const examples_check_step = b.step("examples-check", "Compile and run all examples in test mode");
+    const generate_entities_step = b.step("generate-entities", "Regenerate and format the GNU gperf named-entity lookup");
+    const generate_entities_cmd = b.addSystemCommand(&.{ "python3", "bench/entity_lookup/generate.py" });
+    generate_entities_step.dependOn(&generate_entities_cmd.step);
 
     const tools_cmd = b.addRunArtifact(tools_exe);
 

@@ -1962,7 +1962,7 @@ fn ensureSuites(io: std.Io, alloc: std.mem.Allocator) !void {
 fn buildSuiteRunner(io: std.Io, alloc: std.mem.Allocator) !void {
     try common.ensureDir(io, BIN_DIR);
     const root_mod = "-Mroot=tools/suite_runner.zig";
-    const html_mod = "-Mhtml=src/root.zig";
+    const html_mod = "-Mhtml=root.zig";
     const config_path = try tempConfigModule(io, alloc);
     defer {
         std.Io.Dir.deleteFileAbsolute(io, config_path) catch {};
@@ -3070,7 +3070,7 @@ fn runExamplesCheck(io: std.Io, alloc: std.mem.Allocator) !void {
         std.debug.print("examples-check: zig test {s}\n", .{example_path});
         const root_mod = try std.fmt.allocPrint(alloc, "-Mroot={s}", .{example_path});
         defer alloc.free(root_mod);
-        const html_mod = "-Mhtml=src/root.zig";
+        const html_mod = "-Mhtml=root.zig";
         const argv = [_][]const u8{
             "zig",
             "test",
