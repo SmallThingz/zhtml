@@ -247,49 +247,49 @@ Source: `bench/results/latest.json` (`stable` profile).
 
 | Fixture | ours-compact | ours-full | ours-stream | lol-html |
 |---|---:|---:|---:|---:|
-| `rust-lang.html` | 2551.41 | 2258.34 | 3848.05 | 1520.92 |
-| `wiki-html.html` | 2074.57 | 2057.82 | 3125.77 | 1265.15 |
-| `mdn-html.html` | 3191.28 | 2834.23 | 5240.79 | 1927.18 |
-| `w3-html52.html` | 675.66 | 663.52 | 2131.56 | 772.17 |
-| `hn.html` | 1673.08 | 1622.74 | 3653.35 | 918.62 |
-| `python-org.html` | 2063.34 | 1909.97 | 3760.95 | 1345.74 |
-| `kernel-org.html` | 1947.06 | 1858.58 | 3859.29 | 1286.20 |
-| `gnu-org.html` | 2563.67 | 2446.55 | 3708.20 | 1498.93 |
-| `ziglang-org.html` | 2062.25 | 1865.78 | 3350.77 | 1232.63 |
-| `ziglang-doc-master.html` | 1448.51 | 1394.90 | 1579.24 | 1115.15 |
-| `wikipedia-unicode-list.html` | 1830.89 | 1761.08 | 3702.07 | 1143.63 |
-| `whatwg-html-spec.html` | 1414.20 | 1380.79 | 2036.42 | 950.32 |
-| `synthetic-forms.html` | 1370.89 | 1356.63 | 3911.47 | 810.67 |
-| `synthetic-table-grid.html` | 1282.36 | 1211.51 | 4104.95 | 735.01 |
-| `synthetic-list-nested.html` | 1291.29 | 1266.80 | 2815.07 | 683.38 |
-| `synthetic-comments-doctype.html` | 2139.07 | 2055.79 | 2179.03 | 991.50 |
-| `synthetic-template-rich.html` | 983.22 | 971.76 | 1769.36 | 503.59 |
-| `synthetic-whitespace-noise.html` | 1690.75 | 1494.14 | 2419.17 | 1079.97 |
-| `synthetic-news-feed.html` | 1252.03 | 1287.15 | 2778.41 | 686.72 |
-| `synthetic-ecommerce.html` | 1263.13 | 1215.46 | 2705.85 | 678.73 |
-| `synthetic-forum-thread.html` | 1273.34 | 1254.78 | 2576.29 | 672.91 |
+| `rust-lang.html` | 2517.07 | 2578.45 | 4575.37 | 1546.16 |
+| `wiki-html.html` | 2204.17 | 2200.33 | 3255.77 | 1265.58 |
+| `mdn-html.html` | 3265.24 | 3290.16 | 5812.37 | 1943.81 |
+| `w3-html52.html` | 1380.86 | 1309.78 | 2094.40 | 775.09 |
+| `hn.html` | 1733.81 | 1703.35 | 3780.63 | 922.94 |
+| `python-org.html` | 2058.50 | 2111.36 | 4147.89 | 1373.69 |
+| `kernel-org.html` | 1996.32 | 2053.47 | 4234.35 | 1336.65 |
+| `gnu-org.html` | 2702.59 | 2632.61 | 4061.70 | 1482.82 |
+| `ziglang-org.html` | 2129.44 | 2123.84 | 3864.89 | 1268.20 |
+| `ziglang-doc-master.html` | 1512.06 | 1476.31 | 1619.37 | 1104.65 |
+| `wikipedia-unicode-list.html` | 1892.12 | 1853.15 | 3748.80 | 1144.68 |
+| `whatwg-html-spec.html` | 1479.29 | 1451.98 | 2035.63 | 947.83 |
+| `synthetic-forms.html` | 1383.23 | 1342.29 | 3641.91 | 804.80 |
+| `synthetic-table-grid.html` | 1342.73 | 1310.68 | 4161.03 | 736.62 |
+| `synthetic-list-nested.html` | 1381.87 | 1380.26 | 2921.49 | 684.38 |
+| `synthetic-comments-doctype.html` | 2371.68 | 2270.40 | 1968.91 | 983.54 |
+| `synthetic-template-rich.html` | 1077.92 | 1029.01 | 1789.13 | 502.36 |
+| `synthetic-whitespace-noise.html` | 1670.49 | 1686.32 | 2951.79 | 1088.03 |
+| `synthetic-news-feed.html` | 1405.70 | 1379.03 | 2784.49 | 676.05 |
+| `synthetic-ecommerce.html` | 1352.52 | 1292.44 | 2671.20 | 675.21 |
+| `synthetic-forum-thread.html` | 1346.62 | 1325.35 | 2635.84 | 672.39 |
 
 #### Query Match Throughput
 
 | Case | compact ops/s | compact ns/op | full ops/s | full ns/op |
 |---|---:|---:|---:|---:|
-| `attr-heavy-button` | 277420.88 | 3604.63 | 283703.45 | 3524.81 |
-| `attr-heavy-nav` | 131989.65 | 7576.35 | 133334.26 | 7499.95 |
+| `attr-heavy-button` | 233888.52 | 4275.54 | 251080.63 | 3982.78 |
+| `attr-heavy-nav` | 118439.61 | 8443.12 | 122798.30 | 8143.44 |
 
 #### Cached Query Throughput
 
 | Case | compact ops/s | compact ns/op | full ops/s | full ns/op |
 |---|---:|---:|---:|---:|
-| `attr-heavy-button` | 275710.24 | 3627.00 | 285171.60 | 3506.66 |
-| `attr-heavy-nav` | 134390.09 | 7441.02 | 134092.11 | 7457.56 |
+| `attr-heavy-button` | 237637.87 | 4208.08 | 249515.17 | 4007.77 |
+| `attr-heavy-nav` | 118122.47 | 8465.79 | 122964.84 | 8132.41 |
 
 #### Query Parse Throughput (ours)
 
 | Selector case | Ops/s | ns/op |
 |---|---:|---:|
-| `simple` | 10493031.89 | 95.30 |
-| `complex` | 5493508.59 | 182.03 |
-| `grouped` | 7119246.29 | 140.46 |
+| `simple` | 10396947.12 | 96.18 |
+| `complex` | 5538481.26 | 180.55 |
+| `grouped` | 7165057.31 | 139.57 |
 
 For full per-parser, per-fixture tables and gate output:
 - `bench/results/latest.md`
