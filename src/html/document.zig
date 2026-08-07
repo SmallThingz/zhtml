@@ -3445,7 +3445,80 @@ test "forward plan boundary uses inline state through 64 compounds and wide stat
     try std.testing.expectEqual(@as(usize, 0), wide_count);
 }
 
-test "RTL descendant failure memoizes ambiguous states instead of enumerating paths" {
+test "forward automaton processes and emits nested matches exactly once" {
+    const alloc = std.testing.allocator;
+    var html_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer html_writer.deinit();
+    for (0..128) |_| try html_writer.writer.writeAll("<div>");
+    for (0..128) |_| try html_writer.writer.writeAll("</div>");
+    const html = try html_writer.toOwnedSlice();
+    defer alloc.free(html);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    try resetParsed(.{}, &doc, html);
+
+    var it = doc.query("div div");
+    defer it.deinit();
+    var emitted: usize = 0;
+    while (try it.next()) |_| emitted += 1;
+    try std.testing.expectEqual(@as(usize, 127), emitted);
+    try std.testing.expectEqual(@as(usize, 128), it.engine.forward.stats.nodes_processed);
+    try std.testing.expectEqual(@as(usize, 127), it.engine.forward.stats.nodes_emitted);
+    try std.testing.expectEqual(@as(usize, 128), it.engine.forward.stats.local_unique_predicate_evals);
+}
+
+test "selector-list overlap emits each candidate once" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div><div><div></div></div></div>".*;
+    try resetParsed(.{}, &doc, &html);
+
+    var it = doc.query("div, div, div div, div div div");
+    defer it.deinit();
+    var indexes: [3]IndexInt = undefined;
+    var count: usize = 0;
+    while (try it.next()) |node| {
+        indexes[count] = node.index;
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+    try std.testing.expectEqualSlices(IndexInt, &.{ 1, 2, 3 }, indexes[0..count]);
+}
+
+test "wide RTL automaton shifts predecessor state across word boundaries" {
+    const alloc = std.testing.allocator;
+    var html_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer html_writer.deinit();
+    var selector_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer selector_writer.deinit();
+    for (0..65) |i| {
+        try html_writer.writer.writeAll("<div>");
+        if (i != 0) try selector_writer.writer.writeByte(' ');
+        try selector_writer.writer.writeAll("div");
+    }
+    for (0..65) |_| try html_writer.writer.writeAll("</div>");
+    const html = try html_writer.toOwnedSlice();
+    defer alloc.free(html);
+    const selector_source = try selector_writer.toOwnedSlice();
+    defer alloc.free(selector_source);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    try resetParsed(.{}, &doc, html);
+    var selector = try ast.Selector.compileRuntime(alloc, selector_source);
+    defer selector.deinit(alloc);
+    var workspace = matcher.MatchWorkspace.init(alloc);
+    defer workspace.deinit();
+
+    try std.testing.expect(try matcher.matchesSelectorAtWithWorkspace(GetDocument(.{}), &doc, selector, @intCast(doc.nodes.len - 1), InvalidIndex, &workspace));
+    try std.testing.expectEqual(@as(usize, 65), workspace.stats.reverse_nodes_processed);
+    try std.testing.expectEqual(@as(usize, 0), workspace.stats.reverse_node_duplicate_processes);
+    try std.testing.expectEqual(@as(usize, 65), workspace.stats.local_unique_predicate_evals);
+}
+
+test "RTL descendant failure merges ambiguous states and processes each node once" {
     const alloc = std.testing.allocator;
     var html_writer: std.Io.Writer.Allocating = .init(alloc);
     defer html_writer.deinit();
@@ -3468,12 +3541,12 @@ test "RTL descendant failure memoizes ambiguous states instead of enumerating pa
     var workspace = matcher.MatchWorkspace.init(alloc);
     defer workspace.deinit();
     try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(GetDocument(.{}), &doc, selector, @intCast(doc.nodes.len - 1), InvalidIndex, &workspace));
-    try std.testing.expect(workspace.stats.rtl_segment_cache_hits + workspace.stats.rtl_ancestor_summary_cache_hits != 0);
-    try std.testing.expect(workspace.stats.rtl_segment_first_evals <= 128 * 64);
-    try std.testing.expect(workspace.stats.rtl_ancestor_summary_first_evals <= 128 * 64);
+    try std.testing.expectEqual(@as(usize, 128), workspace.stats.reverse_nodes_processed);
+    try std.testing.expectEqual(@as(usize, 0), workspace.stats.reverse_node_duplicate_processes);
+    try std.testing.expect(workspace.stats.local_unique_predicate_evals <= 128 * 2);
 }
 
-test "RTL sibling failure uses witness summaries and optional topology" {
+test "RTL sibling failure merges witnesses and uses optional topology" {
     const alloc = std.testing.allocator;
     var html_writer: std.Io.Writer.Allocating = .init(alloc);
     defer html_writer.deinit();
@@ -3496,7 +3569,8 @@ test "RTL sibling failure uses witness summaries and optional topology" {
     var compact_workspace = matcher.MatchWorkspace.init(alloc);
     defer compact_workspace.deinit();
     try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(@TypeOf(compact_doc), &compact_doc, selector, @intCast(compact_doc.nodes.len - 1), InvalidIndex, &compact_workspace));
-    try std.testing.expect(compact_workspace.stats.rtl_sibling_summary_first_evals <= 128 * 64);
+    try std.testing.expectEqual(@as(usize, 128), compact_workspace.stats.reverse_nodes_processed);
+    try std.testing.expectEqual(@as(usize, 0), compact_workspace.stats.reverse_node_duplicate_processes);
     try std.testing.expectEqual(@as(usize, 1), compact_workspace.stats.topology_parent_builds);
     try std.testing.expectEqual(@as(usize, 128), compact_workspace.stats.topology_child_visits);
 
@@ -3506,6 +3580,8 @@ test "RTL sibling failure uses witness summaries and optional topology" {
     var linked_workspace = matcher.MatchWorkspace.init(alloc);
     defer linked_workspace.deinit();
     try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(@TypeOf(linked_doc), &linked_doc, selector, @intCast(linked_doc.nodes.len - 1), InvalidIndex, &linked_workspace));
+    try std.testing.expectEqual(@as(usize, 128), linked_workspace.stats.reverse_nodes_processed);
+    try std.testing.expectEqual(@as(usize, 0), linked_workspace.stats.reverse_node_duplicate_processes);
     try std.testing.expectEqual(@as(usize, 0), linked_workspace.stats.topology_parent_builds);
 }
 

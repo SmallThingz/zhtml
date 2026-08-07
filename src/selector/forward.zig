@@ -130,6 +130,13 @@ pub const Frame = struct {
     element_child_count: usize = 0,
 };
 
+pub const Stats = struct {
+    nodes_processed: usize = 0,
+    state_word_ops: usize = 0,
+    local_unique_predicate_evals: usize = 0,
+    nodes_emitted: usize = 0,
+};
+
 pub fn Executor(comptime Doc: type) type {
     return struct {
         doc: *const Doc,
@@ -139,7 +146,9 @@ pub fn Executor(comptime Doc: type) type {
         root: Frame = .{},
         stack: std.ArrayListUnmanaged(Frame) = .empty,
         node_ctx: matcher.ForwardNodeContext = .{},
+        predicate_plan: matcher.PredicatePlan = .{},
         seed_workspace: matcher.MatchWorkspace,
+        stats: Stats = .{},
         initialized: bool = false,
 
         const Self = @This();
@@ -157,6 +166,7 @@ pub fn Executor(comptime Doc: type) type {
         pub fn deinit(self: *Self) void {
             self.stack.deinit(self.doc.allocator);
             self.node_ctx.deinit();
+            self.predicate_plan.deinit(self.doc.allocator);
             self.seed_workspace.deinit();
             self.stack = .empty;
             self.initialized = false;
@@ -168,6 +178,7 @@ pub fn Executor(comptime Doc: type) type {
             self.syncStack(idx);
             const raw = &self.doc.nodes[idx];
             if (!raw.isElement(idx)) return false;
+            self.stats.nodes_processed += 1;
 
             var parent = self.currentParent();
             var child_position: usize = 0;
@@ -189,16 +200,33 @@ pub fn Executor(comptime Doc: type) type {
                     .lineage_matches = lineage,
                 });
             }
-            return (matched & self.plan.final_mask) != 0;
+            self.stats.state_word_ops += 6;
+            const is_match = (matched & self.plan.final_mask) != 0;
+            if (is_match) self.stats.nodes_emitted += 1;
+            return is_match;
         }
 
         fn processSimple(self: *Self, idx: IndexInt) !bool {
             const raw = &self.doc.nodes[idx];
             if (!raw.isElement(idx)) return false;
-            var eligible_bits = self.plan.start_none | self.plan.start_descendant;
-            if (raw.parent == self.scope_root) eligible_bits |= self.plan.start_child;
-            const matched = try self.evaluateEligible(idx, eligible_bits, 0);
-            return (matched & self.plan.final_mask) != 0;
+            self.stats.nodes_processed += 1;
+            self.node_ctx.begin(self.doc.allocator, 0);
+            for (self.selector.groups) |group| {
+                if (group.compound_len != 1) continue;
+                const comp = self.selector.compounds[group.compound_start];
+                const anchored = switch (comp.combinator) {
+                    .none, .descendant => true,
+                    .child => raw.parent == self.scope_root,
+                    .adjacent, .sibling => false,
+                };
+                if (anchored and try matcher.matchesCompoundForward(Doc, self.doc, self.selector, comp, idx, &self.node_ctx)) {
+                    self.stats.local_unique_predicate_evals += 1;
+                    self.stats.nodes_emitted += 1;
+                    return true;
+                }
+                self.stats.local_unique_predicate_evals += 1;
+            }
+            return false;
         }
 
         fn ensureInitialized(self: *Self) !void {
@@ -256,24 +284,24 @@ pub fn Executor(comptime Doc: type) type {
         }
 
         fn evaluateEligible(self: *Self, node_index: IndexInt, eligible_bits: u64, child_position: usize) !u64 {
-            var pending = eligible_bits;
-            const node_name = self.doc.nodes[node_index].name_or_text.slice(self.doc.source);
-            var candidates: u64 = 0;
-            while (pending != 0) {
-                const index: usize = @intCast(@ctz(pending));
-                pending &= pending - 1;
-                const comp = self.selector.compounds[index];
-                if (!comp.hasTag() or matcher.tagMatches(Doc, self.selector.source, comp, node_name)) candidates |= bit(index);
-            }
-            if (candidates == 0) return 0;
-
+            if (eligible_bits == 0) return 0;
+            if (self.predicate_plan.state_ids.len == 0) self.predicate_plan = try matcher.PredicatePlan.init(self.doc.allocator, self.selector);
             self.node_ctx.begin(self.doc.allocator, child_position);
-            pending = candidates;
+            var pending = eligible_bits;
+            var seen: u64 = 0;
             var matched: u64 = 0;
             while (pending != 0) {
                 const index: usize = @intCast(@ctz(pending));
                 pending &= pending - 1;
-                if (try matcher.matchesCompoundForward(Doc, self.doc, self.selector, self.selector.compounds[index], node_index, &self.node_ctx)) matched |= bit(index);
+                const predicate_id: usize = self.predicate_plan.state_ids[index];
+                const predicate_bit = bit(predicate_id);
+                if ((seen & predicate_bit) != 0) continue;
+                seen |= predicate_bit;
+                self.stats.local_unique_predicate_evals += 1;
+                const representative: usize = @intCast(self.predicate_plan.representatives[predicate_id]);
+                if (try matcher.matchesCompoundForward(Doc, self.doc, self.selector, self.selector.compounds[representative], node_index, &self.node_ctx)) {
+                    matched |= eligible_bits & self.predicate_plan.predicateMaskConst(predicate_id)[0];
+                }
             }
             return matched;
         }
@@ -295,7 +323,10 @@ pub fn WideExecutor(comptime Doc: type) type {
         states: std.ArrayListUnmanaged(u64) = .empty,
         stack: std.ArrayListUnmanaged(WideFrame) = .empty,
         node_ctx: matcher.ForwardNodeContext = .{},
+        predicate_plan: matcher.PredicatePlan = .{},
+        seen_predicates: []u64 = &.{},
         seed_workspace: matcher.MatchWorkspace,
+        stats: Stats = .{},
         initialized: bool = false,
         root_child_count: usize = 0,
 
@@ -342,6 +373,9 @@ pub fn WideExecutor(comptime Doc: type) type {
             self.stack.deinit(self.doc.allocator);
             self.stack = .empty;
             self.node_ctx.deinit();
+            self.predicate_plan.deinit(self.doc.allocator);
+            if (self.seen_predicates.len != 0) self.doc.allocator.free(self.seen_predicates);
+            self.seen_predicates = &.{};
             self.seed_workspace.deinit();
             self.initialized = false;
         }
@@ -352,6 +386,7 @@ pub fn WideExecutor(comptime Doc: type) type {
             self.syncStack(idx);
             const raw = &self.doc.nodes[idx];
             if (!raw.isElement(idx)) return false;
+            self.stats.nodes_processed += 1;
 
             const parent_slot = if (self.stack.items.len == 0) 0 else self.stack.items[self.stack.items.len - 1].slot;
             var child_position: usize = 0;
@@ -387,12 +422,16 @@ pub fn WideExecutor(comptime Doc: type) type {
                     .slot = temp_slot,
                 });
             }
-            return intersects(matched, self.mask(.final));
+            self.stats.state_word_ops += self.word_count * 6;
+            const is_match = intersects(matched, self.mask(.final));
+            if (is_match) self.stats.nodes_emitted += 1;
+            return is_match;
         }
 
         fn processSimple(self: *Self, idx: IndexInt) !bool {
             const raw = &self.doc.nodes[idx];
             if (!raw.isElement(idx)) return false;
+            self.stats.nodes_processed += 1;
             self.node_ctx.begin(self.doc.allocator, 0);
             for (self.selector.groups) |group| {
                 if (group.compound_len != 1) continue;
@@ -402,7 +441,10 @@ pub fn WideExecutor(comptime Doc: type) type {
                     .child => raw.parent == self.scope_root,
                     .adjacent, .sibling => false,
                 };
-                if (anchored and try matcher.matchesCompoundForward(Doc, self.doc, self.selector, comp, idx, &self.node_ctx)) return true;
+                if (anchored and try matcher.matchesCompoundForward(Doc, self.doc, self.selector, comp, idx, &self.node_ctx)) {
+                    self.stats.nodes_emitted += 1;
+                    return true;
+                }
             }
             return false;
         }
@@ -492,8 +534,12 @@ pub fn WideExecutor(comptime Doc: type) type {
         }
 
         fn evaluateNode(self: *Self, node_index: IndexInt, child_position: usize, matched: []u64) !void {
+            if (self.predicate_plan.state_ids.len == 0) {
+                self.predicate_plan = try matcher.PredicatePlan.init(self.doc.allocator, self.selector);
+                self.seen_predicates = try self.doc.allocator.alloc(u64, (self.predicate_plan.count + 63) / 64);
+            }
+            @memset(self.seen_predicates, 0);
             self.node_ctx.begin(self.doc.allocator, child_position);
-            const node_name = self.doc.nodes[node_index].name_or_text.slice(self.doc.source);
             for (self.eligible_words, 0..) |eligible_word, word_index| {
                 var pending = eligible_word;
                 while (pending != 0) {
@@ -501,9 +547,15 @@ pub fn WideExecutor(comptime Doc: type) type {
                     pending &= pending - 1;
                     const absolute = word_index * 64 + bit_index;
                     if (absolute >= self.selector.compounds.len) continue;
-                const comp = self.selector.compounds[absolute];
-                if (comp.hasTag() and !matcher.tagMatches(Doc, self.selector.source, comp, node_name)) continue;
-                if (try matcher.matchesCompoundForward(Doc, self.doc, self.selector, comp, node_index, &self.node_ctx)) setBit(matched, absolute);
+                    const predicate_id: usize = self.predicate_plan.state_ids[absolute];
+                    const seen_bit = @as(u64, 1) << @intCast(predicate_id % 64);
+                    if ((self.seen_predicates[predicate_id / 64] & seen_bit) != 0) continue;
+                    self.seen_predicates[predicate_id / 64] |= seen_bit;
+                    self.stats.local_unique_predicate_evals += 1;
+                    const representative: usize = @intCast(self.predicate_plan.representatives[predicate_id]);
+                    if (try matcher.matchesCompoundForward(Doc, self.doc, self.selector, self.selector.compounds[representative], node_index, &self.node_ctx)) {
+                        for (matched, self.eligible_words, self.predicate_plan.predicateMaskConst(predicate_id)) |*dst, eligible, mask_word| dst.* |= eligible & mask_word;
+                    }
                 }
             }
         }

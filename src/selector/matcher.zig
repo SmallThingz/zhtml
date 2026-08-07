@@ -211,18 +211,22 @@ pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Do
     workspace.prepare(selector, scope_root);
     const scratch = &workspace.scratch.?;
 
+    var has_existential = false;
     for (selector.groups) |group| {
-        if (group.compound_len == 0) continue;
-        const rightmost = group.compound_len - 1;
-        if (group.compound_len == 1) {
-            const comp = selector.compounds[group.compound_start];
-            if (try matchesCompound(Doc, doc, selector, comp, node_index, scratch) and
-                (comp.combinator == .none or matchesScopeAnchor(doc, comp.combinator, node_index, scope_root))) return true;
-            continue;
+        if (group.compound_len != 0 and groupHasExistential(selector, group, group.compound_len - 1)) {
+            has_existential = true;
+            break;
         }
-        if (try matchGroupFromRight(Doc, doc, selector, group, rightmost, node_index, scope_root, scratch, workspace)) return true;
     }
-    return false;
+    if (!has_existential) {
+        for (selector.groups) |group| {
+            if (group.compound_len == 0) continue;
+            if (try matchDeterministicGroup(Doc, doc, selector, group, group.compound_len - 1, node_index, scope_root, scratch, &workspace.stats)) return true;
+        }
+        return false;
+    }
+    try workspace.ensureReversePlan(selector);
+    return matchReverseAutomaton(Doc, doc, selector, node_index, scope_root, workspace.reverseMask(.final), workspace);
 }
 
 /// Matches one left-to-right group prefix at a specific node using the RTL engine.
@@ -235,35 +239,41 @@ pub fn matchesPrefixAt(comptime Doc: type, noalias doc: *const Doc, selector: as
         .compound_start = group.compound_start,
         .compound_len = @intCast(prefix_len),
     };
-    return matchGroupFromRight(
-        Doc,
-        doc,
-        selector,
-        partial,
-        @intCast(prefix_len - 1),
-        node_index,
-        InvalidIndex,
-        &workspace.scratch.?,
-        workspace,
-    );
+    const rightmost: IndexInt = @intCast(prefix_len - 1);
+    if (!groupHasExistential(selector, partial, rightmost)) {
+        return matchDeterministicGroup(Doc, doc, selector, partial, rightmost, node_index, InvalidIndex, &workspace.scratch.?, &workspace.stats);
+    }
+    try workspace.ensureReversePlan(selector);
+    @memset(workspace.reverse_seed, 0);
+    setWordBit(workspace.reverse_seed, @as(usize, @intCast(group.compound_start)) + prefix_len - 1);
+    return matchReverseAutomaton(Doc, doc, selector, node_index, InvalidIndex, workspace.reverse_seed, workspace);
 }
 
 pub const MatchWorkspace = struct {
     allocator: std.mem.Allocator,
     scratch: ?std.heap.ArenaAllocator = null,
-    segments: std.ArrayListUnmanaged(RtlSegment) = .empty,
-    solve_cache: []IndexInt = &.{},
-    summary_cache: []IndexInt = &.{},
-    eval_frames: std.ArrayListUnmanaged(EvalFrame) = .empty,
     topology_prev: std.AutoHashMapUnmanaged(IndexInt, IndexInt) = .empty,
     topology_parents: std.AutoHashMapUnmanaged(IndexInt, void) = .empty,
+    predicate_plan: PredicatePlan = .{},
+    reverse_node_ctx: ForwardNodeContext = .{},
+    reverse_masks: []u64 = &.{},
+    reverse_seed: []u64 = &.{},
+    reverse_current: []u64 = &.{},
+    reverse_local: []u64 = &.{},
+    reverse_seen_predicates: []u64 = &.{},
+    reverse_scheduled: []u64 = &.{},
+    reverse_processed: []u64 = &.{},
+    reverse_slot_by_node: []u32 = &.{},
+    reverse_cells: std.ArrayListUnmanaged(u64) = .empty,
+    reverse_cell_nodes: std.ArrayListUnmanaged(IndexInt) = .empty,
+    reverse_word_count: usize = 0,
+    reverse_cursor_exclusive: usize = 0,
     stats: MatchStats = .{},
     prepared_source: usize = 0,
     prepared_compounds: usize = 0,
     prepared_scope: IndexInt = InvalidIndex,
-    prepared_group_start: IndexInt = InvalidIndex,
-    prepared_prefix_len: IndexInt = 0,
-    prepared_node_count: usize = 0,
+    reverse_source: usize = 0,
+    reverse_compounds: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) @This() {
         return .{ .allocator = allocator };
@@ -277,18 +287,32 @@ pub const MatchWorkspace = struct {
 
     pub fn deinit(self: *@This()) void {
         if (self.scratch) |*scratch| scratch.deinit();
-        self.segments.deinit(self.allocator);
-        self.segments = .empty;
-        if (self.solve_cache.len != 0) self.allocator.free(self.solve_cache);
-        self.solve_cache = &.{};
-        if (self.summary_cache.len != 0) self.allocator.free(self.summary_cache);
-        self.summary_cache = &.{};
-        self.eval_frames.deinit(self.allocator);
-        self.eval_frames = .empty;
         self.topology_prev.deinit(self.allocator);
         self.topology_prev = .empty;
         self.topology_parents.deinit(self.allocator);
         self.topology_parents = .empty;
+        self.predicate_plan.deinit(self.allocator);
+        self.reverse_node_ctx.deinit();
+        if (self.reverse_masks.len != 0) self.allocator.free(self.reverse_masks);
+        self.reverse_masks = &.{};
+        if (self.reverse_seed.len != 0) self.allocator.free(self.reverse_seed);
+        self.reverse_seed = &.{};
+        if (self.reverse_current.len != 0) self.allocator.free(self.reverse_current);
+        self.reverse_current = &.{};
+        if (self.reverse_local.len != 0) self.allocator.free(self.reverse_local);
+        self.reverse_local = &.{};
+        if (self.reverse_seen_predicates.len != 0) self.allocator.free(self.reverse_seen_predicates);
+        self.reverse_seen_predicates = &.{};
+        if (self.reverse_scheduled.len != 0) self.allocator.free(self.reverse_scheduled);
+        self.reverse_scheduled = &.{};
+        if (self.reverse_processed.len != 0) self.allocator.free(self.reverse_processed);
+        self.reverse_processed = &.{};
+        if (self.reverse_slot_by_node.len != 0) self.allocator.free(self.reverse_slot_by_node);
+        self.reverse_slot_by_node = &.{};
+        self.reverse_cells.deinit(self.allocator);
+        self.reverse_cells = .empty;
+        self.reverse_cell_nodes.deinit(self.allocator);
+        self.reverse_cell_nodes = .empty;
         self.scratch = null;
     }
 
@@ -299,186 +323,364 @@ pub const MatchWorkspace = struct {
         self.prepared_source = source_id;
         self.prepared_compounds = compounds_id;
         self.prepared_scope = scope_root;
-        self.prepared_group_start = InvalidIndex;
         self.topology_prev.clearRetainingCapacity();
         self.topology_parents.clearRetainingCapacity();
+    }
+
+    fn ensureReversePlan(self: *@This(), selector: ast.Selector) !void {
+        const source_id = @intFromPtr(selector.source.ptr);
+        const compounds_id = @intFromPtr(selector.compounds.ptr);
+        if (self.reverse_source == source_id and self.reverse_compounds == compounds_id) return;
+        try self.compileReversePlan(selector);
+        self.reverse_source = source_id;
+        self.reverse_compounds = compounds_id;
+    }
+
+    const ReverseMask = enum(usize) { start_none, start_child, start_descendant, child, descendant, adjacent, sibling, final };
+
+    fn reverseMask(self: *@This(), which: ReverseMask) []u64 {
+        const start = @intFromEnum(which) * self.reverse_word_count;
+        return self.reverse_masks[start .. start + self.reverse_word_count];
+    }
+
+    fn compileReversePlan(self: *@This(), selector: ast.Selector) !void {
+        self.predicate_plan.deinit(self.allocator);
+        self.predicate_plan = try PredicatePlan.init(self.allocator, selector);
+        self.reverse_word_count = (selector.compounds.len + 63) / 64;
+        const words = self.reverse_word_count;
+        if (self.reverse_masks.len != 0) self.allocator.free(self.reverse_masks);
+        self.reverse_masks = &.{};
+        self.reverse_masks = try self.allocator.alloc(u64, words * 8);
+        @memset(self.reverse_masks, 0);
+        if (self.reverse_seed.len != 0) self.allocator.free(self.reverse_seed);
+        self.reverse_seed = &.{};
+        self.reverse_seed = try self.allocator.alloc(u64, words);
+        if (self.reverse_current.len != 0) self.allocator.free(self.reverse_current);
+        self.reverse_current = &.{};
+        self.reverse_current = try self.allocator.alloc(u64, words * 3);
+        if (self.reverse_local.len != 0) self.allocator.free(self.reverse_local);
+        self.reverse_local = &.{};
+        self.reverse_local = try self.allocator.alloc(u64, words);
+        if (self.reverse_seen_predicates.len != 0) self.allocator.free(self.reverse_seen_predicates);
+        self.reverse_seen_predicates = &.{};
+        self.reverse_seen_predicates = try self.allocator.alloc(u64, (self.predicate_plan.count + 63) / 64);
+
+        for (selector.groups) |group| {
+            if (group.compound_len == 0) continue;
+            const start: usize = @intCast(group.compound_start);
+            const len: usize = @intCast(group.compound_len);
+            setWordBit(self.reverseMask(.final), start + len - 1);
+            for (0..len) |rel| {
+                const absolute = start + rel;
+                const comp = selector.compounds[absolute];
+                if (rel == 0) {
+                    switch (comp.combinator) {
+                        .none => setWordBit(self.reverseMask(.start_none), absolute),
+                        .child => setWordBit(self.reverseMask(.start_child), absolute),
+                        .descendant => setWordBit(self.reverseMask(.start_descendant), absolute),
+                        .adjacent, .sibling => {},
+                    }
+                } else switch (comp.combinator) {
+                    .child => setWordBit(self.reverseMask(.child), absolute),
+                    .descendant => setWordBit(self.reverseMask(.descendant), absolute),
+                    .adjacent => setWordBit(self.reverseMask(.adjacent), absolute),
+                    .sibling => setWordBit(self.reverseMask(.sibling), absolute),
+                    .none => {},
+                }
+            }
+        }
     }
 };
 
 pub const MatchStats = struct {
     local_predicate_evals: usize = 0,
-    rtl_segment_first_evals: usize = 0,
-    rtl_segment_cache_hits: usize = 0,
-    rtl_ancestor_summary_first_evals: usize = 0,
-    rtl_ancestor_summary_cache_hits: usize = 0,
-    rtl_sibling_summary_first_evals: usize = 0,
-    rtl_sibling_summary_cache_hits: usize = 0,
-    rtl_parent_steps: usize = 0,
-    rtl_prev_sibling_steps: usize = 0,
     topology_parent_builds: usize = 0,
     topology_child_visits: usize = 0,
+    reverse_nodes_processed: usize = 0,
+    reverse_node_duplicate_processes: usize = 0,
+    reverse_state_word_ops: usize = 0,
+    local_unique_predicate_evals: usize = 0,
 };
 
-const RtlSegment = struct {
-    left_rel: IndexInt,
-    right_rel: IndexInt,
-    boundary: ast.Combinator,
-};
+/// Interns semantically identical local compounds and maps each predicate to
+/// every selector-state bit that uses it. Combinators are deliberately ignored:
+/// they are structural transitions, not local node predicates.
+pub const PredicatePlan = struct {
+    state_ids: []u32 = &.{},
+    representatives: []IndexInt = &.{},
+    masks: []u64 = &.{},
+    word_count: usize = 0,
+    count: usize = 0,
 
-const Uncomputed = InvalidIndex;
-const Failed = InvalidIndex - 1;
-const EvalKind = enum(u8) { solve, summary };
+    pub fn init(allocator: std.mem.Allocator, selector: ast.Selector) !@This() {
+        var self: @This() = .{ .word_count = (selector.compounds.len + 63) / 64 };
+        errdefer self.deinit(allocator);
+        self.state_ids = try allocator.alloc(u32, selector.compounds.len);
+        self.representatives = try allocator.alloc(IndexInt, selector.compounds.len);
+        if (self.word_count != 0) self.masks = try allocator.alloc(u64, selector.compounds.len * self.word_count);
+        @memset(self.masks, 0);
 
-const EvalFrame = struct {
-    kind: EvalKind,
-    segment: usize,
-    node: IndexInt,
-    phase: u8 = 0,
-    anchor: IndexInt = Failed,
-    child_result: IndexInt = Failed,
-};
-
-fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, rel_index: IndexInt, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator, workspace: *MatchWorkspace) !bool {
-    if (group.compound_len == 0) {
-        @branchHint(.cold);
-        return false;
-    }
-    if (!groupHasExistential(selector, group, rel_index)) {
-        return matchDeterministicGroup(Doc, doc, selector, group, rel_index, node_index, scope_root, scratch, &workspace.stats);
-    }
-    try prepareSegments(workspace, selector, group, rel_index, doc.nodes.len);
-    workspace.eval_frames.clearRetainingCapacity();
-    try workspace.eval_frames.append(workspace.allocator, .{ .kind = .solve, .segment = 0, .node = node_index });
-
-    var final_result: IndexInt = Failed;
-    while (workspace.eval_frames.items.len != 0) {
-        const frame_index = workspace.eval_frames.items.len - 1;
-        const snapshot = workspace.eval_frames.items[frame_index];
-        const cache = if (snapshot.kind == .solve) workspace.solve_cache else workspace.summary_cache;
-        const cache_index = snapshot.segment * doc.nodes.len + @as(usize, @intCast(snapshot.node));
-        if (cache[cache_index] != Uncomputed) {
-            if (snapshot.kind == .solve) workspace.stats.rtl_segment_cache_hits += 1 else {
-                const boundary = workspace.segments.items[snapshot.segment].boundary;
-                if (boundary == .descendant) workspace.stats.rtl_ancestor_summary_cache_hits += 1 else workspace.stats.rtl_sibling_summary_cache_hits += 1;
+        for (selector.compounds, 0..) |_, absolute| {
+            var predicate_id: usize = 0;
+            while (predicate_id < self.count) : (predicate_id += 1) {
+                const representative: usize = @intCast(self.representatives[predicate_id]);
+                if (compoundsEquivalent(selector, selector.compounds[representative], selector.compounds[absolute])) break;
             }
-            completeWitness(workspace, cache[cache_index], &final_result);
-            continue;
+            if (predicate_id == self.count) {
+                self.representatives[self.count] = @intCast(absolute);
+                self.count += 1;
+            }
+            self.state_ids[absolute] = @intCast(predicate_id);
+            setWordBit(self.predicateMask(predicate_id), absolute);
         }
+        return self;
+    }
 
-        var frame = &workspace.eval_frames.items[frame_index];
-        switch (frame.kind) {
-            .solve => switch (frame.phase) {
-                0 => {
-                    workspace.stats.rtl_segment_first_evals += 1;
-                    const segment = workspace.segments.items[frame.segment];
-                    const anchor = try evalSegment(Doc, doc, selector, group, segment, frame.node, scratch, &workspace.stats);
-                    if (anchor == Failed) {
-                        finishWitness(workspace, cache_index, Failed, &final_result);
-                        continue;
-                    }
-                    if (frame.segment + 1 == workspace.segments.items.len) {
-                        const left = selector.compounds[group.compound_start + segment.left_rel];
-                        const value = if (left.combinator == .none or matchesScopeAnchor(doc, left.combinator, anchor, scope_root)) anchor else Failed;
-                        finishWitness(workspace, cache_index, value, &final_result);
-                        continue;
-                    }
-                    frame.anchor = anchor;
-                    frame.phase = 1;
-                    try workspace.eval_frames.append(workspace.allocator, .{ .kind = .summary, .segment = frame.segment, .node = anchor });
-                },
-                else => finishWitness(workspace, cache_index, if (frame.child_result == Failed) Failed else frame.anchor, &final_result),
-            },
-            .summary => switch (frame.phase) {
-                0 => {
-                    const boundary = workspace.segments.items[frame.segment].boundary;
-                    const candidate = if (boundary == .descendant)
-                        parentElement(doc, frame.node)
-                    else
-                        try prevElementSiblingAccelerated(Doc, doc, frame.node, workspace);
-                    if (candidate == null) {
-                        finishWitness(workspace, cache_index, Failed, &final_result);
-                        continue;
-                    }
-                    if (boundary == .descendant) {
-                        workspace.stats.rtl_ancestor_summary_first_evals += 1;
-                        workspace.stats.rtl_parent_steps += 1;
-                    } else {
-                        workspace.stats.rtl_sibling_summary_first_evals += 1;
-                        workspace.stats.rtl_prev_sibling_steps += 1;
-                    }
-                    frame.anchor = candidate.?;
-                    frame.phase = 1;
-                    try workspace.eval_frames.append(workspace.allocator, .{ .kind = .solve, .segment = frame.segment + 1, .node = candidate.? });
-                },
-                1 => {
-                    if (frame.child_result != Failed) {
-                        finishWitness(workspace, cache_index, frame.anchor, &final_result);
-                        continue;
-                    }
-                    frame.phase = 2;
-                    try workspace.eval_frames.append(workspace.allocator, .{ .kind = .summary, .segment = frame.segment, .node = frame.anchor });
-                },
-                else => finishWitness(workspace, cache_index, frame.child_result, &final_result),
-            },
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.state_ids.len != 0) allocator.free(self.state_ids);
+        if (self.representatives.len != 0) allocator.free(self.representatives);
+        if (self.masks.len != 0) allocator.free(self.masks);
+        self.* = .{};
+    }
+
+    pub fn predicateMask(self: *@This(), predicate_id: usize) []u64 {
+        const start = predicate_id * self.word_count;
+        return self.masks[start .. start + self.word_count];
+    }
+
+    pub fn predicateMaskConst(self: *const @This(), predicate_id: usize) []const u64 {
+        const start = predicate_id * self.word_count;
+        return self.masks[start .. start + self.word_count];
+    }
+};
+
+fn compoundsEquivalent(selector: ast.Selector, a: ast.Compound, b: ast.Compound) bool {
+    if (!rangeEqual(selector.source, a.tag, b.tag) or !rangeEqual(selector.source, a.id, b.id)) return false;
+    if (a.class_len != b.class_len or a.attr_len != b.attr_len or a.pseudo_len != b.pseudo_len or a.not_len != b.not_len) return false;
+
+    var i: IndexInt = 0;
+    while (i < a.class_len) : (i += 1) {
+        if (!rangeEqual(selector.source, selector.classes[a.class_start + i], selector.classes[b.class_start + i])) return false;
+    }
+    i = 0;
+    while (i < a.attr_len) : (i += 1) {
+        if (!attrSelectorsEqual(selector.source, selector.attrs[a.attr_start + i], selector.attrs[b.attr_start + i])) return false;
+    }
+    i = 0;
+    while (i < a.pseudo_len) : (i += 1) {
+        const lhs = selector.pseudos[a.pseudo_start + i];
+        const rhs = selector.pseudos[b.pseudo_start + i];
+        if (lhs.kind != rhs.kind or lhs.nth.a != rhs.nth.a or lhs.nth.b != rhs.nth.b) return false;
+    }
+    i = 0;
+    while (i < a.not_len) : (i += 1) {
+        const lhs = selector.not_items[a.not_start + i];
+        const rhs = selector.not_items[b.not_start + i];
+        if (lhs.kind != rhs.kind) return false;
+        switch (lhs.kind) {
+            .tag, .id, .class => if (!rangeEqual(selector.source, lhs.text, rhs.text)) return false,
+            .attr => if (!attrSelectorsEqual(selector.source, lhs.attr, rhs.attr)) return false,
         }
     }
-    return final_result != Failed;
+    return true;
 }
 
-fn prepareSegments(workspace: *MatchWorkspace, selector: ast.Selector, group: ast.Group, rel_index: IndexInt, node_count: usize) !void {
-    if (workspace.prepared_group_start == group.compound_start and workspace.prepared_prefix_len == rel_index + 1 and workspace.prepared_node_count == node_count) return;
-    workspace.segments.clearRetainingCapacity();
-    var right = rel_index;
-    while (true) {
-        var left = right;
-        while (left > 0) {
-            const relation = selector.compounds[group.compound_start + left].combinator;
-            if (relation == .descendant or relation == .sibling) break;
-            left -= 1;
+fn attrSelectorsEqual(source: []const u8, a: ast.AttrSelector, b: ast.AttrSelector) bool {
+    return a.op == b.op and a.case == b.case and rangeEqual(source, a.name, b.name) and rangeEqual(source, a.value, b.value);
+}
+
+fn rangeEqual(source: []const u8, a: ast.Range, b: ast.Range) bool {
+    return std.mem.eql(u8, a.slice(source), b.slice(source));
+}
+
+fn setWordBit(words: []u64, index: usize) void {
+    words[index / 64] |= @as(u64, 1) << @intCast(index % 64);
+}
+
+fn wordsIntersect(a: []const u64, b: []const u64) bool {
+    for (a, b) |lhs, rhs| if ((lhs & rhs) != 0) return true;
+    return false;
+}
+
+fn wordsAny(words: []const u64) bool {
+    for (words) |word| if (word != 0) return true;
+    return false;
+}
+
+fn matchReverseAutomaton(
+    comptime Doc: type,
+    noalias doc: *const Doc,
+    selector: ast.Selector,
+    target: IndexInt,
+    scope_root: IndexInt,
+    seed: []const u64,
+    workspace: *MatchWorkspace,
+) !bool {
+    if (!doc.nodes[target].isElement(target) or workspace.reverse_word_count == 0) return false;
+    try resetReverseRun(workspace, doc.nodes.len, target);
+    try addReverseBits(workspace, target, seed, .direct);
+    var run_nodes: usize = 0;
+
+    while (popHighestScheduled(workspace)) |idx| {
+        run_nodes += 1;
+        workspace.stats.reverse_nodes_processed += 1;
+        std.debug.assert(run_nodes <= doc.nodes.len);
+        const processed_index: usize = @intCast(idx);
+        const processed_bit = @as(u64, 1) << @intCast(processed_index % 64);
+        if ((workspace.reverse_processed[processed_index / 64] & processed_bit) != 0) {
+            workspace.stats.reverse_node_duplicate_processes += 1;
+            std.debug.assert(false);
         }
-        const boundary = selector.compounds[group.compound_start + left].combinator;
-        try workspace.segments.append(workspace.allocator, .{ .left_rel = left, .right_rel = right, .boundary = boundary });
-        if (left == 0) break;
-        right = left - 1;
+        workspace.reverse_processed[processed_index / 64] |= processed_bit;
+        const words = workspace.reverse_word_count;
+        const slot: usize = workspace.reverse_slot_by_node[idx];
+        const cell_start = slot * words * 3;
+        @memcpy(workspace.reverse_current, workspace.reverse_cells.items[cell_start .. cell_start + words * 3]);
+        const direct = workspace.reverse_current[0..words];
+        const ancestor_carry = workspace.reverse_current[words .. words * 2];
+        const sibling_carry = workspace.reverse_current[words * 2 .. words * 3];
+
+        for (direct, ancestor_carry, sibling_carry) |*dst, up, left| dst.* |= up | left;
+        try evaluateReversePredicates(Doc, doc, selector, idx, direct, workspace);
+        for (direct, workspace.reverse_local) |*dst, local| dst.* &= local;
+        workspace.stats.reverse_state_word_ops += words;
+
+        if (wordsIntersect(direct, workspace.reverseMask(.start_none)) or
+            (wordsIntersect(direct, workspace.reverseMask(.start_child)) and matchesScopeAnchor(doc, ast.Combinator.child, idx, scope_root)) or
+            (wordsIntersect(direct, workspace.reverseMask(.start_descendant)) and matchesScopeAnchor(doc, ast.Combinator.descendant, idx, scope_root))) return true;
+
+        if (wordsAny(ancestor_carry) or wordsIntersect(direct, workspace.reverseMask(.child)) or wordsIntersect(direct, workspace.reverseMask(.descendant))) {
+            if (parentElement(doc, idx)) |parent_idx| {
+                try addReverseBits(workspace, parent_idx, ancestor_carry, .ancestor);
+                try addShiftedPredecessors(workspace, parent_idx, direct, workspace.reverseMask(.child), .direct);
+                try addShiftedPredecessors(workspace, parent_idx, direct, workspace.reverseMask(.descendant), .ancestor);
+            }
+        }
+        if (wordsAny(sibling_carry) or wordsIntersect(direct, workspace.reverseMask(.adjacent)) or wordsIntersect(direct, workspace.reverseMask(.sibling))) {
+            if (try prevElementSiblingAccelerated(Doc, doc, idx, workspace)) |previous_idx| {
+                try addReverseBits(workspace, previous_idx, sibling_carry, .sibling);
+                try addShiftedPredecessors(workspace, previous_idx, direct, workspace.reverseMask(.adjacent), .direct);
+                try addShiftedPredecessors(workspace, previous_idx, direct, workspace.reverseMask(.sibling), .sibling);
+            }
+        }
     }
-    const cell_count = try std.math.mul(usize, workspace.segments.items.len, node_count);
-    if (workspace.solve_cache.len != cell_count) {
-        if (workspace.solve_cache.len != 0) workspace.allocator.free(workspace.solve_cache);
-        workspace.solve_cache = try workspace.allocator.alloc(IndexInt, cell_count);
-        if (workspace.summary_cache.len != 0) workspace.allocator.free(workspace.summary_cache);
-        workspace.summary_cache = try workspace.allocator.alloc(IndexInt, cell_count);
+    return false;
+}
+
+const ReverseArrival = enum { direct, ancestor, sibling };
+
+fn resetReverseRun(workspace: *MatchWorkspace, node_count: usize, target: IndexInt) !void {
+    const NoSlot = std.math.maxInt(u32);
+    if (workspace.reverse_slot_by_node.len != node_count) {
+        if (workspace.reverse_slot_by_node.len != 0) workspace.allocator.free(workspace.reverse_slot_by_node);
+        workspace.reverse_slot_by_node = &.{};
+        workspace.reverse_slot_by_node = try workspace.allocator.alloc(u32, node_count);
+        @memset(workspace.reverse_slot_by_node, NoSlot);
+    } else {
+        for (workspace.reverse_cell_nodes.items) |node| workspace.reverse_slot_by_node[node] = NoSlot;
     }
-    @memset(workspace.solve_cache, Uncomputed);
-    @memset(workspace.summary_cache, Uncomputed);
-    workspace.prepared_group_start = group.compound_start;
-    workspace.prepared_prefix_len = rel_index + 1;
-    workspace.prepared_node_count = node_count;
+    workspace.reverse_cells.clearRetainingCapacity();
+    workspace.reverse_cell_nodes.clearRetainingCapacity();
+
+    const scheduled_words = (@as(usize, @intCast(target)) + 64) / 64;
+    if (workspace.reverse_scheduled.len != scheduled_words) {
+        if (workspace.reverse_scheduled.len != 0) workspace.allocator.free(workspace.reverse_scheduled);
+        workspace.reverse_scheduled = &.{};
+        workspace.reverse_scheduled = try workspace.allocator.alloc(u64, scheduled_words);
+    }
+    @memset(workspace.reverse_scheduled, 0);
+    if (workspace.reverse_processed.len != scheduled_words) {
+        if (workspace.reverse_processed.len != 0) workspace.allocator.free(workspace.reverse_processed);
+        workspace.reverse_processed = &.{};
+        workspace.reverse_processed = try workspace.allocator.alloc(u64, scheduled_words);
+    }
+    @memset(workspace.reverse_processed, 0);
+    workspace.reverse_cursor_exclusive = @as(usize, @intCast(target)) + 1;
 }
 
-fn completeWitness(workspace: *MatchWorkspace, result: IndexInt, final_result: *IndexInt) void {
-    _ = workspace.eval_frames.pop();
-    if (workspace.eval_frames.items.len == 0) final_result.* = result else workspace.eval_frames.items[workspace.eval_frames.items.len - 1].child_result = result;
+fn reverseCell(workspace: *MatchWorkspace, node: IndexInt) !usize {
+    const NoSlot = std.math.maxInt(u32);
+    const existing = workspace.reverse_slot_by_node[node];
+    if (existing != NoSlot) return existing;
+    const slot: u32 = @intCast(workspace.reverse_cell_nodes.items.len);
+    try workspace.reverse_cell_nodes.append(workspace.allocator, node);
+    try workspace.reverse_cells.appendNTimes(workspace.allocator, 0, workspace.reverse_word_count * 3);
+    workspace.reverse_slot_by_node[node] = slot;
+    return slot;
 }
 
-fn finishWitness(workspace: *MatchWorkspace, cache_index: usize, result: IndexInt, final_result: *IndexInt) void {
-    const frame = workspace.eval_frames.items[workspace.eval_frames.items.len - 1];
-    if (frame.kind == .solve) workspace.solve_cache[cache_index] = result else workspace.summary_cache[cache_index] = result;
-    completeWitness(workspace, result, final_result);
+fn addReverseBits(workspace: *MatchWorkspace, node: IndexInt, bits: []const u64, arrival: ReverseArrival) !void {
+    var any_bits = false;
+    for (bits) |word| any_bits = any_bits or word != 0;
+    if (!any_bits) return;
+    const slot = try reverseCell(workspace, node);
+    const offset: usize = switch (arrival) {
+        .direct => 0,
+        .ancestor => 1,
+        .sibling => 2,
+    };
+    const start = (slot * 3 + offset) * workspace.reverse_word_count;
+    for (workspace.reverse_cells.items[start .. start + workspace.reverse_word_count], bits) |*dst, source| dst.* |= source;
+    const index: usize = @intCast(node);
+    workspace.reverse_scheduled[index / 64] |= @as(u64, 1) << @intCast(index % 64);
 }
 
-fn evalSegment(comptime Doc: type, doc: *const Doc, selector: ast.Selector, group: ast.Group, segment: RtlSegment, start_node: IndexInt, scratch: *std.heap.ArenaAllocator, stats: *MatchStats) !IndexInt {
-    var rel = segment.right_rel;
-    var node = start_node;
-    while (true) {
-        stats.local_predicate_evals += 1;
-        if (!try matchesCompound(Doc, doc, selector, selector.compounds[group.compound_start + rel], node, scratch)) return Failed;
-        if (rel == segment.left_rel) return node;
-        node = switch (selector.compounds[group.compound_start + rel].combinator) {
-            .child => parentElement(doc, node),
-            .adjacent => prevElementSibling(doc, node),
-            else => unreachable,
-        } orelse return Failed;
-        rel -= 1;
+fn addShiftedPredecessors(workspace: *MatchWorkspace, node: IndexInt, matched: []const u64, relation: []const u64, arrival: ReverseArrival) !void {
+    @memset(workspace.reverse_local, 0);
+    var carry: u64 = 0;
+    var i = matched.len;
+    while (i != 0) {
+        i -= 1;
+        const source = matched[i] & relation[i];
+        workspace.reverse_local[i] = (source >> 1) | carry;
+        carry = source << 63;
+    }
+    workspace.stats.reverse_state_word_ops += matched.len;
+    try addReverseBits(workspace, node, workspace.reverse_local, arrival);
+}
+
+fn popHighestScheduled(workspace: *MatchWorkspace) ?IndexInt {
+    while (workspace.reverse_cursor_exclusive != 0) {
+        const upper = workspace.reverse_cursor_exclusive - 1;
+        const word_index = upper / 64;
+        const bit_limit: u6 = @intCast(upper % 64);
+        const through = if (bit_limit == 63) std.math.maxInt(u64) else (@as(u64, 1) << (bit_limit + 1)) - 1;
+        const word = workspace.reverse_scheduled[word_index] & through;
+        if (word != 0) {
+            const bit_index: usize = 63 - @clz(word);
+            const index = word_index * 64 + bit_index;
+            workspace.reverse_scheduled[word_index] &= ~(@as(u64, 1) << @intCast(bit_index));
+            workspace.reverse_cursor_exclusive = index;
+            return @intCast(index);
+        }
+        workspace.reverse_cursor_exclusive = word_index * 64;
+    }
+    return null;
+}
+
+fn evaluateReversePredicates(comptime Doc: type, doc: *const Doc, selector: ast.Selector, node: IndexInt, wanted: []const u64, workspace: *MatchWorkspace) !void {
+    @memset(workspace.reverse_local, 0);
+    @memset(workspace.reverse_seen_predicates, 0);
+    workspace.reverse_node_ctx.begin(doc.allocator, 0);
+
+    for (wanted, 0..) |wanted_word, word_index| {
+        var pending = wanted_word;
+        while (pending != 0) {
+            const local_bit: usize = @intCast(@ctz(pending));
+            pending &= pending - 1;
+            const absolute = word_index * 64 + local_bit;
+            if (absolute >= selector.compounds.len) continue;
+            const predicate_id: usize = workspace.predicate_plan.state_ids[absolute];
+            const seen_bit = @as(u64, 1) << @intCast(predicate_id % 64);
+            if ((workspace.reverse_seen_predicates[predicate_id / 64] & seen_bit) != 0) continue;
+            workspace.reverse_seen_predicates[predicate_id / 64] |= seen_bit;
+            workspace.stats.local_unique_predicate_evals += 1;
+            workspace.stats.local_predicate_evals += 1;
+            const representative: usize = @intCast(workspace.predicate_plan.representatives[predicate_id]);
+            if (try matchesCompoundRtlCached(Doc, doc, selector, selector.compounds[representative], node, &workspace.reverse_node_ctx)) {
+                for (workspace.reverse_local, wanted, workspace.predicate_plan.predicateMaskConst(predicate_id)) |*dst, eligible, mask| dst.* |= eligible & mask;
+            }
+        }
     }
 }
 
@@ -504,8 +706,10 @@ fn prevElementSiblingAccelerated(comptime Doc: type, doc: *const Doc, node_index
                 if (raw.isElement(cursor)) {
                     try workspace.topology_prev.put(workspace.allocator, cursor, previous);
                     previous = cursor;
+                    cursor = raw.subtree_end + 1;
+                } else {
+                    cursor += 1;
                 }
-                cursor = raw.subtree_end + 1;
             } else {
                 cursor += 1;
             }
@@ -574,6 +778,11 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
 pub fn matchesCompoundForward(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, ctx: *ForwardNodeContext) !bool {
     std.debug.assert(ctx.scratch != null);
     return matchesCompoundCore(Doc, doc, selector, comp, node_index, ctx.scratch.?.allocator(), &ctx.probe, .forward, ctx.child_position, &ctx.last_child_cache);
+}
+
+fn matchesCompoundRtlCached(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, ctx: *ForwardNodeContext) !bool {
+    std.debug.assert(ctx.scratch != null);
+    return matchesCompoundCore(Doc, doc, selector, comp, node_index, ctx.scratch.?.allocator(), &ctx.probe, .rtl, 0, &ctx.last_child_cache);
 }
 
 fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, scratch_alloc: std.mem.Allocator, attr_probe: *AttrProbe, pseudo_mode: PseudoMode, child_position: usize, last_child_cache: *?bool) !bool {
