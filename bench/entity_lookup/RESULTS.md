@@ -10,6 +10,8 @@ verified against every name and UTF-8 value before timing starts.
 - Length-sharded and unsharded runtime `std.StringHashMap` tables.
 - An unsharded generated static table using `std.hash_map.StringContext`, the
   top hash byte as metadata, and linear probing (the zdotenv-style std port).
+- A GNU gperf perfect hash translated to Zig and reproducibly hand-tuned by the
+  generator.
 
 There are no trie implementations or generated trie artifacts.
 
@@ -33,7 +35,7 @@ entity decoding.
 | std runtime sharded | 8.423 | 8.234 | 12.601 | 16.310 | 37.669 |
 | std runtime unsharded | 7.981 | 7.576 | 4.199 | 5.497 | 40.094 |
 | std static unsharded | 7.647 | 7.368 | 3.828 | 4.333 | 33.153 |
-| GNU gperf | 5.412 | 9.290 | 8.957 | 2.932 | 24.937 |
+| GNU gperf | 4.487 | 5.055 | 4.999 | 3.157 | 23.653 |
 
 ## Decision
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -142,6 +143,15 @@ struct Entity { const char *name; unsigned short index; };
     out.write("%%\n")
 
 subprocess.run(["gperf", str(GPERF_INPUT), f"--output-file={GPERF_C}"], cwd=ROOT, check=True)
+c_source = GPERF_C.read_text()
+asso_match = re.search(
+    r"static const unsigned short asso_values\[\]\s*=\s*\{(.*?)\n\s*\};",
+    c_source,
+    re.S,
+)
+if asso_match is None:
+    raise RuntimeError("could not find gperf association values")
+asso_values = [int(value) for value in re.findall(r"\d+", asso_match.group(1))]
 translated = subprocess.run(
     ["zig", "translate-c", str(GPERF_C)], cwd=ROOT, text=True, capture_output=True, check=True
 )
@@ -150,6 +160,73 @@ if "pub export fn entity_lookup" not in translated.stdout:
 translated_zig = translated.stdout.replace("pub export fn entity_lookup", "pub fn entity_lookup")
 if "export fn" in translated_zig:
     raise RuntimeError("translated gperf output still contains an exported function")
+
+tuned_compare = r'''const std = @import("std");
+
+pub inline fn entity_compare(a: [*c]const u8, b: [*c]const u8, len: usize) bool {
+    return std.mem.eql(u8, a[0..len], b[0..len]);
+}
+'''
+translated_zig, count = re.subn(
+    r"const __root.*?pub fn entity_compare\(.*?\n\}\npub const struct_Entity",
+    tuned_compare + "pub const struct_Entity",
+    translated_zig,
+    count=1,
+    flags=re.S,
+)
+if count != 1:
+    raise RuntimeError("could not replace translated entity_compare")
+
+tuned_hash = f'''const AssoValues = [_]u16{{{ints(asso_values)}}};
+
+pub fn entity_hash(str: [*c]const u8, len: usize) u32 {{
+    var hash: u32 = @intCast(len);
+    switch (len) {{
+        2 => {{}},
+        3 => hash += AssoValues[@as(usize, str[2]) + 1],
+        4 => hash += AssoValues[@as(usize, str[3]) + 5] + AssoValues[@as(usize, str[2]) + 1],
+        5 => hash += AssoValues[@as(usize, str[4]) + 3] + AssoValues[@as(usize, str[3]) + 5] + AssoValues[@as(usize, str[2]) + 1],
+        6 => hash += AssoValues[@as(usize, str[5]) + 2] + AssoValues[@as(usize, str[4]) + 3] + AssoValues[@as(usize, str[3]) + 5] + AssoValues[@as(usize, str[2]) + 1],
+        7 => hash += AssoValues[@as(usize, str[6]) + 1] + AssoValues[@as(usize, str[5]) + 2] + AssoValues[@as(usize, str[4]) + 3] + AssoValues[@as(usize, str[3]) + 5] + AssoValues[@as(usize, str[2]) + 1],
+        8...11 => hash += AssoValues[str[7]] + AssoValues[@as(usize, str[6]) + 1] + AssoValues[@as(usize, str[5]) + 2] + AssoValues[@as(usize, str[4]) + 3] + AssoValues[@as(usize, str[3]) + 5] + AssoValues[@as(usize, str[2]) + 1],
+        12...13 => hash += AssoValues[str[11]] + AssoValues[str[7]] + AssoValues[@as(usize, str[6]) + 1] + AssoValues[@as(usize, str[5]) + 2] + AssoValues[@as(usize, str[4]) + 3] + AssoValues[@as(usize, str[3]) + 5] + AssoValues[@as(usize, str[2]) + 1],
+        else => hash += AssoValues[str[13]] + AssoValues[str[11]] + AssoValues[str[7]] + AssoValues[@as(usize, str[6]) + 1] + AssoValues[@as(usize, str[5]) + 2] + AssoValues[@as(usize, str[4]) + 3] + AssoValues[@as(usize, str[3]) + 5] + AssoValues[@as(usize, str[2]) + 1],
+    }}
+    hash += AssoValues[str[1]];
+    hash += AssoValues[@as(usize, str[0]) + 13];
+    return hash;
+}}
+'''
+translated_zig, count = re.subn(
+    r"pub fn entity_hash\(.*?\n\}\npub const lengthtable",
+    tuned_hash + "pub const lengthtable",
+    translated_zig,
+    count=1,
+    flags=re.S,
+)
+if count != 1:
+    raise RuntimeError("could not replace translated entity_hash")
+
+tuned_lookup = r'''pub fn entity_lookup(str: [*c]const u8, len: usize) [*c]const struct_Entity {
+    if (len < 2 or len > 32) return null;
+    const key = entity_hash(str, len);
+    if (key > 15511 or lengthtable[key] != len) return null;
+    const stored = entity_wordlist[key].name;
+    if (str[0] == stored[0] and entity_compare(str + 1, stored + 1, len - 1)) {
+        return &entity_wordlist[key];
+    }
+    return null;
+}
+'''
+translated_zig, count = re.subn(
+    r"pub fn entity_lookup\(.*?\n\}\n\npub const __VERSION__[\s\S]*",
+    tuned_lookup,
+    translated_zig,
+    count=1,
+    flags=re.S,
+)
+if count != 1:
+    raise RuntimeError("could not replace translated entity_lookup")
 GPERF_ZIG.write_text(translated_zig)
 subprocess.run(["zig", "fmt", str(GPERF_ZIG)], cwd=ROOT, check=True)
 
