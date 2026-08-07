@@ -64,13 +64,17 @@ fn ParseState(comptime opts: ParseOptions) type {
         nodes: *std.ArrayListUnmanaged(RawNode),
         /// Open-element stack used only while building the tree.
         parse_stack: std.ArrayListUnmanaged(OpenElem) = .empty,
-        /// Case-insensitive tag name to topmost matching stack position.
-        open_by_tag: open_tag_index.Map = .empty,
-        /// The index is built only after the first non-top closing tag.
-        open_index_active: bool = false,
+        /// Historical entries retained after indexed stack positions are popped.
+        before: std.ArrayListUnmanaged(BeforeEntry) = .empty,
+        /// Tag signature to newest historical indexed stack position.
+        tag_map: open_tag_index.Map = .empty,
+        /// Live parse-stack prefix still corresponding to `before` entries.
+        index_len: usize = 0,
 
         const Self = @This();
         const RawNode = opts.RawNode();
+        const NameSpan = @FieldType(RawNode, "name_or_text");
+        const BeforeEntry = open_tag_index.BeforeEntry(NameSpan);
         const OpenElem = struct {
             /// First-8-bytes lowercase key for the open tag name.
             tag_key: u64 = 0,
@@ -80,8 +84,6 @@ fn ParseState(comptime opts: ParseOptions) type {
             tag_len: IndexInt = 0,
             /// Last direct element child seen while this element is open.
             last_child: IndexInt = InvalidIndex,
-            /// Previous stack position with the same full case-insensitive name.
-            prev_same_tag: u32 = open_tag_index.none,
         };
         const TagNameScan = scanner.TagName;
 
@@ -106,13 +108,13 @@ fn ParseState(comptime opts: ParseOptions) type {
                 .tag_key = 0,
                 .tag_len = 0,
                 .last_child = InvalidIndex,
-                .prev_same_tag = open_tag_index.none,
             });
         }
 
         inline fn parse(noalias self: *Self) !void {
             defer self.parse_stack.deinit(self.doc.allocator);
-            defer self.open_by_tag.deinit(self.doc.allocator);
+            defer self.before.deinit(self.doc.allocator);
+            defer self.tag_map.deinit(self.doc.allocator);
             try self.initContainers();
 
             // Main tokenization loop. Text spans and tags are dispatched here,
@@ -344,10 +346,9 @@ fn ParseState(comptime opts: ParseOptions) type {
                 return;
             }
 
-            try self.ensureOpenIndex();
-            if (self.open_by_tag.get(close_name)) |found_pos| {
+            if (try self.findOpenForSlowClose(close_name, close_key)) |found_pos| {
                 @branchHint(.likely);
-                const pos: usize = found_pos;
+                const pos: usize = @intCast(found_pos);
                 // Permissive recovery: pop everything above the matched opener.
                 while (self.parse_stack.items.len > pos) {
                     const open = self.popOpen();
@@ -374,47 +375,116 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         fn pushOpen(noalias self: *Self, open_value: OpenElem) !void {
-            std.debug.assert(self.parse_stack.items.len < std.math.maxInt(u32));
-            var open = open_value;
-            if (self.open_index_active) {
-                const name = self.nodes.items[open.idx].name_or_text.slice(self.input);
-                const result = try self.open_by_tag.getOrPut(self.doc.allocator, name);
-                open.prev_same_tag = if (result.found_existing) result.value_ptr.* else open_tag_index.none;
-                const position: u32 = @intCast(self.parse_stack.items.len);
-                result.value_ptr.* = position;
-            }
-            try self.parse_stack.append(self.doc.allocator, open);
+            try self.parse_stack.append(self.doc.allocator, open_value);
         }
 
         fn popOpen(noalias self: *Self) OpenElem {
             const open = self.parse_stack.pop().?;
             std.debug.assert(open.idx != 0);
-            if (!self.open_index_active) return open;
-            const name = self.nodes.items[open.idx].name_or_text.slice(self.input);
-            if (open.prev_same_tag == open_tag_index.none) {
-                std.debug.assert(self.open_by_tag.remove(name));
-            } else {
-                const top = self.open_by_tag.getPtr(name) orelse unreachable;
-                top.* = open.prev_same_tag;
-            }
-            if (self.parse_stack.items.len == 1) {
-                self.open_by_tag.clearRetainingCapacity();
-                self.open_index_active = false;
-            }
+            self.index_len = @min(self.index_len, self.parse_stack.items.len);
             return open;
         }
 
-        fn ensureOpenIndex(noalias self: *Self) !void {
-            if (self.open_index_active) return;
-            var position: usize = 1;
-            while (position < self.parse_stack.items.len) : (position += 1) {
-                const open = &self.parse_stack.items[position];
-                const name = self.nodes.items[open.idx].name_or_text.slice(self.input);
-                const result = try self.open_by_tag.getOrPut(self.doc.allocator, name);
-                open.prev_same_tag = if (result.found_existing) result.value_ptr.* else open_tag_index.none;
-                result.value_ptr.* = @intCast(position);
+        fn findOpenForSlowClose(noalias self: *Self, close_name: []const u8, close_key: u64) !?open_tag_index.StackPos {
+            if (self.index_len == 0 and self.before.items.len == 0) {
+                if (self.linearFindOpen(close_name, close_key)) |pos| return pos;
+                try self.buildIndex();
+                return null;
             }
-            self.open_index_active = true;
+
+            if (self.findInDirtySuffix(close_name, close_key)) |pos| return pos;
+            if (self.before.items.len > self.index_len) self.repairIndex();
+            if (self.findInIndex(close_name, close_key)) |pos| return pos;
+            try self.indexDirtySuffix();
+            return null;
+        }
+
+        fn linearFindOpen(self: *const Self, close_name: []const u8, close_key: u64) ?open_tag_index.StackPos {
+            var pos = self.parse_stack.items.len - 1;
+            while (pos > 1) {
+                pos -= 1;
+                if (self.openElemMatchesClose(self.parse_stack.items[pos], close_name, close_key)) return @intCast(pos);
+            }
+            return null;
+        }
+
+        fn findInDirtySuffix(self: *const Self, close_name: []const u8, close_key: u64) ?open_tag_index.StackPos {
+            var pos = self.parse_stack.items.len;
+            while (pos > self.index_len) {
+                pos -= 1;
+                if (self.openElemMatchesClose(self.parse_stack.items[pos], close_name, close_key)) return @intCast(pos);
+            }
+            return null;
+        }
+
+        fn buildIndex(noalias self: *Self) !void {
+            std.debug.assert(self.before.items.len == 0 and self.index_len == 0);
+            const len = self.parse_stack.items.len;
+            try self.before.ensureTotalCapacity(self.doc.allocator, len);
+            try self.tag_map.ensureTotalCapacity(self.doc.allocator, @intCast(len -| 1));
+            self.before.appendAssumeCapacity(.{
+                .name = .{ .start = 0, .len = 0 },
+                .sig = .{ .key = 0, .len = 0 },
+            });
+            var pos: usize = 1;
+            while (pos < len) : (pos += 1) self.indexOneAssumeCapacity(pos);
+            self.index_len = len;
+        }
+
+        fn repairIndex(noalias self: *Self) void {
+            while (self.before.items.len > self.index_len) {
+                const stale_pos = self.before.items.len - 1;
+                const entry = self.before.items[stale_pos];
+                std.debug.assert(self.tag_map.get(entry.sig).? == stale_pos);
+                if (entry.prev == open_tag_index.no_stack_pos) {
+                    std.debug.assert(self.tag_map.remove(entry.sig));
+                } else {
+                    self.tag_map.getPtr(entry.sig).?.* = entry.prev;
+                }
+                self.before.items.len = stale_pos;
+            }
+        }
+
+        fn findInIndex(self: *const Self, close_name: []const u8, close_key: u64) ?open_tag_index.StackPos {
+            const sig: open_tag_index.TagSig = .{ .key = close_key, .len = @intCast(close_name.len) };
+            var pos = self.tag_map.get(sig) orelse return null;
+            while (pos != open_tag_index.no_stack_pos) {
+                const entry = self.before.items[pos];
+                if (self.beforeEntryMatchesClose(entry, close_name, close_key)) return pos;
+                pos = entry.prev;
+            }
+            return null;
+        }
+
+        inline fn beforeEntryMatchesClose(self: *const Self, entry: BeforeEntry, close_name: []const u8, close_key: u64) bool {
+            if (entry.sig.len != close_name.len or entry.sig.key != close_key) return false;
+            if (close_name.len <= 8) return true;
+            const open_name = entry.name.slice(self.input);
+            return std.ascii.eqlIgnoreCase(open_name[8..], close_name[8..]);
+        }
+
+        fn indexDirtySuffix(noalias self: *Self) !void {
+            const start = self.index_len;
+            const end = self.parse_stack.items.len;
+            if (start == end) return;
+            std.debug.assert(self.before.items.len == start);
+            try self.before.ensureTotalCapacity(self.doc.allocator, end);
+            try self.tag_map.ensureTotalCapacity(self.doc.allocator, self.tag_map.count() + @as(u32, @intCast(end - start)));
+            var pos = start;
+            while (pos < end) : (pos += 1) self.indexOneAssumeCapacity(pos);
+            self.index_len = end;
+        }
+
+        fn indexOneAssumeCapacity(noalias self: *Self, pos: usize) void {
+            const open = self.parse_stack.items[pos];
+            const sig: open_tag_index.TagSig = .{ .key = open.tag_key, .len = open.tag_len };
+            const previous = self.tag_map.get(sig) orelse open_tag_index.no_stack_pos;
+            self.before.appendAssumeCapacity(.{
+                .name = self.nodes.items[open.idx].name_or_text,
+                .sig = sig,
+                .prev = previous,
+            });
+            self.tag_map.putAssumeCapacity(sig, @intCast(pos));
         }
 
         inline fn addNode(noalias self: *Self, name_or_text: anytype, is_element: bool, overrides: anytype) !void {
@@ -1334,6 +1404,79 @@ test "closing-tag index tracks duplicate names and rejects unmatched tags" {
     const c = firstQuery(doc.query("c")) orelse return error.TestUnexpectedResult;
     const parent = c.parentNode() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("b", parent.tagName());
+}
+
+test "lazy closing-tag snapshot activates only on full miss and repairs stale positions" {
+    const alloc = std.testing.allocator;
+    const TestOptions: ParseOptions = .{};
+    const Doc = TestOptions.Document();
+    const RawNode = TestOptions.RawNode();
+    var doc = Doc.init(alloc);
+    defer doc.deinit();
+    var nodes: std.ArrayListUnmanaged(RawNode) = .empty;
+    defer nodes.deinit(alloc);
+    const input = "abcdefghX1 abcdefghY1 a b c x y";
+    var state = ParseState(TestOptions){ .doc = &doc, .input = @constCast(input), .i = 0, .nodes = &nodes };
+    defer state.parse_stack.deinit(alloc);
+    defer state.before.deinit(alloc);
+    defer state.tag_map.deinit(alloc);
+    try state.initContainers();
+
+    const Push = struct {
+        fn one(s: anytype, start: usize, end: usize) !void {
+            const name = s.input[start..end];
+            const node_idx = s.nodes.items.len;
+            try s.addNode(.{ start, end }, true, .{});
+            try s.pushOpen(.{
+                .idx = @intCast(node_idx),
+                .tag_key = tags.first8KeyWithMode(name, false),
+                .tag_len = @intCast(name.len),
+                .last_child = InvalidIndex,
+            });
+        }
+    };
+
+    try Push.one(&state, 22, 23); // a
+    try Push.one(&state, 24, 25); // b
+    try Push.one(&state, 26, 27); // c
+    try std.testing.expectEqual(@as(usize, 1), (try state.findOpenForSlowClose("a", tags.first8KeyWithMode("a", false))).?);
+    try std.testing.expectEqual(@as(usize, 0), state.before.items.len);
+
+    try std.testing.expect(try state.findOpenForSlowClose("missing", tags.first8KeyWithMode("missing", false)) == null);
+    try std.testing.expectEqual(state.parse_stack.items.len, state.index_len);
+    try std.testing.expectEqual(state.parse_stack.items.len, state.before.items.len);
+
+    _ = state.popOpen();
+    _ = state.popOpen();
+    try std.testing.expectEqual(@as(usize, 2), state.index_len);
+    try std.testing.expectEqual(@as(usize, 4), state.before.items.len);
+    try Push.one(&state, 28, 29); // x reuses stale b/c-era position
+    try Push.one(&state, 30, 31); // y
+    try std.testing.expectEqual(@as(usize, 2), state.index_len);
+    try std.testing.expectEqual(@as(usize, 4), state.before.items.len);
+
+    // Dirty suffix wins without repairing or extending the historical index.
+    try std.testing.expectEqual(@as(usize, 2), (try state.findOpenForSlowClose("x", tags.first8KeyWithMode("x", false))).?);
+    try std.testing.expectEqual(@as(usize, 4), state.before.items.len);
+
+    // Indexed lookup repairs stale historical c/b entries using `before`, not
+    // the x/y elements that reused their old live stack positions.
+    try std.testing.expectEqual(@as(usize, 1), (try state.findOpenForSlowClose("a", tags.first8KeyWithMode("a", false))).?);
+    try std.testing.expectEqual(state.index_len, state.before.items.len);
+
+    // A complete miss indexes the current dirty suffix exactly once.
+    try std.testing.expect(try state.findOpenForSlowClose("still-missing", tags.first8KeyWithMode("still-missing", false)) == null);
+    try std.testing.expectEqual(state.parse_stack.items.len, state.index_len);
+    try std.testing.expectEqual(state.index_len, state.before.items.len);
+
+    // Equal first-eight keys and lengths remain exact through historical names.
+    while (state.parse_stack.items.len > 1) _ = state.popOpen();
+    try Push.one(&state, 0, 10);
+    try Push.one(&state, 11, 21);
+    try std.testing.expect(try state.findOpenForSlowClose("absent", tags.first8KeyWithMode("absent", false)) == null);
+    const first_long = input[0..10];
+    try std.testing.expectEqual(@as(usize, 1), (try state.findOpenForSlowClose(first_long, tags.first8KeyWithMode(first_long, false))).?);
+    try std.testing.expectEqual(@as(usize, 2), (try state.findOpenForSlowClose("abcdefghy1", tags.first8KeyWithMode("abcdefghy1", false))).?);
 }
 
 fn runStreamPropertyCase(alloc: std.mem.Allocator, input: []const u8) !void {

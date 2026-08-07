@@ -83,6 +83,29 @@ fn runForwardQueryScaling(io: std.Io, allocator: std.mem.Allocator, sibling_coun
     }
 }
 
+fn runCloseIndexScaling(io: std.Io, allocator: std.mem.Allocator, shape: []const u8, depth: usize, misses: usize, iterations: usize) !i96 {
+    var source_writer: std.Io.Writer.Allocating = .init(allocator);
+    defer source_writer.deinit();
+    if (std.mem.eql(u8, shape, "valid") or std.mem.eql(u8, shape, "miss")) {
+        for (0..depth) |_| try source_writer.writer.writeAll("<a>");
+        if (std.mem.eql(u8, shape, "miss")) for (0..misses) |_| try source_writer.writer.writeAll("</missing>");
+        for (0..depth) |_| try source_writer.writer.writeAll("</a>");
+    } else if (std.mem.eql(u8, shape, "recover")) {
+        for (0..depth) |i| try source_writer.writer.print("<x{}>", .{i});
+        try source_writer.writer.writeAll("</x0>");
+    } else return error.InvalidBenchMode;
+
+    const source = try source_writer.toOwnedSlice();
+    defer allocator.free(source);
+    const options: root.ParseOptions = .{};
+    const start = nowNs(io);
+    for (0..iterations) |_| {
+        var doc = try options.parse(allocator, source);
+        doc.deinit();
+    }
+    return nowNs(io) - start;
+}
+
 /// Runs a built-in synthetic parse/query workload and prints elapsed ns.
 pub fn runSynthetic(io: std.Io) !void {
     const alloc = std.heap.smp_allocator;
@@ -345,6 +368,15 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (args.len == 6 and std.mem.eql(u8, args[1], "close-index")) {
+        const depth = try std.fmt.parseInt(usize, args[3], 10);
+        const misses = try std.fmt.parseInt(usize, args[4], 10);
+        const iterations = try std.fmt.parseInt(usize, args[5], 10);
+        const elapsed = try runCloseIndexScaling(io, init.arena.allocator(), args[2], depth, misses, iterations);
+        std.debug.print("close-index\t{s}\tdepth={}\tmisses={}\titerations={}\tns={}\n", .{ args[2], depth, misses, iterations, elapsed });
+        return;
+    }
+
     if (args.len == 4 and std.mem.eql(u8, args[1], "query-parse")) {
         const iterations = try std.fmt.parseInt(usize, args[3], 10);
         const total_ns = try runQueryParse(io, args[2], iterations);
@@ -398,8 +430,8 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len != 3) {
         std.debug.print(
-            "usage:\n  {s} protocol\n  {s} forward-query <siblings> <iterations>\n  {s} <html-file> <iterations>\n  {s} parse <strictest|fastest|full|stream> <html-file> <iterations>\n  {s} query-parse <selector> <iterations>\n  {s} query-match <html-file> <selector> <iterations>\n  {s} query-match <strictest|fastest|full> <html-file> <selector> <iterations>\n  {s} query-cached <html-file> <selector> <iterations>\n  {s} query-cached <strictest|fastest|full> <html-file> <selector> <iterations>\n",
-            .{ args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0] },
+            "usage:\n  {s} protocol\n  {s} forward-query <siblings> <iterations>\n  {s} close-index <valid|recover|miss> <depth> <misses> <iterations>\n  {s} <html-file> <iterations>\n  {s} parse <strictest|fastest|full|stream> <html-file> <iterations>\n  {s} query-parse <selector> <iterations>\n  {s} query-match <html-file> <selector> <iterations>\n  {s} query-match <strictest|fastest|full> <html-file> <selector> <iterations>\n  {s} query-cached <html-file> <selector> <iterations>\n  {s} query-cached <strictest|fastest|full> <html-file> <selector> <iterations>\n",
+            .{ args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0] },
         );
         std.process.exit(2);
     }
