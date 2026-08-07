@@ -18,7 +18,6 @@ const IndexInt = common.IndexInt;
 const InvalidIndex: IndexInt = common.InvalidIndex;
 const MaxProbeEntries: usize = 24;
 const MaxCollectedAttrs: usize = 24;
-const LocalMatchFrameCap: usize = 64;
 const matchesScopeAnchor = common.matchesScopeAnchor;
 const parentElement = common.parentElement;
 const prevElementSibling = common.prevElementSibling;
@@ -209,6 +208,7 @@ pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Do
     if (node_index >= doc.nodes.len) return false;
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
     try workspace.ensureReady(selector);
+    workspace.prepare(selector, scope_root);
     const scratch = &workspace.scratch.?;
 
     for (selector.groups) |group| {
@@ -220,7 +220,7 @@ pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Do
                 (comp.combinator == .none or matchesScopeAnchor(doc, comp.combinator, node_index, scope_root))) return true;
             continue;
         }
-        if (try matchGroupFromRight(Doc, doc, selector, group, rightmost, node_index, scope_root, scratch, workspace.heap_frames)) return true;
+        if (try matchGroupFromRight(Doc, doc, selector, group, rightmost, node_index, scope_root, scratch, workspace)) return true;
     }
     return false;
 }
@@ -230,6 +230,7 @@ pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Do
 pub fn matchesPrefixAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, prefix_len: usize, node_index: IndexInt, workspace: *MatchWorkspace) !bool {
     if (prefix_len == 0 or prefix_len > group.compound_len or node_index >= doc.nodes.len) return false;
     try workspace.ensureReady(selector);
+    workspace.prepare(selector, InvalidIndex);
     const partial: ast.Group = .{
         .compound_start = group.compound_start,
         .compound_len = @intCast(prefix_len),
@@ -243,27 +244,26 @@ pub fn matchesPrefixAt(comptime Doc: type, noalias doc: *const Doc, selector: as
         node_index,
         InvalidIndex,
         &workspace.scratch.?,
-        workspace.heap_frames,
+        workspace,
     );
 }
-
-const MatchFramePhase = enum(u8) {
-    enter,
-    scan_descendant,
-    scan_sibling,
-};
-
-const MatchFrame = struct {
-    rel_index: IndexInt,
-    node_index: IndexInt,
-    phase: MatchFramePhase = .enter,
-    cursor: IndexInt = InvalidIndex,
-};
 
 pub const MatchWorkspace = struct {
     allocator: std.mem.Allocator,
     scratch: ?std.heap.ArenaAllocator = null,
-    heap_frames: []MatchFrame = &.{},
+    segments: std.ArrayListUnmanaged(RtlSegment) = .empty,
+    solve_cache: []IndexInt = &.{},
+    summary_cache: []IndexInt = &.{},
+    eval_frames: std.ArrayListUnmanaged(EvalFrame) = .empty,
+    topology_prev: std.AutoHashMapUnmanaged(IndexInt, IndexInt) = .empty,
+    topology_parents: std.AutoHashMapUnmanaged(IndexInt, void) = .empty,
+    stats: MatchStats = .{},
+    prepared_source: usize = 0,
+    prepared_compounds: usize = 0,
+    prepared_scope: IndexInt = InvalidIndex,
+    prepared_group_start: IndexInt = InvalidIndex,
+    prepared_prefix_len: IndexInt = 0,
+    prepared_node_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) @This() {
         return .{ .allocator = allocator };
@@ -271,144 +271,274 @@ pub const MatchWorkspace = struct {
 
     pub fn ensureReady(self: *@This(), selector: ast.Selector) !void {
         if (self.scratch != null) return;
-        const max_len = selectorMaxCompoundLen(selector);
-        if (max_len > LocalMatchFrameCap) self.heap_frames = try self.allocator.alloc(MatchFrame, max_len);
+        _ = selector;
         self.scratch = std.heap.ArenaAllocator.init(self.allocator);
     }
 
     pub fn deinit(self: *@This()) void {
-        if (self.heap_frames.len != 0) self.allocator.free(self.heap_frames);
         if (self.scratch) |*scratch| scratch.deinit();
-        self.heap_frames = &.{};
+        self.segments.deinit(self.allocator);
+        self.segments = .empty;
+        if (self.solve_cache.len != 0) self.allocator.free(self.solve_cache);
+        self.solve_cache = &.{};
+        if (self.summary_cache.len != 0) self.allocator.free(self.summary_cache);
+        self.summary_cache = &.{};
+        self.eval_frames.deinit(self.allocator);
+        self.eval_frames = .empty;
+        self.topology_prev.deinit(self.allocator);
+        self.topology_prev = .empty;
+        self.topology_parents.deinit(self.allocator);
+        self.topology_parents = .empty;
         self.scratch = null;
+    }
+
+    fn prepare(self: *@This(), selector: ast.Selector, scope_root: IndexInt) void {
+        const source_id = @intFromPtr(selector.source.ptr);
+        const compounds_id = @intFromPtr(selector.compounds.ptr);
+        if (self.prepared_source == source_id and self.prepared_compounds == compounds_id and self.prepared_scope == scope_root) return;
+        self.prepared_source = source_id;
+        self.prepared_compounds = compounds_id;
+        self.prepared_scope = scope_root;
+        self.prepared_group_start = InvalidIndex;
+        self.topology_prev.clearRetainingCapacity();
+        self.topology_parents.clearRetainingCapacity();
     }
 };
 
-fn selectorMaxCompoundLen(selector: ast.Selector) usize {
-    if (selector.max_compound_len != 0) return @intCast(selector.max_compound_len);
-    var max_len: usize = 0;
-    for (selector.groups) |group| max_len = @max(max_len, @as(usize, @intCast(group.compound_len)));
-    return max_len;
-}
+pub const MatchStats = struct {
+    local_predicate_evals: usize = 0,
+    rtl_segment_first_evals: usize = 0,
+    rtl_segment_cache_hits: usize = 0,
+    rtl_ancestor_summary_first_evals: usize = 0,
+    rtl_ancestor_summary_cache_hits: usize = 0,
+    rtl_sibling_summary_first_evals: usize = 0,
+    rtl_sibling_summary_cache_hits: usize = 0,
+    rtl_parent_steps: usize = 0,
+    rtl_prev_sibling_steps: usize = 0,
+    topology_parent_builds: usize = 0,
+    topology_child_visits: usize = 0,
+};
 
-fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, rel_index: IndexInt, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator, heap_frames: []MatchFrame) !bool {
+const RtlSegment = struct {
+    left_rel: IndexInt,
+    right_rel: IndexInt,
+    boundary: ast.Combinator,
+};
+
+const Uncomputed = InvalidIndex;
+const Failed = InvalidIndex - 1;
+const EvalKind = enum(u8) { solve, summary };
+
+const EvalFrame = struct {
+    kind: EvalKind,
+    segment: usize,
+    node: IndexInt,
+    phase: u8 = 0,
+    anchor: IndexInt = Failed,
+    child_result: IndexInt = Failed,
+};
+
+fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, rel_index: IndexInt, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator, workspace: *MatchWorkspace) !bool {
     if (group.compound_len == 0) {
         @branchHint(.cold);
         return false;
     }
+    if (!groupHasExistential(selector, group, rel_index)) {
+        return matchDeterministicGroup(Doc, doc, selector, group, rel_index, node_index, scope_root, scratch, &workspace.stats);
+    }
+    try prepareSegments(workspace, selector, group, rel_index, doc.nodes.len);
+    workspace.eval_frames.clearRetainingCapacity();
+    try workspace.eval_frames.append(workspace.allocator, .{ .kind = .solve, .segment = 0, .node = node_index });
 
-    const needed_frames: usize = @intCast(group.compound_len);
-    var local_frames: [LocalMatchFrameCap]MatchFrame = undefined;
-    const frames: []MatchFrame = if (needed_frames <= LocalMatchFrameCap)
-        local_frames[0..needed_frames]
-    else blk: {
-        @branchHint(.cold);
-        std.debug.assert(heap_frames.len >= needed_frames);
-        break :blk heap_frames[0..needed_frames];
-    };
+    var final_result: IndexInt = Failed;
+    while (workspace.eval_frames.items.len != 0) {
+        const frame_index = workspace.eval_frames.items.len - 1;
+        const snapshot = workspace.eval_frames.items[frame_index];
+        const cache = if (snapshot.kind == .solve) workspace.solve_cache else workspace.summary_cache;
+        const cache_index = snapshot.segment * doc.nodes.len + @as(usize, @intCast(snapshot.node));
+        if (cache[cache_index] != Uncomputed) {
+            if (snapshot.kind == .solve) workspace.stats.rtl_segment_cache_hits += 1 else {
+                const boundary = workspace.segments.items[snapshot.segment].boundary;
+                if (boundary == .descendant) workspace.stats.rtl_ancestor_summary_cache_hits += 1 else workspace.stats.rtl_sibling_summary_cache_hits += 1;
+            }
+            completeWitness(workspace, cache[cache_index], &final_result);
+            continue;
+        }
 
-    var depth: usize = 1;
-    frames[0] = .{
-        .rel_index = rel_index,
-        .node_index = node_index,
-    };
-
-    // Matching runs right-to-left with an explicit stack so descendant/sibling
-    // combinators avoid recursion and stay bounded on deep documents.
-    while (depth != 0) {
-        var frame = &frames[depth - 1];
-        switch (frame.phase) {
-            .enter => {
-                const comp_abs: usize = @intCast(group.compound_start + frame.rel_index);
-                const comp = selector.compounds[comp_abs];
-                if (!try matchesCompound(Doc, doc, selector, comp, frame.node_index, scratch)) {
-                    depth -= 1;
-                    continue;
-                }
-
-                if (frame.rel_index == 0) {
-                    if (comp.combinator == .none or matchesScopeAnchor(doc, comp.combinator, frame.node_index, scope_root)) return true;
-                    depth -= 1;
-                    continue;
-                }
-
-                switch (comp.combinator) {
-                    .child => {
-                        const p = parentElement(doc, frame.node_index) orelse {
-                            depth -= 1;
-                            continue;
-                        };
-                        frame.rel_index -= 1;
-                        frame.node_index = p;
-                    },
-                    .adjacent => {
-                        const prev = prevElementSibling(doc, frame.node_index) orelse {
-                            depth -= 1;
-                            continue;
-                        };
-                        frame.rel_index -= 1;
-                        frame.node_index = prev;
-                    },
-                    .descendant => {
-                        const first = parentElement(doc, frame.node_index) orelse {
-                            depth -= 1;
-                            continue;
-                        };
-                        frame.phase = .scan_descendant;
-                        frame.cursor = first;
-                        frames[depth] = .{
-                            .rel_index = frame.rel_index - 1,
-                            .node_index = first,
-                        };
-                        depth += 1;
-                    },
-                    .sibling => {
-                        const first = prevElementSibling(doc, frame.node_index) orelse {
-                            depth -= 1;
-                            continue;
-                        };
-                        frame.phase = .scan_sibling;
-                        frame.cursor = first;
-                        frames[depth] = .{
-                            .rel_index = frame.rel_index - 1,
-                            .node_index = first,
-                        };
-                        depth += 1;
-                    },
-                    .none => {
-                        @branchHint(.cold);
-                        depth -= 1;
-                    },
-                }
+        var frame = &workspace.eval_frames.items[frame_index];
+        switch (frame.kind) {
+            .solve => switch (frame.phase) {
+                0 => {
+                    workspace.stats.rtl_segment_first_evals += 1;
+                    const segment = workspace.segments.items[frame.segment];
+                    const anchor = try evalSegment(Doc, doc, selector, group, segment, frame.node, scratch, &workspace.stats);
+                    if (anchor == Failed) {
+                        finishWitness(workspace, cache_index, Failed, &final_result);
+                        continue;
+                    }
+                    if (frame.segment + 1 == workspace.segments.items.len) {
+                        const left = selector.compounds[group.compound_start + segment.left_rel];
+                        const value = if (left.combinator == .none or matchesScopeAnchor(doc, left.combinator, anchor, scope_root)) anchor else Failed;
+                        finishWitness(workspace, cache_index, value, &final_result);
+                        continue;
+                    }
+                    frame.anchor = anchor;
+                    frame.phase = 1;
+                    try workspace.eval_frames.append(workspace.allocator, .{ .kind = .summary, .segment = frame.segment, .node = anchor });
+                },
+                else => finishWitness(workspace, cache_index, if (frame.child_result == Failed) Failed else frame.anchor, &final_result),
             },
-            .scan_descendant => {
-                const next = parentElement(doc, frame.cursor) orelse {
-                    depth -= 1;
-                    continue;
-                };
-                frame.cursor = next;
-                frames[depth] = .{
-                    .rel_index = frame.rel_index - 1,
-                    .node_index = next,
-                };
-                depth += 1;
-            },
-            .scan_sibling => {
-                const next = prevElementSibling(doc, frame.cursor) orelse {
-                    depth -= 1;
-                    continue;
-                };
-                frame.cursor = next;
-                frames[depth] = .{
-                    .rel_index = frame.rel_index - 1,
-                    .node_index = next,
-                };
-                depth += 1;
+            .summary => switch (frame.phase) {
+                0 => {
+                    const boundary = workspace.segments.items[frame.segment].boundary;
+                    const candidate = if (boundary == .descendant)
+                        parentElement(doc, frame.node)
+                    else
+                        try prevElementSiblingAccelerated(Doc, doc, frame.node, workspace);
+                    if (candidate == null) {
+                        finishWitness(workspace, cache_index, Failed, &final_result);
+                        continue;
+                    }
+                    if (boundary == .descendant) {
+                        workspace.stats.rtl_ancestor_summary_first_evals += 1;
+                        workspace.stats.rtl_parent_steps += 1;
+                    } else {
+                        workspace.stats.rtl_sibling_summary_first_evals += 1;
+                        workspace.stats.rtl_prev_sibling_steps += 1;
+                    }
+                    frame.anchor = candidate.?;
+                    frame.phase = 1;
+                    try workspace.eval_frames.append(workspace.allocator, .{ .kind = .solve, .segment = frame.segment + 1, .node = candidate.? });
+                },
+                1 => {
+                    if (frame.child_result != Failed) {
+                        finishWitness(workspace, cache_index, frame.anchor, &final_result);
+                        continue;
+                    }
+                    frame.phase = 2;
+                    try workspace.eval_frames.append(workspace.allocator, .{ .kind = .summary, .segment = frame.segment, .node = frame.anchor });
+                },
+                else => finishWitness(workspace, cache_index, frame.child_result, &final_result),
             },
         }
     }
+    return final_result != Failed;
+}
 
+fn prepareSegments(workspace: *MatchWorkspace, selector: ast.Selector, group: ast.Group, rel_index: IndexInt, node_count: usize) !void {
+    if (workspace.prepared_group_start == group.compound_start and workspace.prepared_prefix_len == rel_index + 1 and workspace.prepared_node_count == node_count) return;
+    workspace.segments.clearRetainingCapacity();
+    var right = rel_index;
+    while (true) {
+        var left = right;
+        while (left > 0) {
+            const relation = selector.compounds[group.compound_start + left].combinator;
+            if (relation == .descendant or relation == .sibling) break;
+            left -= 1;
+        }
+        const boundary = selector.compounds[group.compound_start + left].combinator;
+        try workspace.segments.append(workspace.allocator, .{ .left_rel = left, .right_rel = right, .boundary = boundary });
+        if (left == 0) break;
+        right = left - 1;
+    }
+    const cell_count = try std.math.mul(usize, workspace.segments.items.len, node_count);
+    if (workspace.solve_cache.len != cell_count) {
+        if (workspace.solve_cache.len != 0) workspace.allocator.free(workspace.solve_cache);
+        workspace.solve_cache = try workspace.allocator.alloc(IndexInt, cell_count);
+        if (workspace.summary_cache.len != 0) workspace.allocator.free(workspace.summary_cache);
+        workspace.summary_cache = try workspace.allocator.alloc(IndexInt, cell_count);
+    }
+    @memset(workspace.solve_cache, Uncomputed);
+    @memset(workspace.summary_cache, Uncomputed);
+    workspace.prepared_group_start = group.compound_start;
+    workspace.prepared_prefix_len = rel_index + 1;
+    workspace.prepared_node_count = node_count;
+}
+
+fn completeWitness(workspace: *MatchWorkspace, result: IndexInt, final_result: *IndexInt) void {
+    _ = workspace.eval_frames.pop();
+    if (workspace.eval_frames.items.len == 0) final_result.* = result else workspace.eval_frames.items[workspace.eval_frames.items.len - 1].child_result = result;
+}
+
+fn finishWitness(workspace: *MatchWorkspace, cache_index: usize, result: IndexInt, final_result: *IndexInt) void {
+    const frame = workspace.eval_frames.items[workspace.eval_frames.items.len - 1];
+    if (frame.kind == .solve) workspace.solve_cache[cache_index] = result else workspace.summary_cache[cache_index] = result;
+    completeWitness(workspace, result, final_result);
+}
+
+fn evalSegment(comptime Doc: type, doc: *const Doc, selector: ast.Selector, group: ast.Group, segment: RtlSegment, start_node: IndexInt, scratch: *std.heap.ArenaAllocator, stats: *MatchStats) !IndexInt {
+    var rel = segment.right_rel;
+    var node = start_node;
+    while (true) {
+        stats.local_predicate_evals += 1;
+        if (!try matchesCompound(Doc, doc, selector, selector.compounds[group.compound_start + rel], node, scratch)) return Failed;
+        if (rel == segment.left_rel) return node;
+        node = switch (selector.compounds[group.compound_start + rel].combinator) {
+            .child => parentElement(doc, node),
+            .adjacent => prevElementSibling(doc, node),
+            else => unreachable,
+        } orelse return Failed;
+        rel -= 1;
+    }
+}
+
+fn prevElementSiblingAccelerated(comptime Doc: type, doc: *const Doc, node_index: IndexInt, workspace: *MatchWorkspace) !?IndexInt {
+    const RawNode = @TypeOf(doc.nodes[0]);
+    if (comptime @FieldType(RawNode, "prev_sibling") != void) {
+        const previous = doc.nodes[node_index].prev_sibling;
+        return if (previous == InvalidIndex) null else previous;
+    }
+    if (workspace.topology_prev.get(node_index)) |previous| return if (previous == InvalidIndex) null else previous;
+    const parent = doc.nodes[node_index].parent;
+    if (parent == InvalidIndex or parent >= doc.nodes.len) return null;
+    if (!workspace.topology_parents.contains(parent)) {
+        try workspace.topology_parents.put(workspace.allocator, parent, {});
+        workspace.stats.topology_parent_builds += 1;
+        var previous: IndexInt = InvalidIndex;
+        var cursor: IndexInt = parent + 1;
+        const end = doc.nodes[parent].subtree_end;
+        while (cursor <= end and cursor < doc.nodes.len) {
+            const raw = &doc.nodes[cursor];
+            if (raw.parent == parent) {
+                workspace.stats.topology_child_visits += 1;
+                if (raw.isElement(cursor)) {
+                    try workspace.topology_prev.put(workspace.allocator, cursor, previous);
+                    previous = cursor;
+                }
+                cursor = raw.subtree_end + 1;
+            } else {
+                cursor += 1;
+            }
+        }
+    }
+    const previous = workspace.topology_prev.get(node_index) orelse InvalidIndex;
+    return if (previous == InvalidIndex) null else previous;
+}
+
+fn groupHasExistential(selector: ast.Selector, group: ast.Group, rel_index: IndexInt) bool {
+    var rel: IndexInt = 1;
+    while (rel <= rel_index) : (rel += 1) {
+        const combinator = selector.compounds[group.compound_start + rel].combinator;
+        if (combinator == .descendant or combinator == .sibling) return true;
+    }
     return false;
+}
+
+fn matchDeterministicGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selector, group: ast.Group, start_rel: IndexInt, start_node: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator, stats: *MatchStats) !bool {
+    var rel = start_rel;
+    var node = start_node;
+    while (true) {
+        const comp = selector.compounds[group.compound_start + rel];
+        stats.local_predicate_evals += 1;
+        if (!try matchesCompound(Doc, doc, selector, comp, node, scratch)) return false;
+        if (rel == 0) return comp.combinator == .none or matchesScopeAnchor(doc, comp.combinator, node, scope_root);
+        node = switch (comp.combinator) {
+            .child => parentElement(doc, node),
+            .adjacent => prevElementSibling(doc, node),
+            else => unreachable,
+        } orelse return false;
+        rel -= 1;
+    }
 }
 
 pub const ForwardNodeContext = struct {

@@ -931,10 +931,11 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         const DocType = options.Document();
         const NodeTypeWrapper = options.Node();
         const ForwardExecutor = forward.Executor(DocType);
+        const WideForwardExecutor = forward.WideExecutor(DocType);
         const Engine = union(enum) {
             simple: ForwardExecutor,
             forward: ForwardExecutor,
-            rtl: matcher.MatchWorkspace,
+            wide: WideForwardExecutor,
         };
 
         /// Owning document pointer.
@@ -961,7 +962,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
                 .engine = switch (plan.kind) {
                     .simple => .{ .simple = ForwardExecutor.init(doc, selector, plan, scope_root) },
                     .forward => .{ .forward = ForwardExecutor.init(doc, selector, plan, scope_root) },
-                    .rtl => .{ .rtl = matcher.MatchWorkspace.init(doc.allocator) },
+                    .wide => .{ .wide = WideForwardExecutor.init(doc, selector, plan, scope_root) },
                 },
             };
         }
@@ -970,7 +971,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         pub fn deinit(noalias self: *@This()) void {
             switch (self.engine) {
                 .simple, .forward => |*executor| executor.deinit(),
-                .rtl => |*workspace| workspace.deinit(),
+                .wide => |*executor| executor.deinit(),
             }
         }
 
@@ -986,10 +987,10 @@ fn GetQueryIter(comptime options: ParseOptions) type {
             while (self.next_index < self.end_index) : (self.next_index += 1) {
                 const matched = switch (self.engine) {
                     .simple, .forward => |*executor| try executor.process(self.next_index),
-                    .rtl => |*workspace| blk: {
+                    .wide => |*executor| blk: {
                         if (!self.doc.nodeAt(self.next_index).isElement()) break :blk false;
                         if (!matcher.candidateCouldMatch(DocType, self.doc, self.selector, self.next_index)) break :blk false;
-                        break :blk try matcher.matchesSelectorAtWithWorkspace(DocType, self.doc, self.selector, self.next_index, self.scope_root, workspace);
+                        break :blk try executor.process(self.next_index);
                     },
                 };
                 if (matched) {
@@ -3268,7 +3269,7 @@ test "rightmost tag prefilter avoids deep-selector workspace allocation" {
     var it = doc.queryRuntime(selector);
     defer it.deinit();
     try std.testing.expect(try it.next() == null);
-    try std.testing.expect(it.engine.rtl.scratch == null);
+    try std.testing.expect(it.engine.wide.masks.len == 0);
 }
 
 test "deep-selector workspace frame allocation is reused across candidates" {
@@ -3292,13 +3293,11 @@ test "deep-selector workspace frame allocation is reused across candidates" {
     var selector = try ast.Selector.compileRuntime(alloc, selector_source.items);
     defer selector.deinit(alloc);
 
-    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 1 });
-    doc.allocator = failing.allocator();
-    defer doc.allocator = alloc;
     var it = doc.queryRuntime(selector);
     defer it.deinit();
     try std.testing.expect(try it.next() != null);
-    try std.testing.expectEqual(@as(usize, 65), it.engine.rtl.heap_frames.len);
+    try std.testing.expectEqual(@as(usize, 2), it.engine.wide.word_count);
+    try std.testing.expect(it.engine.wide.masks.len != 0);
 }
 
 test "forward query results agree with RTL matching across combinators and structural pseudos" {
@@ -3386,7 +3385,7 @@ test "scoped forward query seeds selector prefixes from outside ancestors" {
     try std.testing.expect(firstQuery(scope.query("body > #scope em")) != null);
 }
 
-test "forward plan boundary uses automaton through 64 compounds and RTL after it" {
+test "forward plan boundary uses inline state through 64 compounds and wide state after it" {
     const alloc = std.testing.allocator;
     var source64 = std.ArrayList(u8).empty;
     defer source64.deinit(alloc);
@@ -3437,7 +3436,103 @@ test "forward plan boundary uses automaton through 64 compounds and RTL after it
     }
     var selector = try ast.Selector.compileRuntime(alloc, source.items);
     defer selector.deinit(alloc);
-    try std.testing.expectEqual(forward.Kind.rtl, forward.buildPlan(selector).kind);
+    try std.testing.expectEqual(forward.Kind.wide, forward.buildPlan(selector).kind);
+
+    var wide_it = doc.queryRuntime(selector);
+    defer wide_it.deinit();
+    var wide_count: usize = 0;
+    while (try wide_it.next()) |_| wide_count += 1;
+    try std.testing.expectEqual(@as(usize, 0), wide_count);
+}
+
+test "RTL descendant failure memoizes ambiguous states instead of enumerating paths" {
+    const alloc = std.testing.allocator;
+    var html_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer html_writer.deinit();
+    for (0..128) |_| try html_writer.writer.writeAll("<div>");
+    for (0..128) |_| try html_writer.writer.writeAll("</div>");
+    const html = try html_writer.toOwnedSlice();
+    defer alloc.free(html);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    try resetParsed(.{}, &doc, html);
+
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(alloc);
+    try source.appendSlice(alloc, ".never");
+    for (1..64) |_| try source.appendSlice(alloc, " div");
+    var selector = try ast.Selector.compileRuntime(alloc, source.items);
+    defer selector.deinit(alloc);
+
+    var workspace = matcher.MatchWorkspace.init(alloc);
+    defer workspace.deinit();
+    try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(GetDocument(.{}), &doc, selector, @intCast(doc.nodes.len - 1), InvalidIndex, &workspace));
+    try std.testing.expect(workspace.stats.rtl_segment_cache_hits + workspace.stats.rtl_ancestor_summary_cache_hits != 0);
+    try std.testing.expect(workspace.stats.rtl_segment_first_evals <= 128 * 64);
+    try std.testing.expect(workspace.stats.rtl_ancestor_summary_first_evals <= 128 * 64);
+}
+
+test "RTL sibling failure uses witness summaries and optional topology" {
+    const alloc = std.testing.allocator;
+    var html_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer html_writer.deinit();
+    try html_writer.writer.writeAll("<main>");
+    for (0..128) |_| try html_writer.writer.writeAll("<i></i>");
+    try html_writer.writer.writeAll("</main>");
+    const html = try html_writer.toOwnedSlice();
+    defer alloc.free(html);
+
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(alloc);
+    try source.appendSlice(alloc, ".never");
+    for (1..64) |_| try source.appendSlice(alloc, " ~ i");
+    var selector = try ast.Selector.compileRuntime(alloc, source.items);
+    defer selector.deinit(alloc);
+
+    var compact_doc = GetDocument(.{ .store_prev_sibling = false }).init(alloc);
+    defer compact_doc.deinit();
+    try resetParsed(.{ .store_prev_sibling = false }, &compact_doc, html);
+    var compact_workspace = matcher.MatchWorkspace.init(alloc);
+    defer compact_workspace.deinit();
+    try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(@TypeOf(compact_doc), &compact_doc, selector, @intCast(compact_doc.nodes.len - 1), InvalidIndex, &compact_workspace));
+    try std.testing.expect(compact_workspace.stats.rtl_sibling_summary_first_evals <= 128 * 64);
+    try std.testing.expectEqual(@as(usize, 1), compact_workspace.stats.topology_parent_builds);
+    try std.testing.expectEqual(@as(usize, 128), compact_workspace.stats.topology_child_visits);
+
+    var linked_doc = GetDocument(.{ .store_prev_sibling = true }).init(alloc);
+    defer linked_doc.deinit();
+    try resetParsed(.{ .store_prev_sibling = true }, &linked_doc, html);
+    var linked_workspace = matcher.MatchWorkspace.init(alloc);
+    defer linked_workspace.deinit();
+    try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(@TypeOf(linked_doc), &linked_doc, selector, @intCast(linked_doc.nodes.len - 1), InvalidIndex, &linked_workspace));
+    try std.testing.expectEqual(@as(usize, 0), linked_workspace.stats.topology_parent_builds);
+}
+
+test "wide selector lists of simple groups require no persistent forward state" {
+    const alloc = std.testing.allocator;
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(alloc);
+    for (0..128) |i| {
+        if (i != 0) try source.appendSlice(alloc, ", ");
+        var name_buf: [16]u8 = undefined;
+        try source.appendSlice(alloc, try std.fmt.bufPrint(&name_buf, ".a{}", .{i}));
+    }
+    var selector = try ast.Selector.compileRuntime(alloc, source.items);
+    defer selector.deinit(alloc);
+    const plan = forward.buildPlan(selector);
+    try std.testing.expectEqual(forward.Kind.wide, plan.kind);
+    try std.testing.expect(!plan.requires_forward_state);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div class=a127></div>".*;
+    try resetParsed(.{}, &doc, &html);
+    var it = doc.queryRuntime(selector);
+    defer it.deinit();
+    try std.testing.expect(try it.next() != null);
+    try std.testing.expectEqual(@as(usize, 0), it.engine.wide.masks.len);
+    try std.testing.expectEqual(@as(usize, 0), it.engine.wide.states.items.len);
 }
 
 test "query collect frees partial output when growth fails" {
