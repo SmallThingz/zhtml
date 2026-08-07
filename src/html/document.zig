@@ -913,26 +913,14 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         /// Allocator param is separate from doc.allocator — callers must free the
         /// returned slice with same allocator passed here (not doc.allocator).
         pub fn collect(self: @This(), allocator: std.mem.Allocator) ![]NodeTypeWrapper {
-            const upper_bound: usize = if (self.next_index < self.end_index and self.end_index <= self.doc.nodes.len)
-                @intCast(self.end_index - self.next_index)
-            else
-                0;
-            const out = try allocator.alloc(NodeTypeWrapper, upper_bound);
-
             var fill_it = self;
             fill_it.scratch = null;
             defer fill_it.deinit();
-            var out_idx: usize = 0;
-            while (fill_it.next()) |node| : (out_idx += 1) out[out_idx] = node;
-            if (out_idx == out.len) return out;
-            if (out_idx == 0) {
-                allocator.free(out);
-                return try allocator.alloc(NodeTypeWrapper, 0);
-            }
-            return allocator.realloc(out, out_idx) catch |err| {
-                allocator.free(out);
-                return err;
-            };
+
+            var out = std.ArrayList(NodeTypeWrapper).empty;
+            errdefer out.deinit(allocator);
+            while (fill_it.next()) |node| try out.append(allocator, node);
+            return out.toOwnedSlice(allocator);
         }
     };
 }
@@ -2962,12 +2950,19 @@ test "query iterator lifecycle releases scratch and copies independently" {
     try std.testing.expectEqualStrings("c", (try remaining[1].getAttributeValue(alloc, "id")).?.value);
 }
 
-test "query collect frees its output when shrinking fails" {
+test "query collect frees partial output when growth fails" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);
     defer doc.deinit();
-    var src = "<div><span></span><i></i><span></span></div>".*;
-    try resetParsed(.{}, &doc, &src);
+
+    var src: std.Io.Writer.Allocating = .init(alloc);
+    defer src.deinit();
+    try src.writer.writeAll("<div>");
+    for (0..64) |_| try src.writer.writeAll("<span></span>");
+    try src.writer.writeAll("</div>");
+    const doc_source = try src.toOwnedSlice();
+    defer alloc.free(doc_source);
+    try resetParsed(.{}, &doc, doc_source);
 
     var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 1 });
     const it = doc.query("span");
