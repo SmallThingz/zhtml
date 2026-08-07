@@ -586,18 +586,32 @@ fn GetNode(comptime options: ParseOptions) type {
 
         /// Writes serialized attributes from raw or destructively parsed attr bytes.
         fn writeAttrsHtml(doc: anytype, noalias node_raw: anytype, writer: anytype) WriterError(@TypeOf(writer))!void {
-            const source: []const u8 = doc.source;
             var i: usize = @intCast(node_raw.name_or_text.end());
+            if (comptime !options.non_destructive) {
+                attr.materializeAttributes(@constCast(doc).source, i);
+                const source: []const u8 = doc.source;
+                while (i < source.len and source[i] != '>') {
+                    const name_start = i;
+                    while (i < source.len and source[i] != '=' and source[i] != 0 and source[i] != '>') : (i += 1) {}
+                    if (i >= source.len or source[i] == '>') return;
+                    try writeAttrName(writer, source[name_start..i]);
+                    if (source[i] == '=') {
+                        const value_start = i + 1;
+                        i = value_start;
+                        while (i < source.len and source[i] != 0) : (i += 1) {}
+                        try writeAttrValue(writer, source[value_start..i]);
+                    }
+                    if (i < source.len) i += 1;
+                }
+                return;
+            }
+
+            const source: []const u8 = doc.source;
             const end = source.len;
 
             while (i < end) {
                 while (i < end and tables.WhitespaceTable[source[i]]) : (i += 1) {}
                 if (i >= end) return;
-
-                if (source[i] == 0) {
-                    i = attr.skipAttrGap(source, end, i);
-                    continue;
-                }
 
                 const name_start = i;
                 const scanned = attr.scanAttrNameOrSkip(source, end, i);
@@ -616,18 +630,6 @@ fn GetNode(comptime options: ParseOptions) type {
                     try writeByte(writer, ' ');
                     try writer.writeAll(source[name_start..raw_value.next_start]);
                     i = raw_value.next_start;
-                    continue;
-                }
-
-                if (delim == 0) {
-                    if (comptime options.non_destructive) {
-                        i += 1;
-                        continue;
-                    }
-                    const parsed = attr.parseParsedValue(doc.source, end, delim_index);
-                    try writeAttrName(writer, name);
-                    try writeAttrValue(writer, parsed.value);
-                    i = parsed.next_start;
                     continue;
                 }
 
@@ -1360,7 +1362,7 @@ test "non-destructive decoded attribute frees temporary allocation on resize fai
     try std.testing.expectError(error.OutOfMemory, node.getAttributeValue(failing.allocator(), "data-v"));
 }
 
-test "raw destructive attribute value reflects lazy decode mutation" {
+test "raw destructive attribute value reflects whole-tag materialization" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);
     defer doc.deinit();
@@ -1369,7 +1371,7 @@ test "raw destructive attribute value reflects lazy decode mutation" {
     try resetParsed(.{}, &doc, &html);
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("a&amp;b", node.getAttributeValueRaw("data-v") orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("a&b", node.getAttributeValueRaw("data-v") orelse return error.TestUnexpectedResult);
 
     const decoded = (try node.getAttributeValue(alloc, "data-v")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a&b", decoded.value);
@@ -1723,19 +1725,22 @@ test "spaced assignments materialize and serialize consistently" {
     try resetParsed(.{}, &doc, &html);
 
     const node = doc.findFirstTag("div") orelse return error.TestUnexpectedResult;
-    const untouched = try std.fmt.allocPrint(alloc, "{f}", .{node});
-    defer alloc.free(untouched);
-    try std.testing.expectEqualSlices(u8, &html, untouched);
+    const formatted = try std.fmt.allocPrint(alloc, "{f}", .{node});
+    defer alloc.free(formatted);
+    try std.testing.expectEqualStrings(
+        "<div id=\"x\" class=\"a b\" data-k=\"v\" hidden data-n=\"a&amp;b�c d\"></div>",
+        formatted,
+    );
 
     try std.testing.expect(firstQuery(doc.query("div#x.a[data-k=v][hidden]")) != null);
     try std.testing.expect(firstQuery(doc.query("div[v]")) == null);
     const data_n = (try node.getAttributeValue(alloc, "data-n")) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("a&b c d", data_n.value);
+    try std.testing.expectEqualStrings("a&b�c d", data_n.value);
 
     const materialized = try std.fmt.allocPrint(alloc, "{f}", .{node});
     defer alloc.free(materialized);
     try std.testing.expectEqualStrings(
-        "<div id=\"x\" class=\"a b\" data-k=\"v\" hidden data-n=\"a&amp;b c d\"></div>",
+        "<div id=\"x\" class=\"a b\" data-k=\"v\" hidden data-n=\"a&amp;b�c d\"></div>",
         materialized,
     );
 }
@@ -1752,7 +1757,7 @@ test "read-only spaced attributes decode and sanitize without source mutation" {
     const node = firstQuery(doc.query("div#x")) orelse return error.TestUnexpectedResult;
     const data_n = (try node.getAttributeValue(alloc, "data-n")) orelse return error.TestUnexpectedResult;
     defer data_n.free(&doc, alloc);
-    try std.testing.expectEqualStrings("a&b c d", data_n.value);
+    try std.testing.expectEqualStrings("a&b�c d", data_n.value);
     try std.testing.expect(!data_n.isBorrowed(&doc));
     try std.testing.expectEqualSlices(u8, &before, doc.source);
     try std.testing.expectEqualSlices(u8, &before, &html);
@@ -1845,17 +1850,14 @@ test "inplace attr lazy parse updates state markers and supports selector-trigge
     try std.testing.expectEqualStrings("a&b", n.value);
 
     const attr_start: usize = node.raw().name_or_text.end();
-    const attr_end = std.mem.indexOfScalarPos(u8, doc.source, attr_start, '>') orelse doc.source.len;
-    const span = doc.source[attr_start..attr_end];
-    const q_marker = [_]u8{ 'q', 0, 0 };
-    const q_pos = std.mem.indexOf(u8, span, &q_marker) orelse return error.TestUnexpectedResult;
+    const span = doc.source[attr_start..];
+    const q_marker = "q=&z\x00";
+    const q_pos = std.mem.indexOf(u8, span, q_marker) orelse return error.TestUnexpectedResult;
     try std.testing.expect(q_pos < span.len);
 
-    const n_marker = [_]u8{ 'n', 0 };
-    const n_pos = std.mem.indexOf(u8, span, &n_marker) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(n_pos + 2 <= span.len);
-    try std.testing.expect(span[n_pos + 1] == 0);
-    try std.testing.expect(span[n_pos + 2] != 0);
+    const n_marker = "n=a&b\x00";
+    const n_pos = std.mem.indexOf(u8, span, n_marker) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(n_pos + n_marker.len <= span.len);
 }
 
 test "attribute matching short-circuits and does not parse later attrs on early failure" {
@@ -1874,12 +1876,12 @@ test "attribute matching short-circuits and does not parse later attrs on early 
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const attr_start: usize = node.raw().name_or_text.end();
-    const attr_end = std.mem.indexOfScalarPos(u8, doc.source, attr_start, '>') orelse doc.source.len;
-    const span = doc.source[attr_start..attr_end];
+    const span = doc.source[attr_start..];
     const class_pos = std.mem.indexOf(u8, span, "class") orelse return error.TestUnexpectedResult;
     const marker_pos = class_pos + "class".len;
     try std.testing.expect(marker_pos < span.len);
     try std.testing.expectEqual(@as(u8, '='), span[marker_pos]);
+    try std.testing.expect(std.mem.indexOf(u8, span, "class=button\x00") != null);
 }
 
 test "inplace extended skip metadata preserves traversal for following attributes" {

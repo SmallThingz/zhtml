@@ -61,12 +61,12 @@ pub fn decodeInPlaceFrom(comptime normalize_whitespace: bool, slice: []u8, first
     return decodePlainInPlaceFrom(slice, first, false);
 }
 
-/// Decodes an attribute value and replaces numeric references to codepoint zero
-/// and literal NUL bytes with ASCII spaces. `first` may be supplied by callers
+/// Decodes an attribute value, replacing numeric references to codepoint zero
+/// with U+FFFD and literal NUL bytes with ASCII spaces. `first` may be supplied by callers
 /// that already searched for a decodable entity.
 pub fn decodeAttributeInPlace(slice: []u8, first: ?usize) usize {
     const new_len = if (first orelse firstDecodableEntity(slice, 0)) |amp|
-        decodePlainInPlaceFrom(slice, amp, true)
+        decodePlainInPlaceFrom(slice, amp, false)
     else
         slice.len;
     for (slice[0..new_len]) |*c| {
@@ -467,10 +467,10 @@ test "decode numeric entities rejects null codepoint" {
     try std.testing.expectEqualSlices(u8, &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8, buf[0..n]);
 }
 
-test "attribute decoding replaces numeric and literal nulls with spaces" {
+test "attribute decoding replaces numeric nulls and literal nulls" {
     var buf = "a&#0;b&#x00;c\x00d&amp;e".*;
     const n = decodeAttributeInPlace(&buf, null);
-    try std.testing.expectEqualStrings("a b c d&e", buf[0..n]);
+    try std.testing.expectEqualSlices(u8, "a" ++ &ReplacementUtf8 ++ "b" ++ &ReplacementUtf8 ++ "c d&e", buf[0..n]);
 }
 
 test "decode numeric entities rejects surrogate codepoints" {

@@ -1,11 +1,6 @@
 const std = @import("std");
 const tables = @import("tables.zig");
 const entities = @import("entities.zig");
-const common = @import("../common.zig");
-
-const IndexInt = common.IndexInt;
-const ExtendedGapSentinel = 0xff;
-const ExtendedGapHeaderLen = 2 + @sizeOf(IndexInt);
 
 pub const RawKind = enum {
     empty,
@@ -21,13 +16,6 @@ pub const RawValue = struct {
     /// Exclusive end byte offset of the raw value payload.
     end: usize,
     /// Next scan cursor after this raw value.
-    next_start: usize,
-};
-
-pub const ParsedValue = struct {
-    /// Borrowed parsed attribute value bytes.
-    value: []const u8,
-    /// Next scan cursor after this parsed value.
     next_start: usize,
 };
 
@@ -51,7 +39,6 @@ pub fn valueDelimiterIndex(source: []const u8, end: usize, name_end: usize) usiz
 
 const AttrValueMode = enum {
     raw,
-    destructive,
     non_destructive,
 };
 
@@ -66,7 +53,10 @@ pub fn scanAttrNameOrSkip(source: []const u8, end: usize, start: usize) ScanAttr
 
     var i = start;
     const name_start = i;
-    while (i < end and tables.IdentCharTable[source[i]]) : (i += 1) {}
+    while (i < end) : (i += 1) {
+        const b = source[i];
+        if (b == '=' or b == '/' or b == '>' or tables.WhitespaceTable[b]) break;
+    }
     if (i == name_start) {
         return .{ .name = "", .next_start = i + 1 };
     }
@@ -110,91 +100,76 @@ pub fn parseRawValue(source: []const u8, span_end: usize, eq_index: usize) RawVa
     return .{ .kind = .naked, .start = i, .end = j, .next_start = j };
 }
 
-/// Parses parsed in-place attribute value span (after name delimiter).
-pub fn parseParsedValue(source: []const u8, span_end: usize, name_end: usize) ParsedValue {
-    std.debug.assert(span_end <= source.len);
-    if (name_end + 1 >= span_end) return .{ .value = "", .next_start = span_end };
+/// Destructive documents compact a complete tag's attributes on first access.
+/// The compact form is `name[=decoded-value]NUL ... >`; empty assignments and
+/// valueless attributes both use `nameNUL`.
+pub fn materializeAttributes(source: []u8, name_end: usize) void {
+    if (name_end >= source.len or !tables.WhitespaceTable[source[name_end]]) return;
 
-    // In destructive mode parsed values are materialized in place and delimited
-    // by zero bytes plus optional gap metadata.
-    const marker = source[name_end + 1];
-    const quoted = marker == 0;
-    var value_start: usize = if (quoted) name_end + 2 else name_end + 1;
-    if (value_start > span_end) value_start = span_end;
+    var read = name_end;
+    var write = name_end;
+    const end = source.len;
 
-    const value_end = findParsedValueEnd(source, value_start, span_end, quoted);
-    if (!quoted and value_end < span_end and source[value_end] == '>') {
-        return .{ .value = source[value_start..value_end], .next_start = value_end };
-    }
-    const next = nextAfterValue(source, value_end, span_end);
-    return .{ .value = source[value_start..value_end], .next_start = next };
-}
-
-/// Finds a destructive-mode parsed value end; naked values may end at `>`.
-pub fn findParsedValueEnd(source: []const u8, value_start: usize, span_end: usize, quoted: bool) usize {
-    std.debug.assert(span_end <= source.len);
-    std.debug.assert(value_start <= span_end);
-    var i = value_start;
-    if (quoted) {
-        while (i < span_end and source[i] != 0) : (i += 1) {}
-    } else {
-        while (i < span_end and source[i] != 0 and source[i] != '>') : (i += 1) {}
-    }
-    return i;
-}
-
-/// Returns the next attribute scan cursor after a parsed value and gap metadata.
-pub fn nextAfterValue(source: []const u8, value_end: usize, span_end: usize) usize {
-    std.debug.assert(span_end <= source.len);
-    std.debug.assert(value_end <= span_end);
-    if (value_end >= span_end) return span_end;
-    var i = value_end + 1;
-    if (i >= span_end) return span_end;
-
-    if (source[i] == 0) {
-        // Gap metadata preserves how much source was skipped when the decoded
-        // value is shorter than its raw representation.
-        if (i + 1 >= span_end) return span_end;
-
-        const len_byte = source[i + 1];
-        if (len_byte == ExtendedGapSentinel) {
-            if (i + ExtendedGapHeaderLen > span_end) return span_end;
-            const skip = std.mem.readInt(IndexInt, source[i + 2 .. i + ExtendedGapHeaderLen][0..@sizeOf(IndexInt)], nativeEndian());
-            const next = i + ExtendedGapHeaderLen + @as(usize, @intCast(skip));
-            return @min(next, span_end);
+    while (read < end) {
+        skipWhitespace(source, end, &read);
+        if (read >= end) break;
+        if (source[read] == '>') {
+            source[write] = '>';
+            return;
+        }
+        if (source[read] == '/') {
+            while (read < end and source[read] != '>') : (read += 1) {}
+            source[write] = '>';
+            return;
         }
 
-        const next = i + 2 + @as(usize, len_byte);
-        return @min(next, span_end);
-    }
+        const scanned = scanAttrNameOrSkip(source, end, read);
+        const raw_name = scanned.name orelse {
+            source[write] = '>';
+            return;
+        };
+        read = scanned.next_start;
+        if (raw_name.len == 0) continue;
 
-    if (tables.WhitespaceTable[source[i]]) {
-        while (i < span_end and tables.WhitespaceTable[source[i]]) : (i += 1) {}
-        return i;
-    }
+        const name_dst = write;
+        const bad_first_utf8 = invalidUtf8First(raw_name);
+        std.mem.copyForwards(u8, source[write .. write + raw_name.len], raw_name);
+        // RW mode sanitizes a malformed UTF-8 lead byte. RO traversal preserves it.
+        if (bad_first_utf8) source[write] = 0x01;
+        for (source[write .. write + raw_name.len]) |*b| {
+            if (b.* == 0) b.* = 0x01;
+        }
+        write += raw_name.len;
 
-    return i;
+        const delim = valueDelimiterIndex(source, end, read);
+        if (delim < end and source[delim] == '=') {
+            const raw = parseRawValue(source, end, delim);
+            read = raw.next_start;
+            if (raw.kind != .empty and raw.end > raw.start) {
+                const decoded_len = entities.decodeAttributeInPlace(source[raw.start..raw.end], null);
+                source[write] = '=';
+                write += 1;
+                std.mem.copyForwards(u8, source[write .. write + decoded_len], source[raw.start .. raw.start + decoded_len]);
+                write += decoded_len;
+            }
+        } else {
+            read = delim;
+        }
+
+        // `name_dst` documents that every successfully scanned name emits an attr.
+        std.debug.assert(write > name_dst);
+        source[write] = 0;
+        write += 1;
+    }
+    if (write < end) source[write] = '>';
 }
 
-/// Returns the next cursor after a destructive-mode attribute gap marker.
-pub fn skipAttrGap(source: []const u8, span_end: usize, start: usize) usize {
-    std.debug.assert(span_end <= source.len);
-    std.debug.assert(start < span_end);
-    if (start + 1 >= span_end) return span_end;
-    const len_byte = source[start + 1];
-    if (len_byte == ExtendedGapSentinel) {
-        if (start + ExtendedGapHeaderLen > span_end) return span_end;
-        const skip = std.mem.readInt(IndexInt, source[start + 2 .. start + ExtendedGapHeaderLen][0..@sizeOf(IndexInt)], nativeEndian());
-        const next = start + ExtendedGapHeaderLen + @as(usize, @intCast(skip));
-        return @min(next, span_end);
-    }
-    const next = start + 2 + @as(usize, len_byte);
-    return @min(next, span_end);
-}
-
-/// Returns native endian used to encode in-buffer gap metadata.
-pub fn nativeEndian() std.builtin.Endian {
-    return @import("builtin").cpu.arch.endian();
+inline fn invalidUtf8First(name: []const u8) bool {
+    if (name.len == 0 or name[0] < 0x80) return false;
+    const len = std.unicode.utf8ByteSequenceLength(name[0]) catch return true;
+    if (len > name.len) return true;
+    _ = std.unicode.utf8Decode(name[0..len]) catch return true;
+    return false;
 }
 
 /// Advances `i` past ASCII/HTML whitespace within an attribute span.
@@ -246,9 +221,9 @@ pub fn collectSelectedValues(
     if (selected_names.len == 0) return;
     if (selected_names.len != out_values.len) return;
 
-    // Selector matching often probes a few attribute names repeatedly; this
-    // helper resolves all requested names in one traversal of the attr span.
-    var i: usize = node.name_or_text.end();
+    const name_end: usize = node.name_or_text.end();
+    materializeAttributes(source, name_end);
+    var i = name_end;
     const end = source.len;
     var remaining: usize = 0;
     for (out_values) |v| {
@@ -257,65 +232,34 @@ pub fn collectSelectedValues(
     if (remaining == 0) return;
 
     while (i < end) {
-        skipWhitespace(source, end, &i);
-        if (i >= end) break;
-
-        const scanned = scanAttrNameOrSkip(source, end, i);
-        const name_slice = scanned.name orelse break;
-        i = scanned.next_start;
-        if (name_slice.len == 0) continue;
+        if (source[i] == '>') break;
+        const name_start = i;
+        while (i < end and source[i] != '=' and source[i] != 0 and source[i] != '>') : (i += 1) {}
+        if (i >= end or source[i] == '>') break;
+        const name_slice = source[name_start..i];
         const selected_idx = firstUnresolvedMatch(selected_names, out_values, name_slice);
-
-        const delim_index = valueDelimiterIndex(source, end, i);
-        if (delim_index >= end) {
-            if (selected_idx) |idx| {
-                out_values[idx] = "";
-                remaining -= 1;
-            }
-            break;
+        var value: []const u8 = "";
+        if (source[i] == '=') {
+            const value_start = i + 1;
+            i = value_start;
+            while (i < end and source[i] != 0) : (i += 1) {}
+            value = source[value_start..i];
         }
-
-        const delim = source[delim_index];
-        if (delim == '=') {
-            const eq_index = delim_index;
-            const raw = parseRawValue(source, end, eq_index);
-            if (selected_idx) |idx| {
-                out_values[idx] = materializeRawValue(source, end, eq_index, raw);
-                const parsed = parseParsedValue(source, end, eq_index);
-                i = parsed.next_start;
-                remaining -= 1;
-                if (remaining == 0) return;
-            } else {
-                i = raw.next_start;
-            }
-            continue;
-        }
-
-        if (delim == 0) {
-            const parsed = parseParsedValue(source, end, delim_index);
-            i = parsed.next_start;
-            if (selected_idx) |idx| {
-                out_values[idx] = parsed.value;
-                remaining -= 1;
-                if (remaining == 0) return;
-            }
-            continue;
-        }
-
+        if (i < end and source[i] == 0) i += 1;
         if (selected_idx) |idx| {
-            out_values[idx] = "";
+            out_values[idx] = value;
             remaining -= 1;
             if (remaining == 0) return;
         }
-
-        if (delim == '>' or delim == '/') break;
-        i = if (delim_index == i) i + 1 else delim_index;
     }
 }
 
 /// Finds and lazily decodes one attribute value in destructive document source.
 inline fn getAttrValueDestructive(doc: anytype, node: anytype, name: []const u8) ?[]const u8 {
-    return getAttrValueSingle(doc, node, name, undefined, .destructive) catch unreachable;
+    const source: []u8 = @constCast(doc).source;
+    const name_end: usize = node.name_or_text.end();
+    materializeAttributes(source, name_end);
+    return getCompactAttrValue(source, name_end, name);
 }
 
 /// Finds and materializes one attribute value without mutating document source.
@@ -325,11 +269,12 @@ inline fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const 
 
 /// Shared single-attribute traversal; mode only changes value materialization.
 inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator, comptime mode: AttrValueMode) !?[]const u8 {
-    const source = if (comptime mode == .destructive) @constCast(doc).source else doc.source;
+    const source = doc.source;
 
     var i: usize = node.name_or_text.end();
     const end = source.len;
     if (i >= end) return null;
+    if (!tables.WhitespaceTable[source[i]]) return getCompactAttrValue(source, i, name);
 
     while (i < end) {
         skipWhitespace(source, end, &i);
@@ -350,18 +295,10 @@ inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allo
             if (is_target) {
                 return switch (comptime mode) {
                     .raw => source[raw.start..raw.end],
-                    .destructive => materializeRawValue(source, end, delim_index, raw),
                     .non_destructive => try materializeRawValueOwned(allocator, source, raw),
                 };
             }
             i = raw.next_start;
-            continue;
-        }
-
-        if (delim == 0) {
-            const parsed = parseParsedValue(source, end, delim_index);
-            if (is_target) return parsed.value;
-            i = parsed.next_start;
             continue;
         }
 
@@ -370,6 +307,28 @@ inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allo
         i = if (delim_index == i) i + 1 else delim_index;
     }
 
+    return null;
+}
+
+fn getCompactAttrValue(source: []const u8, start: usize, name: []const u8) ?[]const u8 {
+    var i = start;
+    while (i < source.len and source[i] != '>') {
+        const name_start = i;
+        while (i < source.len and source[i] != '=' and source[i] != 0 and source[i] != '>') : (i += 1) {}
+        if (i >= source.len or source[i] == '>') return null;
+        const is_target = std.ascii.eqlIgnoreCase(source[name_start..i], name);
+        if (source[i] == 0) {
+            i += 1;
+            if (is_target) return "";
+            continue;
+        }
+        const value_start = i + 1;
+        i = value_start;
+        while (i < source.len and source[i] != 0) : (i += 1) {}
+        if (i >= source.len) return null;
+        if (is_target) return source[value_start..i];
+        i += 1;
+    }
     return null;
 }
 
@@ -387,83 +346,6 @@ fn materializeRawValueOwned(allocator: std.mem.Allocator, source: []const u8, ra
     const new_len = entities.decodeAttributeInPlace(copied, first);
     if (new_len == copied.len) return copied;
     return try allocator.realloc(copied, new_len);
-}
-
-/// Decodes a raw value into destructive source bytes and returns its new span.
-fn materializeRawValue(source: []u8, span_end: usize, eq_index: usize, raw: RawValue) []const u8 {
-    std.debug.assert(span_end <= source.len);
-    std.debug.assert(eq_index < span_end);
-    std.debug.assert(raw.start <= raw.end and raw.end <= span_end);
-    std.debug.assert(raw.next_start <= span_end);
-    if (raw.kind == .empty) {
-        source[eq_index] = ' ';
-        return "";
-    }
-
-    var decoded_len: usize = raw.end - raw.start;
-    decoded_len = entities.decodeAttributeInPlace(source[raw.start..raw.end], null);
-
-    if (raw.kind == .quoted) {
-        source[eq_index] = 0;
-        if (eq_index + 1 < span_end) source[eq_index + 1] = 0;
-
-        const dst = @min(eq_index + 2, span_end);
-        if (decoded_len != 0 and dst != raw.start and dst + decoded_len <= span_end) {
-            std.mem.copyForwards(u8, source[dst .. dst + decoded_len], source[raw.start .. raw.start + decoded_len]);
-        }
-
-        const term = @min(dst + decoded_len, span_end);
-        if (term < span_end) {
-            source[term] = 0;
-            patchGap(source, span_end, term, raw.next_start);
-        }
-        return source[dst..term];
-    }
-
-    source[eq_index] = 0;
-
-    const dst = @min(eq_index + 1, span_end);
-    if (decoded_len != 0 and dst != raw.start and dst + decoded_len <= span_end) {
-        std.mem.copyForwards(u8, source[dst .. dst + decoded_len], source[raw.start .. raw.start + decoded_len]);
-    }
-
-    const term = @min(dst + decoded_len, span_end);
-    if (term < span_end) {
-        source[term] = 0;
-        patchGap(source, span_end, term, raw.next_start);
-    }
-
-    return source[dst..term];
-}
-
-/// Writes gap metadata after a shortened decoded value.
-fn patchGap(source: []u8, span_end: usize, value_end: usize, raw_next_start: usize) void {
-    std.debug.assert(span_end <= source.len);
-    std.debug.assert(value_end <= span_end);
-    if (value_end + 1 >= span_end) return;
-
-    const next_start = @min(raw_next_start, span_end);
-    if (next_start <= value_end + 1) return;
-
-    const gap_start = value_end + 1;
-    const gap_len = next_start - gap_start;
-    if (gap_len == 0) return;
-
-    if (gap_len == 1) {
-        source[gap_start] = ' ';
-        return;
-    }
-
-    if (gap_len <= 256) {
-        source[gap_start] = 0;
-        source[gap_start + 1] = @intCast(gap_len - 2);
-        return;
-    }
-
-    source[gap_start] = 0;
-    source[gap_start + 1] = ExtendedGapSentinel;
-    const skip: IndexInt = @intCast(gap_len - ExtendedGapHeaderLen);
-    std.mem.writeInt(IndexInt, source[gap_start + 2 .. gap_start + ExtendedGapHeaderLen][0..@sizeOf(IndexInt)], skip, nativeEndian());
 }
 
 /// Returns the first unresolved requested name matching `name`.
@@ -580,39 +462,31 @@ test "parseRawValue handles quoted, naked, empty, and unterminated" {
     }
 }
 
-test "parseParsedValue honors gap markers and truncation" {
-    const testing = std.testing;
-
-    {
-        var buf = [_]u8{ 'a', 0, 'v', 'a', 'l', 0, ' ', 'b' };
-        const parsed = parseParsedValue(buf[0..], buf.len, 1);
-        try testing.expectEqualStrings("val", parsed.value);
-        try testing.expectEqual(@as(usize, 7), parsed.next_start);
-    }
-    {
-        var buf = [_]u8{ 'a', 0, 0, 'v', 'a', 'l', 0, 0, 1, 'x', 'b' };
-        const parsed = parseParsedValue(buf[0..], buf.len, 1);
-        try testing.expectEqualStrings("val", parsed.value);
-        try testing.expectEqual(@as(usize, 10), parsed.next_start);
-    }
+test "materializeAttributes compacts and decodes the complete list" {
+    var buf = "<a b = \"x&amp;y\" c d='a>b'>".*;
+    materializeAttributes(&buf, 2);
+    try std.testing.expectEqualSlices(u8, "b=x&y\x00c\x00d=a>b\x00>", buf[2..17]);
+    try std.testing.expectEqualStrings("x&y", getCompactAttrValue(&buf, 2, "b").?);
+    try std.testing.expectEqualStrings("", getCompactAttrValue(&buf, 2, "c").?);
+    try std.testing.expectEqualStrings("a>b", getCompactAttrValue(&buf, 2, "d").?);
 }
 
-test "materializeRawValue preserves traversal for following attrs" {
-    const testing = std.testing;
+test "materializeAttributes preserves slash values and collapses empty assignments" {
+    var slash = "<a b=/>".*;
+    materializeAttributes(&slash, 2);
+    try std.testing.expectEqualSlices(u8, "b=/\x00>", slash[2..]);
 
-    var buf = "a=\"x\" b=\"y\"".*;
-    const span_end = buf.len;
-    const eq_index = std.mem.indexOfScalar(u8, &buf, '=') orelse return error.MissingEq;
-    const raw = parseRawValue(&buf, span_end, eq_index);
-    const value = materializeRawValue(buf[0..], span_end, eq_index, raw);
-    try testing.expectEqualStrings("x", value);
+    var empty = "<a b=>".*;
+    materializeAttributes(&empty, 2);
+    try std.testing.expectEqualSlices(u8, "b\x00>>", empty[2..]);
+}
 
-    const parsed = parseParsedValue(buf[0..], span_end, eq_index);
-    try testing.expectEqualStrings("x", parsed.value);
+test "RW compaction preserves invalid value bytes and sanitizes invalid name leads" {
+    var buf = [_]u8{ '<', 'a', ' ', 0x80, 'b', '=', 0xff, 'x', '>' };
+    const raw = scanAttrNameOrSkip(&buf, buf.len, 3);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x80, 'b' }, raw.name.?);
 
-    var i = parsed.next_start;
-    while (i < span_end and tables.WhitespaceTable[buf[i]]) : (i += 1) {}
-    const scanned = scanAttrNameOrSkip(&buf, span_end, i);
-    const name = scanned.name orelse return error.MissingAttr;
-    try testing.expectEqualStrings("b", name);
+    materializeAttributes(&buf, 2);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 'b', '=', 0xff, 'x', 0, '>' }, buf[2..]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xff, 'x' }, getCompactAttrValue(&buf, 2, &[_]u8{ 0x01, 'b' }).?);
 }

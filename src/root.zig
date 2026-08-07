@@ -104,7 +104,7 @@ test "writeHtml serializes node subtree" {
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     try div.writeHtml(&out.writer);
-    try std.testing.expectEqualStrings("<div id='a'><span>v</span></div>", out.written());
+    try std.testing.expectEqualStrings("<div id=\"a\"><span>v</span></div>", out.written());
 }
 
 test "writeHtml respects in-place attr parsing and void tags" {
@@ -195,8 +195,8 @@ test "writeHtml parses and prints complex document" {
         \\<meta charset="utf-8">
         \\<script>var x = 1 < 2;</script>
         \\</head><body>
-        \\<div id='root' class='a b' data-q='1>2'>Hello&nbsp;<span>World</span></div>
-        \\<img src='x.png' alt='hi'>
+        \\<div id="root" class="a b" data-q="1>2">Hello&nbsp;<span>World</span></div>
+        \\<img src="x.png" alt="hi">
         \\<br>
         \\<ul><li>One</li><li>Two</li></ul>
         \\</body></html>
@@ -217,5 +217,5 @@ test "writeHtmlSelf excludes children" {
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     try div.writeSelfHtml(&out.writer);
-    try std.testing.expectEqualStrings("<div id='a'>", out.written());
+    try std.testing.expectEqualStrings("<div id=\"a\">", out.written());
 }

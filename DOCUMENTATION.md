@@ -92,7 +92,7 @@ All examples are verified by running `zig build examples-check`
   - `getAttributeValue(gpa, name)` returns `!?AttributeValueResult`
   - `AttributeValueResult.value`
   - `AttributeValueResult.free(doc, gpa)`
-  - `getAttributeValueRaw(name)` returns the current raw value bytes; destructive documents may expose bytes mutated by prior decoded lookups
+  - `getAttributeValueRaw(name)` returns raw source bytes until a destructive tag is materialized, then returns its decoded compact value
 - Scoped queries:
   - same iterator-first query family as `Document` (`query` and `queryRuntime`)
 
@@ -115,7 +115,7 @@ All examples are verified by running `zig build examples-check`
   - `unescape: bool = true`
 - parse/query work split:
   - parse keeps raw text and attribute spans as source slices
-  - destructive mode may decode attrs/text in place on query-time APIs
+  - destructive mode compacts and decodes a tag's complete attribute list in place on its first attribute access
   - non-destructive mode keeps attrs/text read-only and materializes decoded output only when needed
 
 ### Design Notes
@@ -124,6 +124,9 @@ All examples are verified by running `zig build examples-check`
 - non-destructive parsing avoids a full-source copy and instead moves lazy attr/text decoding out of the input buffer
 - nodes are stored in one contiguous array and linked by indexes rather than pointers to keep traversal cache-friendly and make `-Dintlen` effective
 - attribute storage stays span-based instead of building heap objects so parse cost scales with actual queries, not attribute count
+- destructive attribute lists use `name[=decoded-value]NUL ... >`; quoted and unquoted values share one representation, and empty assignments collapse to valueless attributes
+- compact values may contain whitespace, `>`, `/`, `=`, and malformed UTF-8 because only NUL terminates them
+- destructive decoding changes literal NUL bytes to spaces and numeric NUL references to U+FFFD; malformed leading UTF-8 bytes in attribute names are replaced with an internal marker
 - query-time decoding keeps parse throughput high by avoiding eager entity decode and whitespace normalization for bytes that may never be read
 
 ## Non-Destructive Parsing
@@ -142,6 +145,7 @@ Behavior:
 - the default destructive path is unchanged and still parses caller memory directly
 - non-destructive mode does not allocate or rewrite a full source copy
 - lazy attribute reads never rewrite the source buffer
+- malformed UTF-8 in read-only attribute names and values remains in the source and is traversed tolerantly
 - lazy text reads never rewrite the source buffer
 - text extraction allocates only when decoding or normalization requires materialized output
 - `Document.writeHtml` and `Document.format` return the exact original source bytes in non-destructive mode
