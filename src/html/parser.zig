@@ -491,9 +491,9 @@ fn ParseState(comptime opts: ParseOptions) type {
                     '=' => {
                         self.i = j + 1;
                         self.skipWs();
-                        if (j < self.input.len and (self.input[j + 1] == '\'' or self.input[j + 1] == '"')) {
-                            const q = self.input[j + 1];
-                            self.i = j + 2;
+                        if (self.i < self.input.len and (self.input[self.i] == '\'' or self.input[self.i] == '"')) {
+                            const q = self.input[self.i];
+                            self.i += 1;
                             const end_quote = std.mem.indexOfScalarPos(u8, self.input, self.i, q) orelse return null;
                             self.i = end_quote + 1;
                         }
@@ -512,13 +512,17 @@ fn ParseState(comptime opts: ParseOptions) type {
                         defer self.i += 1;
                         return self.i;
                     },
-                    '=' => if (self.i + 1 < self.input.len and (self.input[self.i + 1] == '\'' or self.input[self.i + 1] == '"')) {
-                        const q = self.input[self.i + 1];
-                        self.i += 2;
-                        self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, q) orelse {
-                            @branchHint(.cold);
-                            return null;
-                        };
+                    '=' => {
+                        self.i += 1;
+                        self.skipWs();
+                        if (self.i < self.input.len and (self.input[self.i] == '\'' or self.input[self.i] == '"')) {
+                            const q = self.input[self.i];
+                            self.i += 1;
+                            self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, q) orelse {
+                                @branchHint(.cold);
+                                return null;
+                            };
+                        }
                     },
                     '\'', '"' => |q| {
                         self.i += 1;
@@ -1290,6 +1294,35 @@ test "attribute scanner handles quoted > and self-closing tails" {
     try std.testing.expect(firstQuery(doc.query("br#b")) != null);
 }
 
+test "attribute scanner respects quoted greater-than with whitespace around equals" {
+    const alloc = std.testing.allocator;
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+
+    var html = "<div title \n = \"a>b\"><span id = x></span></div><p id= \"after\"></p>".*;
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    try std.testing.expect(firstQuery(doc.query("div[title='a>b'] span#x")) != null);
+    try std.testing.expect(firstQuery(doc.query("p#after")) != null);
+}
+
+test "raw-text and svg scanners respect spaced quoted end delimiters" {
+    const alloc = std.testing.allocator;
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+
+    var html = ("<script>const x = '<svg>';</script data-x = \"a>b\">" ++
+        "<svg><svg data-x = \"a>b\"><g></g></svg></svg>" ++
+        "<div id = after></div>").*;
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    try std.testing.expect(firstQuery(doc.query("script")) != null);
+    try std.testing.expect(firstQuery(doc.query("div#after")) != null);
+    var svg_it = doc.query("svg");
+    try std.testing.expect(svg_it.next() != null);
+    try std.testing.expect(svg_it.next() == null);
+}
+
 test "attribute parsing still builds the DOM" {
     const alloc = std.testing.allocator;
     var doc = TestDocument.init(alloc);
@@ -1305,20 +1338,73 @@ test "attribute parsing still builds the DOM" {
 
 test "parser randomized structural sweep" {
     const alloc = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(0x4a91_13d2_7d6f_20b5);
-    const random = prng.random();
+    var seed: u64 = 0;
+    while (seed < 16) : (seed += 1) {
+        var prng = std.Random.DefaultPrng.init(seed +% 0x4a91_13d2_7d6f_20b5);
+        const random = prng.random();
 
-    var case_idx: usize = 0;
-    while (case_idx < 512) : (case_idx += 1) {
-        const len = random.intRangeLessThan(usize, 0, 257);
-        const input = try alloc.alloc(u8, len);
-        defer alloc.free(input);
-        fillInterestingParserBytes(random, input);
-        runParserPropertyCase(alloc, input) catch |err| {
-            std.debug.print("parser randomized case {} failed err={} len={}\n", .{ case_idx, err, len });
-            return err;
-        };
+        var case_idx: usize = 0;
+        while (case_idx < 512) : (case_idx += 1) {
+            const len = random.intRangeLessThan(usize, 0, 257);
+            const input = try alloc.alloc(u8, len);
+            defer alloc.free(input);
+            fillInterestingParserBytes(random, input);
+            try runStreamPropertyCase(alloc, input);
+            runParserPropertyCase(alloc, input) catch |err| {
+                std.debug.print("parser randomized seed={} case {} failed err={} len={}\n", .{ seed, case_idx, err, len });
+                return err;
+            };
+        }
     }
+}
+
+fn runStreamPropertyCase(alloc: std.mem.Allocator, input: []const u8) !void {
+    const stream = @import("stream.zig");
+    const Ctx = struct {
+        saw_attrs: bool = false,
+        fn cb(self: *@This(), ev: stream.Event) !bool {
+            if (ev.kind == .start_tag) {
+                var it = ev.attributes();
+                while (it.next()) |a| {
+                    _ = a.nameSlice();
+                    _ = a.valueRaw();
+                    self.saw_attrs = true;
+                }
+            }
+            return true;
+        }
+    };
+    var ctx: Ctx = .{};
+    try stream.parse(alloc, input, &ctx, Ctx.cb);
+
+    const SkipCtx = struct {
+        fn cb(self: *@This(), ev: stream.Event) !bool {
+            _ = self;
+            if (ev.kind == .start_tag) {
+                const n = ev.nameSlice();
+                if (std.ascii.eqlIgnoreCase(n, "script") or std.ascii.eqlIgnoreCase(n, "style") or std.ascii.eqlIgnoreCase(n, "section")) return false;
+            }
+            return true;
+        }
+    };
+    var skip_ctx: SkipCtx = .{};
+    try stream.parse(alloc, input, &skip_ctx, SkipCtx.cb);
+
+    const OptCtx = struct {
+        fn cb(self: *@This(), ev: stream.Event) !bool {
+            _ = .{ self, ev };
+            return true;
+        }
+    };
+    var opt_ctx: OptCtx = .{};
+    try (stream.Parser{ .options = .{
+        .include_comments = true,
+        .include_doctype = true,
+        .include_processing_instructions = true,
+        .track_nesting = false,
+        .drop_whitespace_text_nodes = true,
+    } }).parse(alloc, input, &opt_ctx, OptCtx.cb);
+    _ = &ctx;
 }
 
 fn fuzzParserProperties(alloc: std.mem.Allocator, smith: *std.testing.Smith) !void {

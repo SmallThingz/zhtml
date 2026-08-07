@@ -17,6 +17,8 @@ pub const Decoded = struct {
     bytes: [4]u8,
     /// Number of valid bytes in `bytes`.
     len: u3,
+    /// True only for a numeric reference whose codepoint is zero.
+    numeric_null: bool = false,
 
     /// Formats this decoded entity result for human-readable output.
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -56,16 +58,33 @@ pub fn decodeInPlaceFrom(comptime normalize_whitespace: bool, slice: []u8, first
     std.debug.assert(first < slice.len);
     std.debug.assert(slice[first] == '&');
     if (comptime normalize_whitespace) return decodeNormalizeInPlaceFrom(slice, first);
+    return decodePlainInPlaceFrom(slice, first, false);
+}
 
+/// Decodes an attribute value and replaces numeric references to codepoint zero
+/// and literal NUL bytes with ASCII spaces. `first` may be supplied by callers
+/// that already searched for a decodable entity.
+pub fn decodeAttributeInPlace(slice: []u8, first: ?usize) usize {
+    const new_len = if (first orelse firstDecodableEntity(slice, 0)) |amp|
+        decodePlainInPlaceFrom(slice, amp, true)
+    else
+        slice.len;
+    for (slice[0..new_len]) |*c| {
+        if (c.* == 0) c.* = ' ';
+    }
+    return new_len;
+}
+
+fn decodePlainInPlaceFrom(slice: []u8, first: usize, comptime null_as_space: bool) usize {
     var r: usize = first;
     var w: usize = first;
 
     while (true) {
         if (decodeEntity(slice[r + 1 ..])) |decoded| {
             @branchHint(.likely);
-            @memcpy(slice[w..][0..decoded.len], decoded.bytes[0..decoded.len]);
+            writeDecoded(slice, w, decoded, null_as_space);
             r += decoded.consumed;
-            w += decoded.len;
+            w += decodedLen(decoded, null_as_space);
 
             if (r != w) {
                 @branchHint(.likely);
@@ -94,15 +113,29 @@ pub fn decodeInPlaceFrom(comptime normalize_whitespace: bool, slice: []u8, first
 
         r = next_amp;
         if (decodeEntity(slice[r + 1 ..])) |decoded| {
-            @memcpy(slice[w..][0..decoded.len], decoded.bytes[0..decoded.len]);
+            writeDecoded(slice, w, decoded, null_as_space);
             r += decoded.consumed;
-            w += decoded.len;
+            w += decodedLen(decoded, null_as_space);
         } else {
             slice[w] = '&';
             r += 1;
             w += 1;
         }
     }
+}
+
+inline fn decodedLen(decoded: Decoded, comptime null_as_space: bool) usize {
+    return if (comptime null_as_space) if (decoded.numeric_null) 1 else decoded.len else decoded.len;
+}
+
+inline fn writeDecoded(out: []u8, start: usize, decoded: Decoded, comptime null_as_space: bool) void {
+    if (comptime null_as_space) {
+        if (decoded.numeric_null) {
+            out[start] = ' ';
+            return;
+        }
+    }
+    @memcpy(out[start..][0..decoded.len], decoded.bytes[0..decoded.len]);
 }
 
 /// Collapses HTML whitespace in-place and returns the new length.
@@ -254,7 +287,8 @@ fn parseNumericDecimal(rem: []const u8) ?Decoded {
     const semi_rel = std.mem.indexOfScalar(u8, rem[i..scan_end], ';') orelse return null;
     const semi = i + semi_rel;
     const consumed = semi + 3;
-    if (semi_rel == 0 or semi_rel > 7) return replacementDecoded(consumed);
+    if (semi_rel == 0) return if (i == 0) replacementDecoded(consumed) else numericNullDecoded(consumed);
+    if (semi_rel > 7) return replacementDecoded(consumed);
 
     var value: u32 = 0;
     while (i < semi) : (i += 1) {
@@ -276,7 +310,8 @@ fn parseNumericHex(rem: []const u8) ?Decoded {
     const semi_rel = std.mem.indexOfScalar(u8, rem[i..scan_end], ';') orelse return null;
     const semi = i + semi_rel;
     const consumed = semi + 4;
-    if (semi_rel == 0 or semi_rel > 6) return replacementDecoded(consumed);
+    if (semi_rel == 0) return if (i == 0) replacementDecoded(consumed) else numericNullDecoded(consumed);
+    if (semi_rel > 6) return replacementDecoded(consumed);
 
     var value: u32 = 0;
     while (i < semi) : (i += 1) {
@@ -289,6 +324,7 @@ fn parseNumericHex(rem: []const u8) ?Decoded {
 }
 
 inline fn finishNumeric(value: u32, consumed: usize) Decoded {
+    if (value == 0) return numericNullDecoded(consumed);
     var out: [4]u8 = undefined;
     const codepoint = std.math.cast(u21, value) orelse {
         @branchHint(.unlikely);
@@ -299,6 +335,12 @@ inline fn finishNumeric(value: u32, consumed: usize) Decoded {
         return replacementDecoded(consumed);
     };
     return .{ .consumed = @intCast(consumed), .bytes = out, .len = len };
+}
+
+inline fn numericNullDecoded(consumed: usize) Decoded {
+    var decoded = replacementDecoded(consumed);
+    decoded.numeric_null = true;
+    return decoded;
 }
 
 // ---
@@ -423,6 +465,12 @@ test "decode numeric entities rejects null codepoint" {
     var buf = "&#0;&#00;&#x0;&#X000;".*;
     const n = decodeInPlace(false, &buf);
     try std.testing.expectEqualSlices(u8, &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8, buf[0..n]);
+}
+
+test "attribute decoding replaces numeric and literal nulls with spaces" {
+    var buf = "a&#0;b&#x00;c\x00d&amp;e".*;
+    const n = decodeAttributeInPlace(&buf, null);
+    try std.testing.expectEqualStrings("a b c d&e", buf[0..n]);
 }
 
 test "decode numeric entities rejects surrogate codepoints" {

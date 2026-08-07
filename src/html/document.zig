@@ -604,14 +604,15 @@ fn GetNode(comptime options: ParseOptions) type {
                 const name = scanned.name orelse return;
                 i = scanned.next_start;
                 if (name.len == 0) continue;
-                if (i >= end) {
+                const delim_index = attr.valueDelimiterIndex(source, end, i);
+                if (delim_index >= end) {
                     try writeAttrName(writer, name);
                     return;
                 }
 
-                const delim = source[i];
+                const delim = source[delim_index];
                 if (delim == '=') {
-                    const raw_value = attr.parseRawValue(source, end, i);
+                    const raw_value = attr.parseRawValue(source, end, delim_index);
                     try writeByte(writer, ' ');
                     try writer.writeAll(source[name_start..raw_value.next_start]);
                     i = raw_value.next_start;
@@ -623,7 +624,7 @@ fn GetNode(comptime options: ParseOptions) type {
                         i += 1;
                         continue;
                     }
-                    const parsed = attr.parseParsedValue(doc.source, end, i);
+                    const parsed = attr.parseParsedValue(doc.source, end, delim_index);
                     try writeAttrName(writer, name);
                     try writeAttrValue(writer, parsed.value);
                     i = parsed.next_start;
@@ -635,14 +636,8 @@ fn GetNode(comptime options: ParseOptions) type {
                     return;
                 }
 
-                if (tables.WhitespaceTable[delim]) {
-                    try writeAttrName(writer, name);
-                    i += 1;
-                    continue;
-                }
-
                 try writeAttrName(writer, name);
-                i += 1;
+                i = if (delim_index == i) i + 1 else delim_index;
             }
         }
 
@@ -1717,6 +1712,50 @@ test "parse-time attribute decoding is off by default and query-time lookup deco
 
     const value = (try node.getAttributeValue(alloc, "data-v")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("a&b", value.value);
+}
+
+test "spaced assignments materialize and serialize consistently" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+
+    var html = "<div id = \"x\" class= \"a b\" data-k \n = v hidden data-n = \"a&amp;b&#x00;c\x00d\"></div>".*;
+    try resetParsed(.{}, &doc, &html);
+
+    const node = doc.findFirstTag("div") orelse return error.TestUnexpectedResult;
+    const untouched = try std.fmt.allocPrint(alloc, "{f}", .{node});
+    defer alloc.free(untouched);
+    try std.testing.expectEqualSlices(u8, &html, untouched);
+
+    try std.testing.expect(firstQuery(doc.query("div#x.a[data-k=v][hidden]")) != null);
+    try std.testing.expect(firstQuery(doc.query("div[v]")) == null);
+    const data_n = (try node.getAttributeValue(alloc, "data-n")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a&b c d", data_n.value);
+
+    const materialized = try std.fmt.allocPrint(alloc, "{f}", .{node});
+    defer alloc.free(materialized);
+    try std.testing.expectEqualStrings(
+        "<div id=\"x\" class=\"a b\" data-k=\"v\" hidden data-n=\"a&amp;b c d\"></div>",
+        materialized,
+    );
+}
+
+test "read-only spaced attributes decode and sanitize without source mutation" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{ .non_destructive = true }).init(alloc);
+    defer doc.deinit();
+
+    var html = "<div id \n = x data-n= \"a&amp;b&#0;c\x00d\"></div>".*;
+    const before = html;
+    try resetParsed(.{ .non_destructive = true }, &doc, &html);
+
+    const node = firstQuery(doc.query("div#x")) orelse return error.TestUnexpectedResult;
+    const data_n = (try node.getAttributeValue(alloc, "data-n")) orelse return error.TestUnexpectedResult;
+    defer data_n.free(&doc, alloc);
+    try std.testing.expectEqualStrings("a&b c d", data_n.value);
+    try std.testing.expect(!data_n.isBorrowed(&doc));
+    try std.testing.expectEqualSlices(u8, &before, doc.source);
+    try std.testing.expectEqualSlices(u8, &before, &html);
 }
 
 test "isOwned distinguishes borrowed single-text and allocated multi-text innerText" {

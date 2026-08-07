@@ -101,9 +101,22 @@ fn scanOnlyFindRawTextClose(source: []const u8, name: []const u8, key: u64, star
         if (lt + 2 >= source.len or source[lt + 1] != '/') continue;
         const close = scanOnlyTagName(source, lt + 2);
         if (!tags.equalByLenAndKeyIgnoreCase(source[close.start..close.end], close.key, name, key)) continue;
-        var end = close.end;
-        while (end < source.len and tables.WhitespaceTable[source[end]]) : (end += 1) {}
-        if (end < source.len and source[end] == '>') return .{ .content_end = lt, .close_start = lt, .close_end = end + 1 };
+        const end = findTagEndRespectQuotes(source, close.end) orelse return null;
+        return .{ .content_end = lt, .close_start = lt, .close_end = end + 1 };
+    }
+    return null;
+}
+
+fn findTagEndRespectQuotes(source: []const u8, start: usize) ?usize {
+    var i = start;
+    while (std.mem.indexOfScalarPos(u8, source, i, '>')) |pos| {
+        if (std.mem.indexOfAny(u8, source[i..pos], "'\"")) |rel| {
+            const qpos = i + rel;
+            const quote = source[qpos];
+            i = (std.mem.indexOfScalarPos(u8, source, qpos + 1, quote) orelse return null) + 1;
+            continue;
+        }
+        return pos;
     }
     return null;
 }
@@ -167,8 +180,17 @@ pub const AttributeIterator = struct {
         while (self.cursor < self.end) {
             const scan = attr.scanAttrNameOrSkip(self.source, self.end, self.cursor);
             self.cursor = scan.next_start;
-            const name = scan.name orelse continue;
-            const raw = attr.parseRawValue(self.source, self.end, self.cursor);
+            const name = scan.name orelse return null;
+            // Empty name: non-name byte skipped by the scanner (e.g. whitespace
+            // after the tag name). Not a real attribute.
+            if (name.len == 0) continue;
+            // Name at the very end of the attribute span: bare attribute with
+            // no value, e.g. `<div id>`. parseRawValue requires eq_index < end.
+            const delim_index = attr.valueDelimiterIndex(self.source, self.end, self.cursor);
+            const raw = if (delim_index < self.end and self.source[delim_index] == '=')
+                attr.parseRawValue(self.source, self.end, delim_index)
+            else
+                attr.RawValue{ .kind = .empty, .start = delim_index, .end = delim_index, .next_start = delim_index };
             self.cursor = raw.next_start;
             return .{
                 .source = self.source,
@@ -515,18 +537,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
         fn findTagEnd(self: *Self, start: usize) ?usize {
             if (self.options.assume_no_gt_in_attribute_values) return std.mem.indexOfScalarPos(u8, self.source, start, '>');
-
-            var i = start;
-            while (std.mem.indexOfScalarPos(u8, self.source, i, '>')) |pos| {
-                if (std.mem.indexOfAny(u8, self.source[i..pos], "'\"")) |rel| {
-                    const qpos = i + rel;
-                    const quote = self.source[qpos];
-                    i = (std.mem.indexOfScalarPos(u8, self.source, qpos + 1, quote) orelse return null) + 1;
-                    continue;
-                }
-                return pos;
-            }
-            return null;
+            return findTagEndRespectQuotes(self.source, start);
         }
 
         fn findBangEnd(self: *Self, start: usize) usize {
@@ -581,6 +592,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 }
 
 fn makeSpan(ptr: [*]const u8, len: usize, source: []const u8) Span {
+    if (len == 0) return .{};
     const start = @intFromPtr(ptr) - @intFromPtr(source.ptr);
     return .{ .start = @intCast(start), .len = @intCast(len) };
 }
@@ -607,6 +619,62 @@ test "streaming parser emits element text and attrs" {
     try parse(std.testing.allocator, "<div id='a'>hello</div>", &ctx, Ctx.cb);
     try std.testing.expect(ctx.seen_div);
     try std.testing.expect(ctx.seen_text);
+}
+
+test "streaming attribute iterator handles whitespace around equals and booleans" {
+    const Ctx = struct {
+        checked: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .start_tag or !std.mem.eql(u8, ev.nameSlice(), "div")) return true;
+            var it = ev.attributes();
+
+            const hidden = it.next() orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("hidden", hidden.nameSlice());
+            try std.testing.expectEqualStrings("", hidden.valueRaw());
+            try std.testing.expectEqual(attr.RawKind.empty, hidden.kind);
+
+            const id = it.next() orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("id", id.nameSlice());
+            try std.testing.expectEqualStrings("x", id.valueRaw());
+
+            const class = it.next() orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("class", class.nameSlice());
+            try std.testing.expectEqualStrings("a b", class.valueRaw());
+
+            const tail = it.next() orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("tail", tail.nameSlice());
+            try std.testing.expectEqualStrings("", tail.valueRaw());
+            try std.testing.expect(it.next() == null);
+            self.checked = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<div hidden id \n = x class= \"a b\" tail></div>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.checked);
+}
+
+test "streaming attribute iterator stops at self-closing slash" {
+    const Ctx = struct {
+        checked: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .start_tag or !std.mem.eql(u8, ev.nameSlice(), "img")) return true;
+            var it = ev.attributes();
+            const id = it.next() orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("id", id.nameSlice());
+            try std.testing.expectEqualStrings("x", id.valueRaw());
+            try std.testing.expect(it.next() == null);
+            self.checked = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<img id = x />", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.checked);
 }
 
 test "streaming parser handles raw text comments and implicit closes" {
@@ -636,6 +704,21 @@ test "streaming parser handles raw text comments and implicit closes" {
     try std.testing.expect(ctx.ends >= 3);
     try std.testing.expect(ctx.raw_text);
     try std.testing.expectEqual(@as(usize, 1), ctx.comments);
+}
+
+test "streaming raw-text close respects attributes with spaced assignment" {
+    const Ctx = struct {
+        saw_after: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "div")) self.saw_after = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<script>x</script data-x = \"a>b\"><div></div>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.saw_after);
 }
 
 test "streaming parser callback can skip subtree" {

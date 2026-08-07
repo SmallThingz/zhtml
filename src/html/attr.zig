@@ -38,6 +38,17 @@ pub const ScanAttrNameResult = struct {
     next_start: usize,
 };
 
+/// Index of the first non-whitespace byte following an attribute name.
+/// This is the value delimiter (`=` or an in-place `0` marker), the next
+/// attribute name, or the tag terminator.
+pub fn valueDelimiterIndex(source: []const u8, end: usize, name_end: usize) usize {
+    std.debug.assert(end <= source.len);
+    std.debug.assert(name_end <= end);
+    var i = name_end;
+    while (i < end and tables.WhitespaceTable[source[i]]) : (i += 1) {}
+    return i;
+}
+
 const AttrValueMode = enum {
     raw,
     destructive,
@@ -255,7 +266,8 @@ pub fn collectSelectedValues(
         if (name_slice.len == 0) continue;
         const selected_idx = firstUnresolvedMatch(selected_names, out_values, name_slice);
 
-        if (i >= end) {
+        const delim_index = valueDelimiterIndex(source, end, i);
+        if (delim_index >= end) {
             if (selected_idx) |idx| {
                 out_values[idx] = "";
                 remaining -= 1;
@@ -263,9 +275,9 @@ pub fn collectSelectedValues(
             break;
         }
 
-        const delim = source[i];
+        const delim = source[delim_index];
         if (delim == '=') {
-            const eq_index = i;
+            const eq_index = delim_index;
             const raw = parseRawValue(source, end, eq_index);
             if (selected_idx) |idx| {
                 out_values[idx] = materializeRawValue(source, end, eq_index, raw);
@@ -280,7 +292,7 @@ pub fn collectSelectedValues(
         }
 
         if (delim == 0) {
-            const parsed = parseParsedValue(source, end, i);
+            const parsed = parseParsedValue(source, end, delim_index);
             i = parsed.next_start;
             if (selected_idx) |idx| {
                 out_values[idx] = parsed.value;
@@ -297,11 +309,7 @@ pub fn collectSelectedValues(
         }
 
         if (delim == '>' or delim == '/') break;
-        if (tables.WhitespaceTable[delim]) {
-            i += 1;
-            continue;
-        }
-        i += 1;
+        i = if (delim_index == i) i + 1 else delim_index;
     }
 }
 
@@ -333,15 +341,16 @@ inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allo
         if (attr_name.len == 0) continue;
         const is_target = std.ascii.eqlIgnoreCase(attr_name, name);
 
-        if (i >= end) return if (is_target) "" else null;
+        const delim_index = valueDelimiterIndex(source, end, i);
+        if (delim_index >= end) return if (is_target) "" else null;
 
-        const delim = source[i];
+        const delim = source[delim_index];
         if (delim == '=') {
-            const raw = parseRawValue(source, end, i);
+            const raw = parseRawValue(source, end, delim_index);
             if (is_target) {
                 return switch (comptime mode) {
                     .raw => source[raw.start..raw.end],
-                    .destructive => materializeRawValue(source, end, i, raw),
+                    .destructive => materializeRawValue(source, end, delim_index, raw),
                     .non_destructive => try materializeRawValueOwned(allocator, source, raw),
                 };
             }
@@ -350,7 +359,7 @@ inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allo
         }
 
         if (delim == 0) {
-            const parsed = parseParsedValue(source, end, i);
+            const parsed = parseParsedValue(source, end, delim_index);
             if (is_target) return parsed.value;
             i = parsed.next_start;
             continue;
@@ -358,7 +367,7 @@ inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allo
 
         if (is_target) return "";
         if (delim == '>' or delim == '/') return null;
-        i += 1;
+        i = if (delim_index == i) i + 1 else delim_index;
     }
 
     return null;
@@ -369,12 +378,13 @@ fn materializeRawValueOwned(allocator: std.mem.Allocator, source: []const u8, ra
     if (raw.kind == .empty) return "";
 
     const slice = source[raw.start..raw.end];
-    const first = entities.firstDecodableEntity(slice, 0) orelse return slice;
+    const first = entities.firstDecodableEntity(slice, 0);
+    if (first == null and std.mem.indexOfScalar(u8, slice, 0) == null) return slice;
 
     const copied = try allocator.dupe(u8, slice);
     errdefer allocator.free(copied);
 
-    const new_len = entities.decodeInPlaceFrom(false, copied, first);
+    const new_len = entities.decodeAttributeInPlace(copied, first);
     if (new_len == copied.len) return copied;
     return try allocator.realloc(copied, new_len);
 }
@@ -391,7 +401,7 @@ fn materializeRawValue(source: []u8, span_end: usize, eq_index: usize, raw: RawV
     }
 
     var decoded_len: usize = raw.end - raw.start;
-    decoded_len = entities.decodeInPlace(false, source[raw.start..raw.end]);
+    decoded_len = entities.decodeAttributeInPlace(source[raw.start..raw.end], null);
 
     if (raw.kind == .quoted) {
         source[eq_index] = 0;
@@ -499,6 +509,16 @@ test "scanAttrNameOrSkip handles terminators and skips non-name bytes" {
         const scanned = scanAttrNameOrSkip(src, src.len, i);
         try testing.expect(scanned.name == null);
     }
+}
+
+test "valueDelimiterIndex skips whitespace before assignment" {
+    const src = "id \n\t = \"x\" next";
+    try std.testing.expectEqual(
+        std.mem.indexOfScalar(u8, src, '=') orelse return error.MissingEq,
+        valueDelimiterIndex(src, src.len, 2),
+    );
+    const bare = "id   next";
+    try std.testing.expectEqual(@as(usize, 5), valueDelimiterIndex(bare, bare.len, 2));
 }
 
 test "parseRawValue handles quoted, naked, empty, and unterminated" {
