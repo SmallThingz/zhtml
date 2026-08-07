@@ -3,20 +3,40 @@
 const std = @import("std");
 const tables = @import("tables.zig");
 
-/// Returns a packed key of the first up-to-8 tag bytes.
+/// Packs the first up-to-8 tag bytes into a key.
 ///
 /// Byte `i` (little-endian) stores `name[i]`.
-pub inline fn first8Key(name: []const u8) u64 {
+/// Only for canonical (already lowercase) bytes: comptime literals and
+/// selector source lowered by the selector parser. Prefer `first8KeyWithMode`
+/// for document source bytes.
+inline fn first8Key(name: []const u8) u64 {
     var hash: u64 = 0;
     const n: usize = @min(name.len, 8);
     @memcpy(std.mem.asBytes(&hash)[0..n], name[0..n]);
     return hash;
 }
 
+/// Returns a canonical lowercase key of the first up-to-8 tag bytes.
+///
+/// Destructive parse canonicalizes the source in place, so the byte-exact
+/// pack is used. Non-destructive parse keeps original-case source bytes and
+/// must lowercase while packing so keys match comptime literals and parser
+/// keys.
+pub inline fn first8KeyWithMode(name: []const u8, comptime non_destructive: bool) u64 {
+    if (!comptime non_destructive) return first8Key(name);
+    var key: u64 = 0;
+    const n: usize = @min(name.len, 8);
+    for (name[0..n], 0..) |c, i| {
+        key |= @as(u64, std.ascii.toLower(c)) << @as(u6, @intCast(i * 8));
+    }
+    return key;
+}
+
 /// Case-insensitive equality check accelerated by `(len,key)` prechecks.
 ///
-/// The packed keys are byte-exact; callers are expected to canonicalize the first
-/// eight bytes (parser does this in-place).
+/// The packed keys are byte-exact; callers are expected to canonicalize the
+/// first eight bytes with `first8KeyWithMode` (parser keys are already
+/// lowercase).
 pub inline fn equalByLenAndKeyIgnoreCase(a: []const u8, a_key: u64, b: []const u8, b_key: u64) bool {
     if (a.len != b.len or a_key != b_key) return false;
     return if (a.len <= 8) true else std.ascii.eqlIgnoreCase(a[8..], b[8..]);
@@ -327,6 +347,14 @@ test "tag helpers on canonical lowercase names" {
     try std.testing.expect(isVoidTagWithKey("img", first8Key("img")));
     try std.testing.expect(isRawTextTagWithKey("script", first8Key("script")));
     try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "blockquote", KEY.BLOCKQUOTE));
+}
+
+test "first8KeyWithMode canonicalizes only in non-destructive mode" {
+    try std.testing.expectEqual(first8Key("img"), first8KeyWithMode("img", false));
+    try std.testing.expectEqual(first8Key("img"), first8KeyWithMode("IMG", true));
+    try std.testing.expectEqual(first8Key("img"), first8KeyWithMode("ImG", true));
+    try std.testing.expectEqual(first8Key("textarea"), first8KeyWithMode("TEXTAREA", true));
+    try std.testing.expect(first8KeyWithMode("IMG", true) != first8Key("IMG"));
 }
 
 test "equalByLenAndKeyIgnoreCase handles long names with canonical keys" {

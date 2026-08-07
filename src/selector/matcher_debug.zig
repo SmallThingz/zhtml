@@ -49,7 +49,7 @@ pub fn explainFirstMatch(
             }
 
             if (first_failure.isNone()) {
-                first_failure = try classifyGroupFailure(doc, allocator, selector, group, i, scope_root, g_idx);
+                first_failure = try classifyGroupFailure(Doc, doc, allocator, selector, group, i, scope_root, g_idx);
             }
         }
 
@@ -62,6 +62,7 @@ pub fn explainFirstMatch(
 }
 
 fn classifyGroupFailure(
+    comptime Doc: type,
     doc: anytype,
     allocator: std.mem.Allocator,
     selector: ast.Selector,
@@ -73,7 +74,7 @@ fn classifyGroupFailure(
     const rightmost = group.compound_len - 1;
     const comp_abs: usize = @intCast(group.compound_start + rightmost);
     const comp = selector.compounds[comp_abs];
-    var reason = try classifyCompoundFailure(doc, allocator, selector, comp, node_index, group_index, comp_abs);
+    var reason = try classifyCompoundFailure(Doc, doc, allocator, selector, comp, node_index, group_index, comp_abs);
     if (!reason.isNone()) return reason;
 
     if (group.compound_len == 1 and comp.combinator != .none and !common.matchesScopeAnchor(doc, comp.combinator, node_index, scope_root)) {
@@ -96,6 +97,7 @@ fn classifyGroupFailure(
 }
 
 fn classifyCompoundFailure(
+    comptime Doc: type,
     doc: anytype,
     allocator: std.mem.Allocator,
     selector: ast.Selector,
@@ -111,7 +113,7 @@ fn classifyCompoundFailure(
 
     if (comp.hasTag()) {
         const node_name = node.name_or_text.slice(doc.source);
-        if (!matcher.tagMatches(selector.source, comp, node_name)) {
+        if (!matcher.tagMatches(Doc, selector.source, comp, node_name)) {
             return .{ .kind = .tag, .group_index = g, .compound_index = c, .predicate_index = predicate_index };
         }
         predicate_index += 1;

@@ -40,10 +40,10 @@ pub fn traversalBounds(comptime Doc: type, doc: *const Doc, scope_root: IndexInt
     return .{ .start = start, .end_excl = end_excl };
 }
 
-pub fn tagMatches(selector_source: []const u8, comp: ast.Compound, node_name: []const u8) bool {
+pub fn tagMatches(comptime Doc: type, selector_source: []const u8, comp: ast.Compound, node_name: []const u8) bool {
     const tag = comp.tag.slice(selector_source);
-    const tag_key: u64 = if (comp.tag_key != 0) comp.tag_key else tags.first8Key(tag);
-    const node_key = tags.first8Key(node_name);
+    const tag_key: u64 = if (comp.tag_key != 0) comp.tag_key else tags.first8KeyWithMode(tag, false);
+    const node_key = tags.first8KeyWithMode(node_name, Doc.Options.non_destructive);
     return tags.equalByLenAndKeyIgnoreCase(node_name, node_key, tag, tag_key);
 }
 
@@ -364,7 +364,7 @@ fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Se
 
     if (comp.hasTag()) {
         const node_name = node.name_or_text.slice(doc.source);
-        if (!tagMatches(selector.source, comp, node_name)) return false;
+        if (!tagMatches(Doc, selector.source, comp, node_name)) return false;
     }
 
     if (comp.hasId()) {

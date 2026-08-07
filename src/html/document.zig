@@ -296,7 +296,7 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         pub fn text(self: @This()) []const u8 {
-            assertText();
+            self.assertText();
             return self.raw().name_or_text.slice(self.doc.source);
         }
 
@@ -581,7 +581,7 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Returns true for HTML void elements, which never serialize end tags.
         fn isVoidElement(doc: anytype, noalias node_raw: anytype) bool {
             const name = node_raw.name_or_text.slice(doc.source);
-            return tags.isVoidTagWithKey(name, tags.first8Key(name));
+            return tags.isVoidTagWithKey(name, tags.first8KeyWithMode(name, options.non_destructive));
         }
 
         /// Writes serialized attributes from raw or destructively parsed attr bytes.
@@ -921,6 +921,7 @@ fn GetChildrenIter(comptime options: ParseOptions) type {
 fn GetDocument(comptime options: ParseOptions) type {
     return struct {
         //! Parsed document owner and query entrypoint container.
+        pub const Options = options;
         const RawNodeType = options.RawNode();
         const DebugQueryResultType = options.QueryDebugResult();
         const ChildrenIterType = options.ChildrenIter();
@@ -1284,6 +1285,32 @@ test "non-destructive attribute reads do not rewrite attribute bytes" {
     const attr_end = std.mem.indexOfScalarPos(u8, doc.source, attr_start, '>') orelse doc.source.len;
     try std.testing.expect(std.mem.indexOf(u8, doc.source[attr_start..attr_end], "&amp;") != null);
     try std.testing.expectEqualSlices(u8, before[0..], html[0..]);
+}
+
+test "non-destructive mixed-case tags match lowercase selectors and stay void" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{ .non_destructive = true }).init(alloc);
+    defer doc.deinit();
+
+    const html = "<MAIN><DIV ID='x'><IMG SRC='a.png'><BR></DIV></MAIN>".*;
+    try resetParsed(.{ .non_destructive = true }, &doc, &html);
+
+    // Tag selectors must match mixed-case source tags.
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("DIV", div.tagName());
+    try std.testing.expect(firstQuery(doc.query("main div#x")) != null);
+    try std.testing.expect(firstQuery(doc.query("img")) != null);
+    try std.testing.expect(firstQuery(doc.query("br")) != null);
+    try std.testing.expect((try runtimeFirst(&doc, alloc, "main div")) != null);
+    try std.testing.expect((try runtimeFirst(&doc, alloc, "img")) != null);
+
+    // Mixed-case void tags serialize without end tags.
+    const img = firstQuery(doc.query("img")) orelse return error.TestUnexpectedResult;
+    const rendered = try std.fmt.allocPrint(alloc, "{f}", .{img});
+    defer alloc.free(rendered);
+    try std.testing.expectEqualStrings("<IMG SRC='a.png'>", rendered);
+
+    try std.testing.expectEqualSlices(u8, html[0..], doc.source);
 }
 
 test "attribute value results distinguish borrowed and allocated non-destructive reads" {

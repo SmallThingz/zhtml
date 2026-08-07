@@ -153,7 +153,7 @@ const Parser = struct {
             } else if (isTagIdentStart(c)) {
                 out.tag = self.parseIdent() orelse return error.InvalidSelector;
                 self.lowerRange(out.tag);
-                out.tag_key = tags.first8Key(out.tag.slice(self.source));
+                out.tag_key = tags.first8KeyWithMode(out.tag.slice(self.source), false);
                 consumed = true;
             }
         }

@@ -551,7 +551,7 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         inline fn isSvgTagKey(tag_key: u64) bool {
-            return tag_key == comptime tags.first8Key("svg");
+            return tag_key == comptime tags.first8KeyWithMode("svg", false);
         }
 
         inline fn findSvgContentEnd(noalias self: *Self) ?usize {
