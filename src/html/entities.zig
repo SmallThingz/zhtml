@@ -14,6 +14,9 @@ const tables = @import("tables.zig");
 const named_entities = @import("named_entities.zig");
 const InvalidDigit = 0xff;
 const ReplacementUtf8 = [3]u8{ 0xEF, 0xBF, 0xBD };
+comptime {
+    if (named_entities.MaxValueLen > 6) @compileError("Decoded.bytes is too small for the generated entity table");
+}
 
 pub const EntityDecoding = enum {
     minimal,

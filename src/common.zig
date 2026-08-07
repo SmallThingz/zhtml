@@ -204,20 +204,34 @@ pub fn nextElementSibling(doc: anytype, node_index: IndexInt) ?IndexInt {
     if (parent == InvalidIndex) return null;
 
     const parent_end: usize = @intCast(doc.nodes[parent].subtree_end);
-    const first_idx: usize = @as(usize, @intCast(doc.nodes[node_index].subtree_end)) + 1;
-    if (first_idx <= parent_end and first_idx < doc.nodes.len) {
-        const first_int: IndexInt = @intCast(first_idx);
-        const first = &doc.nodes[first_idx];
-        if (first.parent == parent and first.isElement(first_int)) return first_int;
-    }
-
-    const second_idx = first_idx + 1;
-    if (second_idx <= parent_end and second_idx < doc.nodes.len) {
-        const second_int: IndexInt = @intCast(second_idx);
-        const second = &doc.nodes[second_idx];
-        if (second.parent == parent and second.isElement(second_int)) return second_int;
+    var idx: usize = @as(usize, @intCast(doc.nodes[node_index].subtree_end)) + 1;
+    while (idx <= parent_end and idx < doc.nodes.len) : (idx += 1) {
+        const idx_int: IndexInt = @intCast(idx);
+        const node = &doc.nodes[idx];
+        if (node.parent == parent and node.isElement(idx_int)) return idx_int;
     }
     return null;
+}
+
+/// One-based element-sibling position for `node_index`.
+pub fn elementSiblingPosition(doc: anytype, node_index: IndexInt) ?usize {
+    const parent = doc.nodes[node_index].parent;
+    if (parent == InvalidIndex) return null;
+
+    var position: usize = 1;
+    var idx: usize = @as(usize, @intCast(parent)) + 1;
+    const target: usize = @intCast(node_index);
+    while (idx < target and idx < doc.nodes.len) {
+        const idx_int: IndexInt = @intCast(idx);
+        const node = &doc.nodes[idx];
+        if (node.parent == parent and node.isElement(idx_int)) {
+            position += 1;
+            idx = @as(usize, @intCast(node.subtree_end)) + 1;
+        } else {
+            idx += 1;
+        }
+    }
+    return position;
 }
 
 /// Scope-anchor predicate shared by selector matcher and debug matcher.

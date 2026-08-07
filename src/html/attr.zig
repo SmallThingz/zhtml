@@ -258,7 +258,7 @@ pub fn collectSelectedValues(
 
 /// Finds and lazily decodes one attribute value in destructive document source.
 inline fn getAttrValueDestructive(doc: anytype, node: anytype, name: []const u8) ?[]const u8 {
-    const source: []u8 = @constCast(doc).source;
+    const source: []u8 = doc.source;
     const name_end: usize = node.name_or_text.end();
     materializeAttributes(@TypeOf(doc.*).Options.entity_decoding, source, name_end);
     return getCompactAttrValue(source, name_end, name);

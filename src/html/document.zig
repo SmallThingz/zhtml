@@ -431,7 +431,7 @@ fn GetNode(comptime options: ParseOptions) type {
             const start = out.items.len;
             out.appendSliceAssumeCapacity(slice);
             if (comptime options.non_destructive and opts.unescape) {
-                if (!isRawTextNode(doc, idx)) {
+                if (!isOpaqueTextNode(doc, idx)) {
                     const decoded_len = entities.decodeInPlaceWithMode(options.entity_decoding, false, out.items[start..]);
                     out.items.len = start + decoded_len;
                 }
@@ -468,7 +468,7 @@ fn GetNode(comptime options: ParseOptions) type {
                 errdefer out.deinit(gpa);
                 try out.appendSlice(gpa, node_raw.name_or_text.slice(doc.source));
                 if (comptime options.non_destructive and opts.unescape) {
-                    if (!isRawTextNode(doc, self.index)) out.items.len = entities.decodeInPlaceWithMode(options.entity_decoding, false, out.items);
+                    if (!isOpaqueTextNode(doc, self.index)) out.items.len = entities.decodeInPlaceWithMode(options.entity_decoding, false, out.items);
                 }
                 return try finishInnerTextOwned(
                     &out,
@@ -501,7 +501,7 @@ fn GetNode(comptime options: ParseOptions) type {
             var decoded = was_decoded;
 
             if (comptime unescape) {
-                if (!was_decoded and !isRawTextNode(doc, idx)) {
+                if (!was_decoded and !isOpaqueTextNode(doc, idx)) {
                     const new_len = entities.decodeInPlaceWithMode(options.entity_decoding, false, node.name_or_text.sliceMut(doc.source));
                     node.name_or_text.len = @intCast(new_len);
                     decoded = true;
@@ -516,12 +516,15 @@ fn GetNode(comptime options: ParseOptions) type {
             if (decoded and new_end < doc.source.len) doc.source[new_end] = 0;
         }
 
-        /// Raw-text children of script/style keep entity syntax literal.
-        fn isRawTextNode(doc: anytype, idx: IndexInt) bool {
+        /// Opaque children preserve both markup-looking bytes and entity syntax.
+        fn isOpaqueTextNode(doc: anytype, idx: IndexInt) bool {
             const parent = doc.nodes[idx].parent;
             if (parent == InvalidIndex or parent == 0 or parent >= doc.nodes.len) return false;
             const parent_name = doc.nodes[parent].name_or_text.slice(doc.source);
-            return tags.isRawTextTagWithKey(parent_name, tags.first8KeyWithMode(parent_name, options.non_destructive));
+            const key = tags.first8KeyWithMode(parent_name, options.non_destructive);
+            return tags.isRawTextTagWithKey(parent_name, key) or
+                tags.isPlainTextTagWithKey(parent_name, key) or
+                tags.isSvgWithKey(parent_name, key);
         }
 
         /// Returns decoded attribute value for `name`, if present.
@@ -605,13 +608,13 @@ fn GetNode(comptime options: ParseOptions) type {
             comptime entity_encoding: EntityEncoding,
         ) WriterError(@TypeOf(writer))!void {
             if (node_raw.isText(idx)) {
-                const raw_text = isRawTextNode(doc, idx);
+                const raw_text = isOpaqueTextNode(doc, idx);
                 if (comptime entity_encoding == .force and !options.non_destructive) materializeRwText(doc, idx, true, false);
                 const text_bytes = node_raw.name_or_text.slice(doc.source);
                 const decoded = !options.non_destructive and node_raw.name_or_text.end() < doc.source.len and doc.source[node_raw.name_or_text.end()] == 0;
-                if (comptime entity_encoding == .force and options.non_destructive) {
+                if (comptime entity_encoding == .force) {
                     if (raw_text) try writer.writeAll(text_bytes) else try writeDecodedEscaped(writer, text_bytes, false);
-                } else if (comptime entity_encoding == .force or (entity_encoding == .auto and !options.non_destructive)) {
+                } else if (comptime entity_encoding == .auto and !options.non_destructive) {
                     if (raw_text or !decoded) try writer.writeAll(text_bytes) else try writeEscapedText(writer, text_bytes);
                 } else {
                     try writer.writeAll(text_bytes);
@@ -638,13 +641,13 @@ fn GetNode(comptime options: ParseOptions) type {
 
                 const child = &doc.nodes[next_idx];
                 if (child.isText(next_idx)) {
-                    const raw_text = isRawTextNode(doc, next_idx);
+                    const raw_text = isOpaqueTextNode(doc, next_idx);
                     if (comptime entity_encoding == .force and !options.non_destructive) materializeRwText(doc, next_idx, true, false);
                     const text_bytes = child.name_or_text.slice(doc.source);
                     const decoded = !options.non_destructive and child.name_or_text.end() < doc.source.len and doc.source[child.name_or_text.end()] == 0;
-                    if (comptime entity_encoding == .force and options.non_destructive) {
+                    if (comptime entity_encoding == .force) {
                         if (raw_text) try writer.writeAll(text_bytes) else try writeDecodedEscaped(writer, text_bytes, false);
-                    } else if (comptime entity_encoding == .force or (entity_encoding == .auto and !options.non_destructive)) {
+                    } else if (comptime entity_encoding == .auto and !options.non_destructive) {
                         if (raw_text or !decoded) try writer.writeAll(text_bytes) else try writeEscapedText(writer, text_bytes);
                     } else {
                         try writer.writeAll(text_bytes);
@@ -694,7 +697,7 @@ fn GetNode(comptime options: ParseOptions) type {
         fn writeAttrsHtml(doc: anytype, noalias node_raw: anytype, writer: anytype, comptime entity_encoding: EntityEncoding) WriterError(@TypeOf(writer))!void {
             var i: usize = @intCast(node_raw.name_or_text.end());
             if (comptime !options.non_destructive) {
-                attr.materializeAttributes(options.entity_decoding, @constCast(doc).source, i);
+                attr.materializeAttributes(options.entity_decoding, doc.source, i);
                 const source: []const u8 = doc.source;
                 while (i < source.len and source[i] != '>') {
                     const name_start = i;
@@ -705,7 +708,13 @@ fn GetNode(comptime options: ParseOptions) type {
                         const value_start = i + 1;
                         i = value_start;
                         while (i < source.len and source[i] != 0) : (i += 1) {}
-                        try writeAttrValue(writer, source[value_start..i]);
+                        if (comptime entity_encoding == .force) {
+                            try writer.writeAll("=\"");
+                            try writeDecodedEscaped(writer, source[value_start..i], true);
+                            try writeByte(writer, '"');
+                        } else {
+                            try writeAttrValue(writer, source[value_start..i]);
+                        }
                     }
                     if (i < source.len) i += 1;
                 }
@@ -817,7 +826,9 @@ fn GetNode(comptime options: ParseOptions) type {
                 if (amp > i) {
                     if (comptime attribute) try writeEscapedAttrValue(writer, value[i..amp]) else try writeEscapedText(writer, value[i..amp]);
                 }
-                const decoded_entity_opt = entities.decodeEntityWithMode(options.entity_decoding, attribute, value[amp + 1 ..]);
+                // Force serialization recognizes the complete HTML entity set,
+                // independently of the parse-time extraction policy.
+                const decoded_entity_opt = entities.decodeEntityWithMode(.full, attribute, value[amp + 1 ..]);
                 if (decoded_entity_opt) |decoded_entity| {
                     const decoded = decoded_entity.bytes[0..decoded_entity.len];
                     if (comptime attribute) try writeEscapedAttrValue(writer, decoded) else try writeEscapedText(writer, decoded);
@@ -897,19 +908,12 @@ fn firstElementChild(doc: anytype, parent_idx: IndexInt) IndexInt {
         return InvalidIndex;
     }
 
-    const first_idx: usize = @as(usize, @intCast(parent_idx)) + 1;
+    var first_idx: usize = @as(usize, @intCast(parent_idx)) + 1;
     const end: usize = @min(@as(usize, @intCast(parent.subtree_end)), doc.nodes.len - 1);
-    if (first_idx <= end) {
+    while (first_idx <= end) : (first_idx += 1) {
         const first_int: IndexInt = @intCast(first_idx);
         const first = &doc.nodes[first_idx];
         if (first.parent == parent_idx and first.isElement(first_int)) return first_int;
-    }
-
-    const second_idx = first_idx + 1;
-    if (second_idx <= end) {
-        const second_int: IndexInt = @intCast(second_idx);
-        const second = &doc.nodes[second_idx];
-        if (second.parent == parent_idx and second.isElement(second_int)) return second_int;
     }
 
     return InvalidIndex;
@@ -2175,6 +2179,59 @@ test "entity serialization modes preserve auto and force contracts" {
     try std.testing.expectEqualStrings("<div>a&lt;b &amp; c</div>", after.written());
 }
 
+test "force serialization recognizes entities beyond parse decoding mode" {
+    const alloc = std.testing.allocator;
+    const opts: ParseOptions = .{ .non_destructive = true, .entity_decoding = .minimal };
+    var doc = opts.Document().init(alloc);
+    defer doc.deinit();
+    const html = "<div title='&eacute;'>&nbsp;&eacute;</div>";
+    try resetParsed(opts, &doc, html);
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try div.writeHtml(&out.writer, .force);
+    try std.testing.expectEqualStrings("<div title=\"\xc3\xa9\">\xc2\xa0\xc3\xa9</div>", out.written());
+
+    const rw_opts: ParseOptions = .{ .entity_decoding = .minimal };
+    var rw_doc = rw_opts.Document().init(alloc);
+    defer rw_doc.deinit();
+    var rw_html = "<div title='&eacute;'>&nbsp;&eacute;</div>".*;
+    try resetParsed(rw_opts, &rw_doc, &rw_html);
+    const rw_div = firstQuery(rw_doc.query("div")) orelse return error.TestUnexpectedResult;
+    // Materialize first using the deliberately narrower extraction policy.
+    _ = (try rw_div.getAttributeValue(alloc, "title")) orelse return error.TestUnexpectedResult;
+    _ = try rw_div.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+    var rw_out: std.Io.Writer.Allocating = .init(alloc);
+    defer rw_out.deinit();
+    try rw_div.writeHtml(&rw_out.writer, .force);
+    try std.testing.expectEqualStrings("<div title=\"\xc3\xa9\">\xc2\xa0\xc3\xa9</div>", rw_out.written());
+}
+
+test "force serialization preserves SVG and plaintext opaque payloads" {
+    const alloc = std.testing.allocator;
+
+    var svg_doc = GetDocument(.{}).init(alloc);
+    defer svg_doc.deinit();
+    var svg_html = "<svg><g/>&amp;</svg>".*;
+    try resetParsed(.{}, &svg_doc, &svg_html);
+    const svg = firstQuery(svg_doc.query("svg")) orelse return error.TestUnexpectedResult;
+    var svg_out: std.Io.Writer.Allocating = .init(alloc);
+    defer svg_out.deinit();
+    try svg.writeHtml(&svg_out.writer, .force);
+    try std.testing.expectEqualStrings("<svg><g/>&amp;</svg>", svg_out.written());
+
+    var plaintext_doc = GetDocument(.{ .non_destructive = true }).init(alloc);
+    defer plaintext_doc.deinit();
+    const plaintext_html = "<plaintext><b>&amp;";
+    try resetParsed(.{ .non_destructive = true }, &plaintext_doc, plaintext_html);
+    const plaintext = firstQuery(plaintext_doc.query("plaintext")) orelse return error.TestUnexpectedResult;
+    var plaintext_out: std.Io.Writer.Allocating = .init(alloc);
+    defer plaintext_out.deinit();
+    try plaintext.writeHtml(&plaintext_out.writer, .force);
+    try std.testing.expectEqualStrings("<plaintext><b>&amp;</plaintext>", plaintext_out.written());
+}
+
 test "inplace attribute parser treats explicit empty assignment as name-only" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);
@@ -2488,6 +2545,16 @@ test "runtime selector supports nth-child shorthand variants" {
     var it_neg_b = try runtimeQuery(&doc, runtime_arena.allocator(), "#pseudos :nth-child(-n+5)");
     while (try it_neg_b.next()) |_| c_neg_b += 1;
     try std.testing.expectEqual(@as(usize, 5), c_neg_b);
+}
+
+test "root element first-child and nth-child one are equivalent" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<html><body></body></html>".*;
+    try resetParsed(.{}, &doc, &html);
+    try std.testing.expect(firstQuery(doc.query("html:first-child")) != null);
+    try std.testing.expect(firstQuery(doc.query("html:nth-child(1)")) != null);
 }
 
 test "leading child combinator works in node-scoped queries" {

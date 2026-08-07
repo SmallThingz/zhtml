@@ -446,12 +446,7 @@ pub fn matchesPseudo(doc: anytype, node_index: IndexInt, pseudo: ast.Pseudo) boo
         .first_child => prevElementSibling(doc, node_index) == null,
         .last_child => nextElementSibling(doc, node_index) == null,
         .nth_child => blk: {
-            if (parentElement(doc, node_index) == null) break :blk false;
-            var position: usize = 1;
-            var prev = prevElementSibling(doc, node_index);
-            while (prev) |idx| : (prev = prevElementSibling(doc, idx)) {
-                position += 1;
-            }
+            const position = common.elementSiblingPosition(doc, node_index) orelse break :blk false;
             break :blk pseudo.nth.matches(position);
         },
     };

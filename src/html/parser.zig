@@ -71,7 +71,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             /// Node index of the open element.
             idx: IndexInt,
             /// Original tag-name length for close matching and optional-close logic.
-            tag_len: u16 = 0,
+            tag_len: IndexInt = 0,
             /// Last direct element child seen while this element is open.
             last_child: IndexInt = InvalidIndex,
         };
@@ -1105,6 +1105,25 @@ test "mismatched close with identical first8 prefix does not close long tag" {
     const outer = firstQuery(doc.query("abcdefgh1#outer")) orelse return error.TestUnexpectedResult;
     const after = firstQuery(doc.query("p#after")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(outer.index, after.parentNode().?.index);
+}
+
+test "open-element stack preserves tag names longer than u16" {
+    const alloc = std.testing.allocator;
+    const name_len = 65_536;
+    const input = try alloc.alloc(u8, name_len * 2 + 5);
+    defer alloc.free(input);
+    input[0] = '<';
+    @memset(input[1 .. name_len + 1], 'a');
+    input[name_len + 1] = '>';
+    input[name_len + 2] = '<';
+    input[name_len + 3] = '/';
+    @memset(input[name_len + 4 .. name_len * 2 + 4], 'a');
+    input[name_len * 2 + 4] = '>';
+
+    var doc = try parse(DefaultTestOptions, alloc, input);
+    defer doc.deinit();
+    try std.testing.expectEqual(@as(usize, name_len), doc.nodeAt(1).tagName().len);
+    try std.testing.expectEqual(@as(IndexInt, 1), doc.nodes[1].subtree_end);
 }
 
 test "processing-instruction-like nodes end at the next >" {
