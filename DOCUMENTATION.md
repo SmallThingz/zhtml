@@ -127,6 +127,7 @@ All examples are verified by running `zig build examples-check`
 - destructive attribute lists use `name[=decoded-value]NUL ... >`; quoted and unquoted values share one representation, and empty assignments collapse to valueless attributes
 - compact values may contain whitespace, `>`, `/`, `=`, and malformed UTF-8 because only NUL terminates them
 - destructive decoding changes literal NUL bytes to spaces and numeric NUL references to U+FFFD; malformed leading UTF-8 bytes in attribute names are replaced with an internal marker
+- destructive text spans use an in-bounds NUL byte immediately after the span to remember that entity decoding already occurred; terminal text without spare capacity may be checked again
 - query-time decoding keeps parse throughput high by avoiding eager entity decode and whitespace normalization for bytes that may never be read
 
 ## Non-Destructive Parsing

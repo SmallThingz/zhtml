@@ -346,12 +346,8 @@ fn GetNode(comptime options: ParseOptions) type {
                 }) };
             }
 
-            if (comptime opts.unescape) {
-                const new_len = entities.decodeInPlace(opts.normalize_whitespace, node.name_or_text.sliceMut(doc.source));
-                node.name_or_text.len = @intCast(new_len);
-            } else if (comptime opts.normalize_whitespace) {
-                const new_len = entities.normalizeWhitespaceInPlace(node.name_or_text.sliceMut(doc.source));
-                node.name_or_text.len = @intCast(new_len);
+            if (comptime opts.unescape or opts.normalize_whitespace) {
+                materializeRwText(doc, first_idx, opts.unescape, opts.normalize_whitespace);
             }
 
             return .{ .value = node.name_or_text.slice(self.doc.source) };
@@ -361,6 +357,17 @@ fn GetNode(comptime options: ParseOptions) type {
         fn innerTextOwnedFromScan(self: @This(), gpa: std.mem.Allocator, comptime opts: Self.TextOptions, scan: InnerTextProbe.Scan) ![]const u8 {
             const doc = self.doc;
             const node_raw = self.raw();
+
+            // RW documents remember entity decoding on each source text span.
+            // Normalization remains a post-join operation so whitespace behavior
+            // across element/text-node boundaries is unchanged.
+            if (comptime !options.non_destructive and opts.unescape) {
+                var idx = scan.first_idx;
+                while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
+                    if (!doc.nodes[idx].isText(idx)) continue;
+                    materializeRwText(doc, idx, true, false);
+                }
+            }
 
             var total: usize = 0;
             var last_byte: u8 = 0;
@@ -401,14 +408,20 @@ fn GetNode(comptime options: ParseOptions) type {
                 }
             }
 
-            return try finishInnerTextOwned(&out, gpa, opts);
+            return try finishInnerTextOwned(&out, gpa, opts, !options.non_destructive and opts.unescape, false);
         }
 
         /// Applies final text decoding/normalization and transfers buffer ownership.
-        fn finishInnerTextOwned(noalias out: *std.ArrayList(u8), gpa: std.mem.Allocator, comptime opts: Self.TextOptions) ![]const u8 {
-            if (comptime opts.unescape) {
-                out.items.len = entities.decodeInPlace(opts.normalize_whitespace, out.items);
-            } else if (comptime opts.normalize_whitespace) {
+        fn finishInnerTextOwned(
+            noalias out: *std.ArrayList(u8),
+            gpa: std.mem.Allocator,
+            comptime opts: Self.TextOptions,
+            comptime already_decoded: bool,
+            comptime already_normalized: bool,
+        ) ![]const u8 {
+            if (comptime opts.unescape and !already_decoded) {
+                out.items.len = entities.decodeInPlace(opts.normalize_whitespace and !already_normalized, out.items);
+            } else if (comptime opts.normalize_whitespace and !already_normalized) {
                 out.items.len = entities.normalizeWhitespaceInPlace(out.items);
             }
             return try out.toOwnedSlice(gpa);
@@ -421,10 +434,19 @@ fn GetNode(comptime options: ParseOptions) type {
             const doc = self.doc;
 
             if (node_raw.isText(self.index)) {
+                if (comptime !options.non_destructive and opts.unescape) {
+                    materializeRwText(doc, self.index, true, false);
+                }
                 var out = std.ArrayList(u8).empty;
                 errdefer out.deinit(gpa);
                 try out.appendSlice(gpa, node_raw.name_or_text.slice(doc.source));
-                return try finishInnerTextOwned(&out, gpa, opts);
+                return try finishInnerTextOwned(
+                    &out,
+                    gpa,
+                    opts,
+                    !options.non_destructive and opts.unescape,
+                    false,
+                );
             }
 
             var idx = self.index + 1;
@@ -437,6 +459,31 @@ fn GetNode(comptime options: ParseOptions) type {
             }
 
             return "";
+        }
+
+        /// Decodes and/or normalizes one RW text span and records decoded state
+        /// with a NUL byte immediately after the current span when space exists.
+        fn materializeRwText(doc: anytype, idx: IndexInt, comptime unescape: bool, comptime normalize: bool) void {
+            if (comptime options.non_destructive) return;
+            const node = &doc.nodes[idx];
+            const old_end: usize = node.name_or_text.end();
+            const was_decoded = old_end < doc.source.len and doc.source[old_end] == 0;
+            var decoded = was_decoded;
+
+            if (comptime unescape) {
+                if (!was_decoded) {
+                    const new_len = entities.decodeInPlace(false, node.name_or_text.sliceMut(doc.source));
+                    node.name_or_text.len = @intCast(new_len);
+                    decoded = true;
+                }
+            }
+            if (comptime normalize) {
+                const new_len = entities.normalizeWhitespaceInPlace(node.name_or_text.sliceMut(doc.source));
+                node.name_or_text.len = @intCast(new_len);
+            }
+
+            const new_end: usize = node.name_or_text.end();
+            if (decoded and new_end < doc.source.len) doc.source[new_end] = 0;
         }
 
         /// Returns decoded attribute value for `name`, if present.
@@ -1394,6 +1441,10 @@ test "non-destructive text reads do not rewrite text bytes" {
     defer text.free(&doc, alloc);
     try std.testing.expectEqualStrings("a & b", text.value);
 
+    const owned = try node.innerTextOwnedWithOptions(alloc, .{});
+    defer alloc.free(owned);
+    try std.testing.expectEqualStrings("a & b", owned);
+
     const text_node = doc.nodes[node.index + 1];
     try std.testing.expectEqualStrings("a &amp;  b ", text_node.name_or_text.slice(doc.source));
     try std.testing.expectEqualSlices(u8, before[0..], html[0..]);
@@ -1787,7 +1838,7 @@ test "isOwned distinguishes borrowed single-text and allocated multi-text innerT
     try std.testing.expect(!y_text.isBorrowed(&doc));
 }
 
-test "innerTextOwned always returns allocated output and does not mutate source text bytes" {
+test "innerTextOwned returns allocated output and materializes RW source text" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);
     defer doc.deinit();
@@ -1808,7 +1859,91 @@ test "innerTextOwned always returns allocated output and does not mutate source 
     try std.testing.expect(!doc.isOwnedSlice(owned));
 
     const text_node_after = doc.nodes[node.index + 1];
-    try std.testing.expectEqualStrings("a &amp; b", text_node_after.name_or_text.slice(doc.source));
+    try std.testing.expectEqualStrings("a & b", text_node_after.name_or_text.slice(doc.source));
+    try std.testing.expectEqual(@as(u8, 0), doc.source[text_node_after.name_or_text.end()]);
+}
+
+test "RW text decoding stores and moves the trailing decoded marker" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+
+    var html = "<p> a&amp;  b </p>".*;
+    try resetParsed(.{}, &doc, &html);
+    const p = firstQuery(doc.query("p")) orelse return error.TestUnexpectedResult;
+    const text_idx = p.index + 1;
+
+    const decoded = try p.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+    try std.testing.expectEqualStrings("a&  b ", decoded.value);
+    const decoded_end: usize = doc.nodes[text_idx].name_or_text.end();
+    try std.testing.expectEqual(@as(u8, 0), doc.source[decoded_end]);
+
+    const normalized = try p.innerTextWithOptions(alloc, .{ .unescape = false, .normalize_whitespace = true });
+    try std.testing.expectEqualStrings("a& b", normalized.value);
+    const normalized_end: usize = doc.nodes[text_idx].name_or_text.end();
+    try std.testing.expect(normalized_end < decoded_end);
+    try std.testing.expectEqual(@as(u8, 0), doc.source[normalized_end]);
+}
+
+test "RW terminal text marks only when decoding creates room" {
+    const alloc = std.testing.allocator;
+
+    var encoded_doc = GetDocument(.{}).init(alloc);
+    defer encoded_doc.deinit();
+    var encoded = "<p>x&amp;y".*;
+    try resetParsed(.{}, &encoded_doc, &encoded);
+    const encoded_p = firstQuery(encoded_doc.query("p")) orelse return error.TestUnexpectedResult;
+    const decoded = try encoded_p.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+    try std.testing.expectEqualStrings("x&y", decoded.value);
+    const encoded_text = encoded_doc.nodes[encoded_p.index + 1];
+    try std.testing.expect(encoded_text.name_or_text.end() < encoded_doc.source.len);
+    try std.testing.expectEqual(@as(u8, 0), encoded_doc.source[encoded_text.name_or_text.end()]);
+
+    var plain_doc = GetDocument(.{}).init(alloc);
+    defer plain_doc.deinit();
+    var plain = "<p>plain".*;
+    try resetParsed(.{}, &plain_doc, &plain);
+    const plain_p = firstQuery(plain_doc.query("p")) orelse return error.TestUnexpectedResult;
+    const value = try plain_p.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+    try std.testing.expectEqualStrings("plain", value.value);
+    try std.testing.expectEqual(plain_doc.source.len, @as(usize, plain_doc.nodes[plain_p.index + 1].name_or_text.end()));
+}
+
+test "RW multi-node owned text materializes each span and still normalizes after joining" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+
+    var html = "<div>a&amp;<b></b>  c&amp;d</div>".*;
+    try resetParsed(.{}, &doc, &html);
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
+    const value = try div.innerTextOwnedWithOptions(alloc, .{});
+    defer alloc.free(value);
+    try std.testing.expectEqualStrings("a& c&d", value);
+
+    var idx = div.index + 1;
+    while (idx <= div.raw().subtree_end) : (idx += 1) {
+        if (!doc.nodes[idx].isText(idx)) continue;
+        const end: usize = doc.nodes[idx].name_or_text.end();
+        try std.testing.expect(end < doc.source.len);
+        try std.testing.expectEqual(@as(u8, 0), doc.source[end]);
+        try std.testing.expect(std.mem.indexOf(u8, doc.nodes[idx].name_or_text.slice(doc.source), "&amp;") == null);
+    }
+}
+
+test "RW serialization reconstructs markup replaced by a text marker" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<p>a&amp;b</p>".*;
+    try resetParsed(.{}, &doc, &html);
+    const p = firstQuery(doc.query("p")) orelse return error.TestUnexpectedResult;
+    _ = try p.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try p.writeHtml(&out.writer);
+    try std.testing.expectEqualStrings("<p>a&b</p>", out.written());
 }
 
 test "inplace attribute parser treats explicit empty assignment as name-only" {
