@@ -31,6 +31,7 @@ pub const EntityEncoding = enum {
     /// Decode and canonically re-encode escapable text and attribute values.
     force,
 };
+pub const EntityDecoding = entities.EntityDecoding;
 /// Inclusive-exclusive byte span into the document source buffer.
 pub const Span = struct {
     /// Inclusive start byte offset in the document source.
@@ -84,9 +85,8 @@ pub const ParseOptions = struct {
     /// keeping lazy attr/text decoding out of the input buffer.
     /// This is off by default so the destructive hot path stays unchanged.
     non_destructive: bool = false,
-    /// Enables the complete WHATWG named-character-reference table. The
-    /// compact common-entity set and numeric references remain available when false.
-    full_named_entities: bool = false,
+    /// Selects the named-character-reference set; numeric references are always enabled.
+    entity_decoding: EntityDecoding = .common,
     /// Persist direct last-child links for O(1) `children().last()`.
     /// Off by default because first child and next sibling are already bounded.
     store_last_child: bool = false,
@@ -135,10 +135,10 @@ pub const ParseOptions = struct {
 
     /// Formats parse options for human-readable output.
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("ParseOptions{{drop_whitespace_text_nodes={s}, non_destructive={}, full_named_entities={}, store_last_child={}, store_prev_sibling={}}}", .{
+        try writer.print("ParseOptions{{drop_whitespace_text_nodes={s}, non_destructive={}, entity_decoding={s}, store_last_child={}, store_prev_sibling={}}}", .{
             @tagName(self.drop_whitespace_text_nodes),
             self.non_destructive,
-            self.full_named_entities,
+            @tagName(self.entity_decoding),
             self.store_last_child,
             self.store_prev_sibling,
         });
@@ -432,10 +432,7 @@ fn GetNode(comptime options: ParseOptions) type {
             out.appendSliceAssumeCapacity(slice);
             if (comptime options.non_destructive and opts.unescape) {
                 if (!isRawTextNode(doc, idx)) {
-                    const decoded_len = if (comptime options.full_named_entities)
-                        entities.decodeInPlaceFull(false, out.items[start..])
-                    else
-                        entities.decodeInPlace(false, out.items[start..]);
+                    const decoded_len = entities.decodeInPlaceWithMode(options.entity_decoding, false, out.items[start..]);
                     out.items.len = start + decoded_len;
                 }
             }
@@ -450,10 +447,7 @@ fn GetNode(comptime options: ParseOptions) type {
             comptime already_normalized: bool,
         ) ![]const u8 {
             if (comptime opts.unescape and !already_decoded) {
-                out.items.len = if (comptime options.full_named_entities)
-                    entities.decodeInPlaceFull(opts.normalize_whitespace and !already_normalized, out.items)
-                else
-                    entities.decodeInPlace(opts.normalize_whitespace and !already_normalized, out.items);
+                out.items.len = entities.decodeInPlaceWithMode(options.entity_decoding, opts.normalize_whitespace and !already_normalized, out.items);
             } else if (comptime opts.normalize_whitespace and !already_normalized) {
                 out.items.len = entities.normalizeWhitespaceInPlace(out.items);
             }
@@ -474,10 +468,7 @@ fn GetNode(comptime options: ParseOptions) type {
                 errdefer out.deinit(gpa);
                 try out.appendSlice(gpa, node_raw.name_or_text.slice(doc.source));
                 if (comptime options.non_destructive and opts.unescape) {
-                    if (!isRawTextNode(doc, self.index)) out.items.len = if (comptime options.full_named_entities)
-                        entities.decodeInPlaceFull(false, out.items)
-                    else
-                        entities.decodeInPlace(false, out.items);
+                    if (!isRawTextNode(doc, self.index)) out.items.len = entities.decodeInPlaceWithMode(options.entity_decoding, false, out.items);
                 }
                 return try finishInnerTextOwned(
                     &out,
@@ -511,10 +502,7 @@ fn GetNode(comptime options: ParseOptions) type {
 
             if (comptime unescape) {
                 if (!was_decoded and !isRawTextNode(doc, idx)) {
-                    const new_len = if (comptime options.full_named_entities)
-                        entities.decodeInPlaceFull(false, node.name_or_text.sliceMut(doc.source))
-                    else
-                        entities.decodeInPlace(false, node.name_or_text.sliceMut(doc.source));
+                    const new_len = entities.decodeInPlaceWithMode(options.entity_decoding, false, node.name_or_text.sliceMut(doc.source));
                     node.name_or_text.len = @intCast(new_len);
                     decoded = true;
                 }
@@ -706,7 +694,7 @@ fn GetNode(comptime options: ParseOptions) type {
         fn writeAttrsHtml(doc: anytype, noalias node_raw: anytype, writer: anytype, comptime entity_encoding: EntityEncoding) WriterError(@TypeOf(writer))!void {
             var i: usize = @intCast(node_raw.name_or_text.end());
             if (comptime !options.non_destructive) {
-                attr.materializeAttributes(options.full_named_entities, @constCast(doc).source, i);
+                attr.materializeAttributes(options.entity_decoding, @constCast(doc).source, i);
                 const source: []const u8 = doc.source;
                 while (i < source.len and source[i] != '>') {
                     const name_start = i;
@@ -829,10 +817,7 @@ fn GetNode(comptime options: ParseOptions) type {
                 if (amp > i) {
                     if (comptime attribute) try writeEscapedAttrValue(writer, value[i..amp]) else try writeEscapedText(writer, value[i..amp]);
                 }
-                const decoded_entity_opt = if (comptime options.full_named_entities)
-                    entities.decodeEntityFull(attribute, value[amp + 1 ..])
-                else
-                    entities.decodeEntity(value[amp + 1 ..]);
+                const decoded_entity_opt = entities.decodeEntityWithMode(options.entity_decoding, attribute, value[amp + 1 ..]);
                 if (decoded_entity_opt) |decoded_entity| {
                     const decoded = decoded_entity.bytes[0..decoded_entity.len];
                     if (comptime attribute) try writeEscapedAttrValue(writer, decoded) else try writeEscapedText(writer, decoded);
@@ -2157,7 +2142,7 @@ test "read-only extraction decodes escapable raw text but not raw text" {
 
 test "full named entity parse option applies to text and attributes" {
     const alloc = std.testing.allocator;
-    const opts: ParseOptions = .{ .full_named_entities = true };
+    const opts: ParseOptions = .{ .entity_decoding = .full };
     var doc = opts.Document().init(alloc);
     defer doc.deinit();
     var html = "<div title='&eacute;'>&NotNestedGreaterGreater;</div>".*;
@@ -2999,7 +2984,7 @@ test "format document types" {
     const opts: ParseOptions = .{ .drop_whitespace_text_nodes = .none };
     const opts_out = try std.fmt.allocPrint(alloc, "{f}", .{opts});
     defer alloc.free(opts_out);
-    try std.testing.expectEqualStrings("ParseOptions{drop_whitespace_text_nodes=none, non_destructive=false, full_named_entities=false, store_last_child=false, store_prev_sibling=false}", opts_out);
+    try std.testing.expectEqualStrings("ParseOptions{drop_whitespace_text_nodes=none, non_destructive=false, entity_decoding=common, store_last_child=false, store_prev_sibling=false}", opts_out);
 
     const span: Span = .{ .start = 2, .len = 3 };
     const span_out = try std.fmt.allocPrint(alloc, "{f}", .{span});

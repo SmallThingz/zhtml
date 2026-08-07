@@ -131,7 +131,7 @@ All examples are verified by running `zig build examples-check`
 - tag and attribute names use delimiter blacklists rather than identifier whitelists, allowing framework names such as `@click`, `*ngIf`, `(change)`, and `[value]`
 - destructive text spans use an in-bounds NUL byte immediately after the span to remember that entity decoding already occurred; terminal text without spare capacity may be checked again
 - `writeHtml(writer, comptime entities)` accepts `.never`, `.auto`, or `.force`; `.auto` re-encodes already-decoded destructive text, `.force` canonicalizes escapable text and attributes, and `format` uses `.never`
-- the common named references (`nbsp`, `copy`, `reg`, `mdash`, `ndash`, and `hellip`) are always decoded; `.full_named_entities = true` enables the generated complete WHATWG table
+- `.entity_decoding` selects `.minimal` (five basic names), `.common` (adds `nbsp`, `copy`, `reg`, `mdash`, `ndash`, and `hellip`), or `.full` (the complete generated WHATWG table); numeric references are always decoded
 - `script` and `style` are parsed as raw text and never entity-decoded; `title` and `textarea` are parsed opaquely as escapable raw text and do decode character references during extraction
 - query-time decoding keeps parse throughput high by avoiding eager entity decode and whitespace normalization for bytes that may never be read
 

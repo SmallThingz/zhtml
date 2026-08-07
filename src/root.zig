@@ -18,6 +18,7 @@ pub const ParseOptions = document.ParseOptions;
 pub const TextOptions = document.TextOptions;
 /// Entity handling mode used by HTML serialization APIs.
 pub const EntityEncoding = document.EntityEncoding;
+pub const EntityDecoding = document.EntityDecoding;
 /// Allocation-free event parser for streaming-style HTML scans.
 pub const StreamingParser = stream.Parser;
 pub const StreamingEvent = stream.Event;
