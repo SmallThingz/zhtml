@@ -119,12 +119,14 @@ pub const NthExpr = extern struct {
 
     /// Evaluates this expression for a 1-based child index.
     pub fn matches(self: @This(), index_1based: usize) bool {
-        const idx: i32 = @intCast(index_1based);
-        if (self.a == 0) return idx == self.b;
-        const diff = idx - self.b;
-        if ((diff > 0 and self.a < 0) or (diff < 0 and self.a > 0)) return false;
-        if (@rem(diff, self.a) != 0) return false;
-        return @divTrunc(diff, self.a) >= 0;
+        const idx: i64 = @intCast(index_1based);
+        const a: i64 = self.a;
+        const b: i64 = self.b;
+        if (a == 0) return idx == b;
+        const diff = idx - b;
+        if ((diff > 0 and a < 0) or (diff < 0 and a > 0)) return false;
+        if (@rem(diff, a) != 0) return false;
+        return @divTrunc(diff, a) >= 0;
     }
 
     /// Formats this nth expression for human-readable output.
@@ -328,6 +330,12 @@ pub const Selector = struct {
         );
     }
 };
+
+test "NthExpr handles full i32 coefficient range without overflow" {
+    try std.testing.expect((NthExpr{ .a = 1, .b = std.math.minInt(i32) }).matches(1));
+    try std.testing.expect((NthExpr{ .a = std.math.maxInt(i32), .b = std.math.minInt(i32) }).matches(2_147_483_646));
+    try std.testing.expect(!(NthExpr{ .a = -1, .b = std.math.maxInt(i32) }).matches(@as(usize, std.math.maxInt(i32)) + 1));
+}
 
 test "format selector AST types" {
     const alloc = std.testing.allocator;

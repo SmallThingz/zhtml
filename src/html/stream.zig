@@ -316,7 +316,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     return;
                 }
 
-                if (self.options.track_nesting and !self_closing and !tags.isVoidTagWithKey(tag_name, tag.key)) {
+                if (self.options.track_nesting and !tags.isVoidTagWithKey(tag_name, tag.key)) {
                     try self.stack.append(self.allocator, .{ .name = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) }, .key = tag.key, .depth = depth });
                 }
                 return;
@@ -338,13 +338,13 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     self.i = self.source.len;
                 } else if (tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
                     self.i = if (self.findRawTextClose(tag_name, tag.key, self.i)) |close| close.close_end else self.source.len;
-                } else if (!self_closing and !tags.isVoidTagWithKey(tag_name, tag.key)) {
+                } else if (!tags.isVoidTagWithKey(tag_name, tag.key)) {
                     self.i = self.skipSubtree(tag_name, tag.key, self.i);
                 }
                 return;
             }
 
-            if (self_closing or tags.isVoidTagWithKey(tag_name, tag.key)) return;
+            if (tags.isVoidTagWithKey(tag_name, tag.key)) return;
 
             if (tags.isPlainTextTagWithKey(tag_name, tag.key)) {
                 if (self.i < self.source.len) try self.emitText(self.i, self.source.len);
@@ -562,10 +562,9 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     const child = self.scanTagName(lt + 1);
                     const end_pos = self.findTagEnd(child.end) orelse return self.source.len;
                     const child_name = self.source[child.start..child.end];
-                    const self_closing = end_pos > child.end and self.source[end_pos - 1] == '/';
                     i = end_pos + 1;
 
-                    if (!self_closing and !tags.isVoidTagWithKey(child_name, child.key)) {
+                    if (!tags.isVoidTagWithKey(child_name, child.key)) {
                         if (tags.equalByLenAndKeyIgnoreCase(child_name, child.key, name, key)) depth += 1;
                         if (tags.isPlainTextTagWithKey(child_name, child.key)) return self.source.len;
                         if (tags.isTextOnlyTagWithKey(child_name, child.key)) {
@@ -671,6 +670,21 @@ test "streaming attribute iterator stops at self-closing slash" {
     var ctx: Ctx = .{};
     try parse(std.testing.allocator, "<img id = x />", &ctx, Ctx.cb);
     try std.testing.expect(ctx.checked);
+}
+
+test "trailing slash does not close non-void HTML elements" {
+    const Ctx = struct {
+        text_depth: ?usize = null,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .text and std.mem.eql(u8, ev.valueSlice(), "x")) self.text_depth = ev.depth;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<div/>x</div>", &ctx, Ctx.cb);
+    try std.testing.expectEqual(@as(?usize, 1), ctx.text_depth);
 }
 
 test "streaming attribute iterator accepts framework attribute names" {

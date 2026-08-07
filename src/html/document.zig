@@ -613,7 +613,13 @@ fn GetNode(comptime options: ParseOptions) type {
                 const text_bytes = node_raw.name_or_text.slice(doc.source);
                 const decoded = !options.non_destructive and node_raw.name_or_text.end() < doc.source.len and doc.source[node_raw.name_or_text.end()] == 0;
                 if (comptime entity_encoding == .force) {
-                    if (raw_text) try writer.writeAll(text_bytes) else try writeDecodedEscaped(writer, text_bytes, false);
+                    if (raw_text) {
+                        try writer.writeAll(text_bytes);
+                    } else if (comptime options.non_destructive) {
+                        try writeDecodedEscaped(writer, text_bytes, false);
+                    } else {
+                        try writeEscapedText(writer, text_bytes);
+                    }
                 } else if (comptime entity_encoding == .auto and !options.non_destructive) {
                     if (raw_text or !decoded) try writer.writeAll(text_bytes) else try writeEscapedText(writer, text_bytes);
                 } else {
@@ -646,7 +652,13 @@ fn GetNode(comptime options: ParseOptions) type {
                     const text_bytes = child.name_or_text.slice(doc.source);
                     const decoded = !options.non_destructive and child.name_or_text.end() < doc.source.len and doc.source[child.name_or_text.end()] == 0;
                     if (comptime entity_encoding == .force) {
-                        if (raw_text) try writer.writeAll(text_bytes) else try writeDecodedEscaped(writer, text_bytes, false);
+                        if (raw_text) {
+                            try writer.writeAll(text_bytes);
+                        } else if (comptime options.non_destructive) {
+                            try writeDecodedEscaped(writer, text_bytes, false);
+                        } else {
+                            try writeEscapedText(writer, text_bytes);
+                        }
                     } else if (comptime entity_encoding == .auto and !options.non_destructive) {
                         if (raw_text or !decoded) try writer.writeAll(text_bytes) else try writeEscapedText(writer, text_bytes);
                     } else {
@@ -666,6 +678,7 @@ fn GetNode(comptime options: ParseOptions) type {
 
             while (open_idx != InvalidIndex) {
                 try writeElementCloseHtml(doc, &doc.nodes[open_idx], writer);
+                if (open_idx == idx) break;
                 const parent = doc.nodes[open_idx].parent;
                 open_idx = if (parent != InvalidIndex and parent != 0) parent else InvalidIndex;
             }
@@ -710,7 +723,7 @@ fn GetNode(comptime options: ParseOptions) type {
                         while (i < source.len and source[i] != 0) : (i += 1) {}
                         if (comptime entity_encoding == .force) {
                             try writer.writeAll("=\"");
-                            try writeDecodedEscaped(writer, source[value_start..i], true);
+                            try writeEscapedAttrValue(writer, source[value_start..i]);
                             try writeByte(writer, '"');
                         } else {
                             try writeAttrValue(writer, source[value_start..i]);
@@ -826,9 +839,9 @@ fn GetNode(comptime options: ParseOptions) type {
                 if (amp > i) {
                     if (comptime attribute) try writeEscapedAttrValue(writer, value[i..amp]) else try writeEscapedText(writer, value[i..amp]);
                 }
-                // Force serialization recognizes the complete HTML entity set,
-                // independently of the parse-time extraction policy.
-                const decoded_entity_opt = entities.decodeEntityWithMode(.full, attribute, value[amp + 1 ..]);
+                // Decode only references present in the original input. Bytes
+                // emitted by a decoded reference are written and never rescanned.
+                const decoded_entity_opt = entities.decodeEntityWithMode(options.entity_decoding, attribute, value[amp + 1 ..]);
                 if (decoded_entity_opt) |decoded_entity| {
                     const decoded = decoded_entity.bytes[0..decoded_entity.len];
                     if (comptime attribute) try writeEscapedAttrValue(writer, decoded) else try writeEscapedText(writer, decoded);
@@ -980,7 +993,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         }
 
         /// Allocates and returns all remaining matches.
-        /// Allocator param is separate from doc.allocator — callers must free the
+        /// Allocator param is separate from doc.allocator; callers must free the
         /// returned slice with same allocator passed here (not doc.allocator).
         pub fn collect(self: @This(), allocator: std.mem.Allocator) ![]NodeTypeWrapper {
             var fill_it = self;
@@ -2055,6 +2068,20 @@ test "RW serialization reconstructs markup replaced by a text marker" {
     try std.testing.expectEqualStrings("<p>a&b</p>", out.written());
 }
 
+test "nested node serialization stops at the requested subtree" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div><span>x</span></div>".*;
+    try resetParsed(.{}, &doc, &html);
+    const span = firstQuery(doc.query("span")) orelse return error.TestUnexpectedResult;
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try span.writeHtml(&out.writer, .never);
+    try std.testing.expectEqualStrings("<span>x</span>", out.written());
+}
+
 test "writeHtml optionally encodes materialized text while format keeps raw behavior" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);
@@ -2179,7 +2206,7 @@ test "entity serialization modes preserve auto and force contracts" {
     try std.testing.expectEqualStrings("<div>a&lt;b &amp; c</div>", after.written());
 }
 
-test "force serialization recognizes entities beyond parse decoding mode" {
+test "force serialization respects the configured entity decoding mode" {
     const alloc = std.testing.allocator;
     const opts: ParseOptions = .{ .non_destructive = true, .entity_decoding = .minimal };
     var doc = opts.Document().init(alloc);
@@ -2191,7 +2218,7 @@ test "force serialization recognizes entities beyond parse decoding mode" {
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     try div.writeHtml(&out.writer, .force);
-    try std.testing.expectEqualStrings("<div title=\"\xc3\xa9\">\xc2\xa0\xc3\xa9</div>", out.written());
+    try std.testing.expectEqualStrings("<div title=\"&amp;eacute;\">&amp;nbsp;&amp;eacute;</div>", out.written());
 
     const rw_opts: ParseOptions = .{ .entity_decoding = .minimal };
     var rw_doc = rw_opts.Document().init(alloc);
@@ -2205,7 +2232,34 @@ test "force serialization recognizes entities beyond parse decoding mode" {
     var rw_out: std.Io.Writer.Allocating = .init(alloc);
     defer rw_out.deinit();
     try rw_div.writeHtml(&rw_out.writer, .force);
-    try std.testing.expectEqualStrings("<div title=\"\xc3\xa9\">\xc2\xa0\xc3\xa9</div>", rw_out.written());
+    try std.testing.expectEqualStrings("<div title=\"&amp;eacute;\">&amp;nbsp;&amp;eacute;</div>", rw_out.written());
+}
+
+test "force serialization does not decode entity text produced by amp" {
+    const alloc = std.testing.allocator;
+    const html = "<div title='&amp;eacute;'>&amp;eacute;</div>";
+
+    var ro_doc = GetDocument(.{ .non_destructive = true }).init(alloc);
+    defer ro_doc.deinit();
+    try resetParsed(.{ .non_destructive = true }, &ro_doc, html);
+    const ro_div = firstQuery(ro_doc.query("div")) orelse return error.TestUnexpectedResult;
+    var ro_out: std.Io.Writer.Allocating = .init(alloc);
+    defer ro_out.deinit();
+    try ro_div.writeHtml(&ro_out.writer, .force);
+    try std.testing.expectEqualStrings("<div title=\"&amp;eacute;\">&amp;eacute;</div>", ro_out.written());
+
+    var rw_doc = GetDocument(.{}).init(alloc);
+    defer rw_doc.deinit();
+    var rw_html = html.*;
+    try resetParsed(.{}, &rw_doc, &rw_html);
+    const rw_div = firstQuery(rw_doc.query("div")) orelse return error.TestUnexpectedResult;
+    // Exercise the exact regression: materialize before force serialization.
+    _ = (try rw_div.getAttributeValue(alloc, "title")) orelse return error.TestUnexpectedResult;
+    _ = try rw_div.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+    var rw_out: std.Io.Writer.Allocating = .init(alloc);
+    defer rw_out.deinit();
+    try rw_div.writeHtml(&rw_out.writer, .force);
+    try std.testing.expectEqualStrings("<div title=\"&amp;eacute;\">&amp;eacute;</div>", rw_out.written());
 }
 
 test "force serialization preserves SVG and plaintext opaque payloads" {
