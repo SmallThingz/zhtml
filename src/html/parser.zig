@@ -27,7 +27,6 @@ const MaxInitialNodeReserve: usize = 1 << 20;
 /// remains responsible for freeing it. Destructive mode may mutate `input`.
 pub fn parse(comptime opts: ParseOptions, allocator: std.mem.Allocator, input: opts.Input()) !opts.Document() {
     if (!common.lenFits(input.len)) return error.InputTooLarge;
-    if (input.len == 0) return error.InvalidInput;
 
     const Doc = opts.Document();
     const RawNode = opts.RawNode();
@@ -144,7 +143,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             }
 
             // Handle the last char; only possibility: self.i == self.input.len - 1
-            if (self.i == self.input.len - 1) {
+            if (self.input.len != 0 and self.i == self.input.len - 1) {
                 const parent_idx = self.currentParent();
                 const last_idx = self.nodes.items.len - 1;
                 const last = &self.nodes.items[last_idx];
@@ -1341,6 +1340,15 @@ fn fuzzParserProperties(alloc: std.mem.Allocator, smith: *std.testing.Smith) !vo
     defer alloc.free(input);
     fillInterestingParserBytesSmith(smith, input);
     try runParserPropertyCase(alloc, input);
+}
+
+test "DOM parser accepts empty input" {
+    const alloc = std.testing.allocator;
+    var input: [0]u8 = .{};
+    var doc = try (ParseOptions{}).parse(alloc, &input);
+    defer doc.deinit();
+    try std.testing.expectEqual(@as(usize, 1), doc.nodes.len);
+    try std.testing.expectEqual(@as(IndexInt, 0), doc.nodes[0].subtree_end);
 }
 
 test "fuzz parser preserves invariants across parse modes" {

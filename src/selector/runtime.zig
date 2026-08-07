@@ -205,13 +205,40 @@ const Parser = struct {
 
     fn parseAttrSelector(noalias self: *Parser) Error!ast.AttrSelector {
         self.skipWs();
-        const name = self.parseIdent() orelse return error.InvalidSelector;
+        const name = self.parseAttrName() orelse return error.InvalidSelector;
         self.lowerRange(name);
         self.skipWs();
 
         const op = (try self.parseAttrOp()) orelse return .{ .name = name, .op = .exists, .value = .{} };
         const parsed = try self.parseAttrValueThenClose();
         return .{ .name = name, .op = op, .case = parsed.case, .value = parsed.value };
+    }
+
+    /// Attribute selectors accept HTML/framework names more broadly than CSS
+    /// tag, id, and class identifiers. Operator bytes terminate a name only
+    /// after at least one name byte has been consumed.
+    fn parseAttrName(noalias self: *Parser) ?ast.Range {
+        if (self.i >= self.source.len) return null;
+        const start = self.i;
+
+        // Angular-style bracketed names are represented as `[[value]]`: the
+        // inner brackets belong to the HTML attribute, the outer pair to the
+        // selector syntax.
+        if (self.source[self.i] == '[') {
+            self.i += 1;
+            while (self.i < self.source.len and self.source[self.i] != ']') : (self.i += 1) {}
+            if (self.i >= self.source.len) return null;
+            self.i += 1;
+            return ast.Range.from(start, self.i);
+        }
+
+        while (self.i < self.source.len) : (self.i += 1) {
+            const c = self.source[self.i];
+            if (tables.WhitespaceTable[c] or c == ']' or c == '=') break;
+            if (self.i != start and (c == '^' or c == '$' or c == '*' or c == '~' or c == '|')) break;
+        }
+        if (self.i == start) return null;
+        return ast.Range.from(start, self.i);
     }
 
     fn parseAttrOp(noalias self: *Parser) Error!?ast.AttrOp {
@@ -507,6 +534,23 @@ test "runtime selector parser accepts attribute case flags" {
     var sel = try compileRuntimeImpl(alloc, "div[a=x][b=y i][c='Z' s]");
     defer sel.deinit(alloc);
     try test_helpers.expectAttributeCaseFlags(sel);
+}
+
+test "runtime selector parser accepts framework attribute names" {
+    const alloc = std.testing.allocator;
+    const selectors = [_][]const u8{
+        "div[@click=a]",
+        "div[*ngIf=b]",
+        "div[(change)=c]",
+        "div[[value]=d]",
+        "div[v-on:click=e]",
+        "div[x-on:keydown=f]",
+        "div[data-foo.bar=g]",
+    };
+    for (selectors) |source| {
+        var sel = try compileRuntimeImpl(alloc, source);
+        sel.deinit(alloc);
+    }
 }
 
 test "runtime selector parser tracks combinator chain and grouping" {

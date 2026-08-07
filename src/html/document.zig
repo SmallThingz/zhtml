@@ -2814,6 +2814,17 @@ test "document attribute lookup accepts framework attribute names" {
         const found = (try div.getAttributeValue(alloc, name)) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqualSlices(u8, &[_]u8{value}, found.value);
     }
+
+    const selectors = [_][]const u8{
+        "div[@click=a]",
+        "div[*ngIf=b]",
+        "div[(change)=c]",
+        "div[[value]=d]",
+        "div[v-on:click=e]",
+        "div[x-on:keydown=f]",
+        "div[data-foo.bar=g]",
+    };
+    for (selectors) |selector| try std.testing.expect(try runtimeFirst(&doc, alloc, selector) != null);
 }
 
 test "moved document keeps node-scoped queries and navigation valid" {
