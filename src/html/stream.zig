@@ -6,18 +6,14 @@ test {
 }
 const attr = @import("attr.zig");
 const common = @import("../common.zig");
+const scanner = @import("scanner.zig");
 const tables = @import("tables.zig");
 const tags = @import("tags.zig");
 
 const IndexInt = common.IndexInt;
 
-const RawClose = struct { content_end: usize, close_start: usize, close_end: usize };
-
-const TagScan = struct {
-    start: usize,
-    end: usize,
-    key: u64,
-};
+const RawClose = scanner.RawTextClose;
+const TagScan = scanner.TagName;
 
 fn findGtScanOnly(source: []const u8, start: usize) usize {
     var i = start;
@@ -58,9 +54,9 @@ fn scanOnly(source: []const u8) void {
 
                 const lower = std.ascii.toLower(c);
                 if (lower != 's' and lower != 't' and lower != 'p') continue;
-                if (lower == 's' and !startsWithIgnoreCase(source, lt + 1, "script") and !startsWithIgnoreCase(source, lt + 1, "style")) continue;
-                if (lower == 't' and !startsWithIgnoreCase(source, lt + 1, "title") and !startsWithIgnoreCase(source, lt + 1, "textarea")) continue;
-                if (lower == 'p' and !startsWithIgnoreCase(source, lt + 1, "plaintext")) continue;
+                if (lower == 's' and !scanner.startsWithIgnoreCase(source, lt + 1, "script") and !scanner.startsWithIgnoreCase(source, lt + 1, "style")) continue;
+                if (lower == 't' and !scanner.startsWithIgnoreCase(source, lt + 1, "title") and !scanner.startsWithIgnoreCase(source, lt + 1, "textarea")) continue;
+                if (lower == 'p' and !scanner.startsWithIgnoreCase(source, lt + 1, "plaintext")) continue;
 
                 const tag = scanOnlyTagName(source, lt + 1);
                 const name = source[tag.start..tag.end];
@@ -77,53 +73,16 @@ fn scanOnly(source: []const u8) void {
     }
 }
 
-fn startsWithIgnoreCase(source: []const u8, start: usize, comptime needle: []const u8) bool {
-    if (start + needle.len > source.len) return false;
-    inline for (needle, 0..) |want, off| {
-        if (std.ascii.toLower(source[start + off]) != want) return false;
-    }
-    return true;
-}
-
-fn scanOnlyTagName(source: []const u8, start: usize) TagScan {
-    var i = start;
-    var key: u64 = 0;
-    for (0..8) |off| {
-        if (i >= source.len or !tables.TagNameCharTable[source[i]]) break;
-        const c = std.ascii.toLower(source[i]);
-        key |= @as(u64, c) << @as(u6, @intCast(off * 8));
-        i += 1;
-    } else {
-        while (i < source.len and tables.TagNameCharTable[source[i]]) : (i += 1) {}
-    }
-    return .{ .start = start, .end = i, .key = key };
+inline fn scanOnlyTagName(source: []const u8, start: usize) TagScan {
+    return scanner.scanTagName(source, start, false);
 }
 
 fn scanOnlyFindRawTextClose(source: []const u8, name: []const u8, key: u64, start: usize) ?RawClose {
-    var search = start;
-    while (std.mem.indexOfScalarPos(u8, source, search, '<')) |lt| {
-        search = lt + 1;
-        if (lt + 2 >= source.len or source[lt + 1] != '/') continue;
-        const close = scanOnlyTagName(source, lt + 2);
-        if (!tags.equalByLenAndKeyIgnoreCase(source[close.start..close.end], close.key, name, key)) continue;
-        const end = findTagEndRespectQuotes(source, close.end) orelse return null;
-        return .{ .content_end = lt, .close_start = lt, .close_end = end + 1 };
-    }
-    return null;
+    return scanner.findRawTextClose(source, name, key, start, false);
 }
 
-fn findTagEndRespectQuotes(source: []const u8, start: usize) ?usize {
-    var i = start;
-    while (std.mem.indexOfScalarPos(u8, source, i, '>')) |pos| {
-        if (std.mem.indexOfAny(u8, source[i..pos], "'\"")) |rel| {
-            const qpos = i + rel;
-            const quote = source[qpos];
-            i = (std.mem.indexOfScalarPos(u8, source, qpos + 1, quote) orelse return null) + 1;
-            continue;
-        }
-        return pos;
-    }
-    return null;
+inline fn findTagEndRespectQuotes(source: []const u8, start: usize) ?usize {
+    return scanner.findTagEnd(source, start);
 }
 
 pub const Span = struct {
@@ -547,18 +506,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
         fn findBangEnd(self: *Self, start: usize) usize {
             if (self.options.assume_no_gt_in_attribute_values) return (std.mem.indexOfScalarPos(u8, self.source, start, '>') orelse (self.source.len - 1)) + 1;
-
-            var i = start;
-            while (std.mem.indexOfScalarPos(u8, self.source, i, '>')) |pos| {
-                if (std.mem.indexOfAny(u8, self.source[i..pos], "'\"")) |rel| {
-                    const qpos = i + rel;
-                    const quote = self.source[qpos];
-                    i = (std.mem.indexOfScalarPos(u8, self.source, qpos + 1, quote) orelse return self.source.len) + 1;
-                    continue;
-                }
-                return pos + 1;
-            }
-            return self.source.len;
+            return if (scanner.findDeclarationEnd(self.source, start)) |end| end + 1 else self.source.len;
         }
 
         fn findRawTextClose(self: *Self, name: []const u8, key: u64, start: usize) ?RawClose {

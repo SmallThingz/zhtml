@@ -6,6 +6,7 @@ test {
 }
 const tables = @import("tables.zig");
 const tags = @import("tags.zig");
+const scanner = @import("scanner.zig");
 const common = @import("../common.zig");
 const document = @import("document.zig");
 const ast = @import("../selector/ast.zig");
@@ -72,11 +73,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             /// Last direct element child seen while this element is open.
             last_child: IndexInt = InvalidIndex,
         };
-        const TagNameScan = struct {
-            key: u64,
-            start: usize,
-            end: usize,
-        };
+        const TagNameScan = scanner.TagName;
 
         /// Reserve capacities + add initial values to containers
         inline fn initContainers(noalias self: *Self) !void {
@@ -431,20 +428,9 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         inline fn scanTagName(noalias self: *Self) TagNameScan {
-            const start = self.i;
-            var key: u64 = 0;
-            for (0..8) |i| {
-                if (self.i >= self.input.len or !tables.TagNameCharTable[self.input[self.i]]) break;
-                const c = std.ascii.toLower(self.input[self.i]);
-                if (!comptime opts.non_destructive) {
-                    @constCast(self.input)[self.i] = c;
-                }
-                key |= @as(u64, c) << @as(u6, @intCast(i * 8));
-                self.i += 1;
-            } else {
-                while (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) : (self.i += 1) {}
-            }
-            return .{ .key = key, .start = start, .end = self.i };
+            const tag = scanner.scanTagName(self.input, self.i, !opts.non_destructive);
+            self.i = tag.end;
+            return tag;
         }
 
         fn skipComment(noalias self: *Self) void {
@@ -486,60 +472,16 @@ fn ParseState(comptime opts: ParseOptions) type {
 
         inline fn findTagEndRespectAttrQuotes(noalias self: *Self) ?usize {
             std.debug.assert(self.i <= self.input.len);
-            while (self.i < self.input.len) {
-                const j = std.mem.indexOfAnyPos(u8, self.input, self.i, ">=") orelse return null;
-                switch (self.input[j]) {
-                    '>' => {
-                        self.i = j + 1;
-                        return j;
-                    },
-                    '=' => {
-                        self.i = j + 1;
-                        self.skipWs();
-                        if (self.i < self.input.len and (self.input[self.i] == '\'' or self.input[self.i] == '"')) {
-                            const q = self.input[self.i];
-                            self.i += 1;
-                            const end_quote = std.mem.indexOfScalarPos(u8, self.input, self.i, q) orelse return null;
-                            self.i = end_quote + 1;
-                        }
-                    },
-                    else => unreachable,
-                }
-            }
-            return null;
+            const end = scanner.findTagEnd(self.input, self.i) orelse return null;
+            self.i = end + 1;
+            return end;
         }
 
         inline fn findTagEndRespectAnyQuotes(noalias self: *Self) ?usize {
             std.debug.assert(self.i <= self.input.len);
-            while (self.i < self.input.len) : (self.i += 1) {
-                switch (self.input[self.i]) {
-                    '>' => {
-                        defer self.i += 1;
-                        return self.i;
-                    },
-                    '=' => {
-                        self.i += 1;
-                        self.skipWs();
-                        if (self.i < self.input.len and (self.input[self.i] == '\'' or self.input[self.i] == '"')) {
-                            const q = self.input[self.i];
-                            self.i += 1;
-                            self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, q) orelse {
-                                @branchHint(.cold);
-                                return null;
-                            };
-                        }
-                    },
-                    '\'', '"' => |q| {
-                        self.i += 1;
-                        self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, q) orelse {
-                            @branchHint(.cold);
-                            return null;
-                        };
-                    },
-                    else => {},
-                }
-            }
-            return null;
+            const end = scanner.findDeclarationEnd(self.input, self.i) orelse return null;
+            self.i = end + 1;
+            return end;
         }
 
         inline fn skipPi(noalias self: *Self) void {
@@ -617,50 +559,9 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         inline fn findRawTextClose(noalias self: *Self, tag_name: []const u8, tag_key: u64, start: usize) ?struct { content_end: usize, close_end: usize } {
-            std.debug.assert(tag_name.len != 0);
-            // Raw-text scanning only recognizes a real `</tag>` terminator.
-            // Everything else, including stray `<` bytes, stays in the text run.
-            var j = std.mem.indexOfScalarPos(u8, self.input, start, '<') orelse return null;
-            const first = std.ascii.toLower(tag_name[0]);
-            while (j + 3 < self.input.len) {
-                if (self.input[j + 1] != '/') {
-                    j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
-                    continue;
-                }
-                if (j + 2 >= self.input.len or std.ascii.toLower(self.input[j + 2]) != first) {
-                    j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
-                    continue;
-                }
-
-                self.i = j + 2;
-                const close = self.scanTagName();
-                if (close.end == close.start) {
-                    j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
-                    continue;
-                }
-
-                if (close.end - close.start != tag_name.len or close.key != tag_key) {
-                    j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
-                    continue;
-                }
-
-                if (tag_name.len > 8 and !std.ascii.eqlIgnoreCase(self.input[close.start + 8 .. close.end], tag_name[8..])) {
-                    j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
-                    continue;
-                }
-
-                const tag_end = self.findTagEndRespectAttrQuotes() orelse self.input.len;
-                if (tag_end >= self.input.len or self.input[tag_end] != '>') {
-                    j = std.mem.indexOfScalarPos(u8, self.input, j + 1, '<') orelse return null;
-                    continue;
-                }
-
-                return .{
-                    .content_end = j,
-                    .close_end = self.i,
-                };
-            }
-            return null;
+            const close = scanner.findRawTextClose(self.input, tag_name, tag_key, start, !opts.non_destructive) orelse return null;
+            self.i = close.close_end;
+            return .{ .content_end = close.content_end, .close_end = close.close_end };
         }
     };
 }

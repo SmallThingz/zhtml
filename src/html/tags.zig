@@ -44,7 +44,8 @@ pub inline fn first8KeyWithMode(name: []const u8, comptime non_destructive: bool
 /// lowercase).
 pub inline fn equalByLenAndKeyIgnoreCase(a: []const u8, a_key: u64, b: []const u8, b_key: u64) bool {
     if (a.len != b.len or a_key != b_key) return false;
-    return if (a.len <= 8) true else std.ascii.eqlIgnoreCase(a[8..], b[8..]);
+    if (a.len <= 8) return true;
+    return std.ascii.eqlIgnoreCase(a[@min(8, a.len)..], b[@min(8, b.len)..]);
 }
 
 const KEY = struct {
