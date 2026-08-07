@@ -895,6 +895,7 @@ fn GetNode(comptime options: ParseOptions) type {
                 .scope_root = InvalidIndex,
                 .next_index = 1,
                 .end_index = 1,
+                .workspace = matcher.MatchWorkspace.init(self.doc.allocator),
             };
         }
 
@@ -906,6 +907,7 @@ fn GetNode(comptime options: ParseOptions) type {
                 .scope_root = self.index,
                 .next_index = self.index + 1, // Node 0 will work too since it's index = 0
                 .end_index = self.raw().subtree_end + 1, // Node 0 should work too sinde it's subtree_end should be last node
+                .workspace = matcher.MatchWorkspace.init(self.doc.allocator),
             };
         }
     };
@@ -950,15 +952,12 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         next_index: IndexInt = 1,
         /// Exclusive traversal bound for `next_index`.
         end_index: IndexInt = 1,
-        /// Reused matcher scratch; initialized lazily and retained between `next` calls.
-        scratch: ?std.heap.ArenaAllocator = null,
+        /// Lazily initialized matcher scratch and reusable deep-selector frames.
+        workspace: matcher.MatchWorkspace,
 
         /// Releases matcher scratch if iteration stops before exhaustion.
         pub fn deinit(noalias self: *@This()) void {
-            if (self.scratch) |*scratch| {
-                scratch.deinit();
-                self.scratch = null;
-            }
+            self.workspace.deinit();
         }
 
         /// Returns next matching node or `null` when exhausted.
@@ -970,12 +969,11 @@ fn GetQueryIter(comptime options: ParseOptions) type {
                 return null;
             }
 
-            if (self.scratch == null) self.scratch = std.heap.ArenaAllocator.init(self.doc.allocator);
-
             while (self.next_index < self.end_index) : (self.next_index += 1) {
                 if (!self.doc.nodeAt(self.next_index).isElement()) continue;
+                if (!matcher.candidateCouldMatch(DocType, self.doc, self.selector, self.next_index)) continue;
 
-                if (try matcher.matchesSelectorAtWithScratch(DocType, self.doc, self.selector, self.next_index, self.scope_root, &self.scratch.?)) {
+                if (try matcher.matchesSelectorAtWithWorkspace(DocType, self.doc, self.selector, self.next_index, self.scope_root, &self.workspace)) {
                     defer self.next_index += 1;
                     return self.doc.nodeAt(self.next_index);
                 }
@@ -997,7 +995,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         /// returned slice with same allocator passed here (not doc.allocator).
         pub fn collect(self: @This(), allocator: std.mem.Allocator) ![]NodeTypeWrapper {
             var fill_it = self;
-            fill_it.scratch = null;
+            fill_it.workspace = matcher.MatchWorkspace.init(self.doc.allocator);
             defer fill_it.deinit();
 
             var out = std.ArrayList(NodeTypeWrapper).empty;
@@ -3044,8 +3042,13 @@ test "debug query propagates matcher allocation failure" {
 
     var selector_arena = std.heap.ArenaAllocator.init(alloc);
     defer selector_arena.deinit();
-    const selector_text = "div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div div";
-    const sel = try ast.Selector.compileRuntime(selector_arena.allocator(), selector_text);
+    var selector_text = std.ArrayList(u8).empty;
+    defer selector_text.deinit(selector_arena.allocator());
+    for (0..65) |i| {
+        if (i != 0) try selector_text.append(selector_arena.allocator(), ' ');
+        try selector_text.appendSlice(selector_arena.allocator(), "div");
+    }
+    const sel = try ast.Selector.compileRuntime(selector_arena.allocator(), selector_text.items);
 
     var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
     doc.allocator = failing.allocator();
@@ -3173,18 +3176,18 @@ test "query iterator lifecycle releases scratch and copies independently" {
     // Dropping an iterator before its first next() is allocation-free.
     {
         const unused = doc.query("span");
-        try std.testing.expect(unused.scratch == null);
+        try std.testing.expect(unused.workspace.scratch == null);
     }
 
     var early = doc.query("span");
     try std.testing.expect(try early.next() != null);
-    try std.testing.expect(early.scratch != null);
+    try std.testing.expect(early.workspace.scratch != null);
     early.deinit();
-    try std.testing.expect(early.scratch == null);
+    try std.testing.expect(early.workspace.scratch == null);
 
     var exhausted = doc.query(".missing");
     try std.testing.expect(try exhausted.next() == null);
-    try std.testing.expect(exhausted.scratch == null);
+    try std.testing.expect(exhausted.workspace.scratch == null);
 
     var original = doc.query("span");
     var copied = original;
@@ -3210,7 +3213,7 @@ test "query iterator reports matcher allocation failure" {
 
     var selector_source = std.ArrayList(u8).empty;
     defer selector_source.deinit(alloc);
-    for (0..49) |i| {
+    for (0..65) |i| {
         if (i != 0) try selector_source.append(alloc, ' ');
         try selector_source.appendSlice(alloc, "div");
     }
@@ -3223,6 +3226,62 @@ test "query iterator reports matcher allocation failure" {
     var it = doc.queryRuntime(selector);
     defer it.deinit();
     try std.testing.expectError(error.OutOfMemory, it.next());
+}
+
+test "rightmost tag prefilter avoids deep-selector workspace allocation" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var src = "<div><div></div></div>".*;
+    try resetParsed(.{}, &doc, &src);
+
+    var selector_source = std.ArrayList(u8).empty;
+    defer selector_source.deinit(alloc);
+    for (0..64) |i| {
+        if (i != 0) try selector_source.append(alloc, ' ');
+        try selector_source.appendSlice(alloc, "div");
+    }
+    try selector_source.appendSlice(alloc, " span");
+    var selector = try ast.Selector.compileRuntime(alloc, selector_source.items);
+    defer selector.deinit(alloc);
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    doc.allocator = failing.allocator();
+    defer doc.allocator = alloc;
+    var it = doc.queryRuntime(selector);
+    defer it.deinit();
+    try std.testing.expect(try it.next() == null);
+    try std.testing.expect(it.workspace.scratch == null);
+}
+
+test "deep-selector workspace frame allocation is reused across candidates" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var source_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer source_writer.deinit();
+    for (0..65) |_| try source_writer.writer.writeAll("<div>");
+    for (0..65) |_| try source_writer.writer.writeAll("</div>");
+    const src = try source_writer.toOwnedSlice();
+    defer alloc.free(src);
+    try resetParsed(.{}, &doc, src);
+
+    var selector_source = std.ArrayList(u8).empty;
+    defer selector_source.deinit(alloc);
+    for (0..65) |i| {
+        if (i != 0) try selector_source.appendSlice(alloc, " > ");
+        try selector_source.appendSlice(alloc, "div");
+    }
+    var selector = try ast.Selector.compileRuntime(alloc, selector_source.items);
+    defer selector.deinit(alloc);
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 1 });
+    doc.allocator = failing.allocator();
+    defer doc.allocator = alloc;
+    var it = doc.queryRuntime(selector);
+    defer it.deinit();
+    try std.testing.expect(try it.next() != null);
+    try std.testing.expectEqual(@as(usize, 65), it.workspace.heap_frames.len);
 }
 
 test "query collect frees partial output when growth fails" {

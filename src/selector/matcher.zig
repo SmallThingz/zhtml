@@ -18,7 +18,7 @@ const IndexInt = common.IndexInt;
 const InvalidIndex: IndexInt = common.InvalidIndex;
 const MaxProbeEntries: usize = 24;
 const MaxCollectedAttrs: usize = 24;
-const LocalMatchFrameCap: usize = 48;
+const LocalMatchFrameCap: usize = 64;
 const matchesScopeAnchor = common.matchesScopeAnchor;
 const parentElement = common.parentElement;
 const prevElementSibling = common.prevElementSibling;
@@ -172,37 +172,55 @@ pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
 /// Returns first matching node index for `selector` within optional `scope_root`.
 pub fn firstMatchIndex(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, scope_root: IndexInt) !?IndexInt {
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return null;
-    var scratch = std.heap.ArenaAllocator.init(doc.allocator);
-    defer scratch.deinit();
+    var workspace = MatchWorkspace.init(doc.allocator);
+    defer workspace.deinit();
+    const bounds = traversalBounds(Doc, doc, scope_root);
+    var i = bounds.start;
+    while (i < bounds.end_excl and i < doc.nodes.len) : (i += 1) {
+        if (!doc.nodes[i].isElement(i)) continue;
+        if (!candidateCouldMatch(Doc, doc, selector, i)) continue;
+        if (try matchesSelectorAtWithWorkspace(Doc, doc, selector, i, scope_root, &workspace)) return i;
+    }
+    return null;
+}
 
-    var best: ?IndexInt = null;
-    // Group matches are independent; the earliest document-order hit wins.
+/// Cheap rejection using only rightmost compound tag constraints.
+pub fn candidateCouldMatch(comptime Doc: type, doc: *const Doc, selector: ast.Selector, node_index: IndexInt) bool {
+    const node_name = doc.nodes[node_index].name_or_text.slice(doc.source);
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
-        const idx = (try firstMatchForGroup(Doc, doc, selector, group, scope_root, &scratch)) orelse continue;
-        if (best == null or idx < best.?) best = idx;
+        const rightmost: usize = @intCast(group.compound_start + group.compound_len - 1);
+        const comp = selector.compounds[rightmost];
+        if (!comp.hasTag() or tagMatches(Doc, selector.source, comp, node_name)) return true;
     }
-    return best;
+    return false;
 }
 
 /// Returns whether `node_index` matches any selector group within scope.
 pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt) !bool {
     if (node_index >= doc.nodes.len) return false;
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
-    var scratch = std.heap.ArenaAllocator.init(doc.allocator);
-    defer scratch.deinit();
-
-    return try matchesSelectorAtWithScratch(Doc, doc, selector, node_index, scope_root, &scratch);
+    var workspace = MatchWorkspace.init(doc.allocator);
+    defer workspace.deinit();
+    return try matchesSelectorAtWithWorkspace(Doc, doc, selector, node_index, scope_root, &workspace);
 }
 
-pub fn matchesSelectorAtWithScratch(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) !bool {
+pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt, workspace: *MatchWorkspace) !bool {
     if (node_index >= doc.nodes.len) return false;
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
+    try workspace.ensureReady(selector);
+    const scratch = &workspace.scratch.?;
 
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
         const rightmost = group.compound_len - 1;
-        if (try matchGroupFromRight(Doc, doc, selector, group, rightmost, node_index, scope_root, scratch)) return true;
+        if (group.compound_len == 1) {
+            const comp = selector.compounds[group.compound_start];
+            if (try matchesCompound(Doc, doc, selector, comp, node_index, scratch) and
+                (comp.combinator == .none or matchesScopeAnchor(doc, comp.combinator, node_index, scope_root))) return true;
+            continue;
+        }
+        if (try matchGroupFromRight(Doc, doc, selector, group, rightmost, node_index, scope_root, scratch, workspace.heap_frames)) return true;
     }
     return false;
 }
@@ -220,7 +238,38 @@ const MatchFrame = struct {
     cursor: IndexInt = InvalidIndex,
 };
 
-fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, rel_index: IndexInt, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) !bool {
+pub const MatchWorkspace = struct {
+    allocator: std.mem.Allocator,
+    scratch: ?std.heap.ArenaAllocator = null,
+    heap_frames: []MatchFrame = &.{},
+
+    pub fn init(allocator: std.mem.Allocator) @This() {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn ensureReady(self: *@This(), selector: ast.Selector) !void {
+        if (self.scratch != null) return;
+        const max_len = selectorMaxCompoundLen(selector);
+        if (max_len > LocalMatchFrameCap) self.heap_frames = try self.allocator.alloc(MatchFrame, max_len);
+        self.scratch = std.heap.ArenaAllocator.init(self.allocator);
+    }
+
+    pub fn deinit(self: *@This()) void {
+        if (self.heap_frames.len != 0) self.allocator.free(self.heap_frames);
+        if (self.scratch) |*scratch| scratch.deinit();
+        self.heap_frames = &.{};
+        self.scratch = null;
+    }
+};
+
+fn selectorMaxCompoundLen(selector: ast.Selector) usize {
+    if (selector.max_compound_len != 0) return @intCast(selector.max_compound_len);
+    var max_len: usize = 0;
+    for (selector.groups) |group| max_len = @max(max_len, @as(usize, @intCast(group.compound_len)));
+    return max_len;
+}
+
+fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, rel_index: IndexInt, node_index: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator, heap_frames: []MatchFrame) !bool {
     if (group.compound_len == 0) {
         @branchHint(.cold);
         return false;
@@ -228,16 +277,12 @@ fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: as
 
     const needed_frames: usize = @intCast(group.compound_len);
     var local_frames: [LocalMatchFrameCap]MatchFrame = undefined;
-    var heap_frames: ?[]MatchFrame = null;
-    defer if (heap_frames) |hf| doc.allocator.free(hf);
-
     const frames: []MatchFrame = if (needed_frames <= LocalMatchFrameCap)
         local_frames[0..needed_frames]
     else blk: {
         @branchHint(.cold);
-        const buf = try doc.allocator.alloc(MatchFrame, needed_frames);
-        heap_frames = buf;
-        break :blk buf;
+        std.debug.assert(heap_frames.len >= needed_frames);
+        break :blk heap_frames[0..needed_frames];
     };
 
     var depth: usize = 1;
@@ -342,18 +387,6 @@ fn matchGroupFromRight(comptime Doc: type, noalias doc: *const Doc, selector: as
     }
 
     return false;
-}
-
-fn firstMatchForGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selector, group: ast.Group, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) !?IndexInt {
-    const rightmost = group.compound_len - 1;
-
-    const bounds = traversalBounds(Doc, doc, scope_root);
-    var i = bounds.start;
-    while (i < bounds.end_excl and i < doc.nodes.len) : (i += 1) {
-        if (!doc.nodes[i].isElement(i)) continue;
-        if (try matchGroupFromRight(Doc, doc, selector, group, rightmost, i, scope_root, scratch)) return i;
-    }
-    return null;
 }
 
 fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, scratch: *std.heap.ArenaAllocator) !bool {

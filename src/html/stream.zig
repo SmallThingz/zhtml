@@ -232,6 +232,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         i: usize = 0,
         stack: std.ArrayList(OpenTag) = .empty,
         open_by_tag: open_tag_index.Map = .empty,
+        open_index_active: bool = false,
 
         const Self = @This();
 
@@ -410,6 +411,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 return;
             }
 
+            try self.ensureOpenIndex();
             if (self.open_by_tag.get(self.source[tag.start..tag.end])) |found_pos| {
                 const pos: usize = @intCast(found_pos);
                 while (self.stack.items.len - 1 >= pos) {
@@ -528,17 +530,20 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         fn pushOpen(self: *Self, open_value: OpenTag) !void {
             std.debug.assert(self.stack.items.len < std.math.maxInt(u32));
             var open = open_value;
-            const name = open.name.slice(self.source);
-            const result = try self.open_by_tag.getOrPut(self.allocator, name);
-            open.prev_same_tag = if (result.found_existing) result.value_ptr.* else open_tag_index.none;
-            const position: u32 = @intCast(self.stack.items.len);
-            result.value_ptr.* = position;
+            if (self.open_index_active) {
+                const name = open.name.slice(self.source);
+                const result = try self.open_by_tag.getOrPut(self.allocator, name);
+                open.prev_same_tag = if (result.found_existing) result.value_ptr.* else open_tag_index.none;
+                const position: u32 = @intCast(self.stack.items.len);
+                result.value_ptr.* = position;
+            }
             try self.stack.append(self.allocator, open);
         }
 
         fn popOpen(self: *Self) OpenTag {
             const open = self.stack.pop().?;
             std.debug.assert(open.name.len != 0);
+            if (!self.open_index_active) return open;
             const name = open.name.slice(self.source);
             if (open.prev_same_tag == open_tag_index.none) {
                 std.debug.assert(self.open_by_tag.remove(name));
@@ -546,7 +551,24 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 const top = self.open_by_tag.getPtr(name) orelse unreachable;
                 top.* = open.prev_same_tag;
             }
+            if (self.stack.items.len == 1) {
+                self.open_by_tag.clearRetainingCapacity();
+                self.open_index_active = false;
+            }
             return open;
+        }
+
+        fn ensureOpenIndex(self: *Self) !void {
+            if (self.open_index_active) return;
+            var position: usize = 1;
+            while (position < self.stack.items.len) : (position += 1) {
+                const open = &self.stack.items[position];
+                const name = open.name.slice(self.source);
+                const result = try self.open_by_tag.getOrPut(self.allocator, name);
+                open.prev_same_tag = if (result.found_existing) result.value_ptr.* else open_tag_index.none;
+                result.value_ptr.* = @intCast(position);
+            }
+            self.open_index_active = true;
         }
 
         fn scanTagName(self: *Self, start: usize) TagScan {

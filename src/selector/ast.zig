@@ -287,6 +287,8 @@ pub const Selector = struct {
     pseudos: []const Pseudo,
     /// Flattened `:not(...)` payloads referenced by compounds.
     not_items: []const NotSimple,
+    /// Largest group compound count, precomputed during selector compilation.
+    max_compound_len: Int = 0,
 
     /// Compiles a selector at comptime with compile-time diagnostics.
     pub fn compile(comptime source: []const u8) @This() {

@@ -16,8 +16,10 @@ const ParseOptions = document.ParseOptions;
 
 const InvalidIndex: IndexInt = common.InvalidIndex;
 const IndexInt = common.IndexInt;
-const InitialParseStackCapacity: usize = 1024;
-const MaxInitialNodeReserve: usize = 1 << 20;
+const InitialParseStackCapacity: usize = 32;
+const SmallInitialNodeCapacity: usize = 64;
+const LargeInitialNodeCapacity: usize = 512;
+const SmallInputThreshold: usize = 4 * 1024;
 
 // SAFETY: Parser builds spans into `input`; indices are stored as `IndexInt`.
 // In destructive mode tag names are normalized in-place. In non-destructive mode
@@ -64,6 +66,8 @@ fn ParseState(comptime opts: ParseOptions) type {
         parse_stack: std.ArrayListUnmanaged(OpenElem) = .empty,
         /// Case-insensitive tag name to topmost matching stack position.
         open_by_tag: open_tag_index.Map = .empty,
+        /// The index is built only after the first non-top closing tag.
+        open_index_active: bool = false,
 
         const Self = @This();
         const RawNode = opts.RawNode();
@@ -84,22 +88,8 @@ fn ParseState(comptime opts: ParseOptions) type {
         /// Reserve capacities + add initial values to containers
         inline fn initContainers(noalias self: *Self) !void {
             const alloc = self.doc.allocator;
-            const input_len = self.input.len;
-
-            var estimated_nodes: usize = undefined;
-            // Fastest mode tends to collapse pure-whitespace runs, so its node
-            // count grows more slowly than strict mode on the same input bytes.
-            if (opts.drop_whitespace_text_nodes != .none) {
-                estimated_nodes = @max(@as(usize, 32), (input_len / 16) + 32);
-            } else {
-                estimated_nodes = @max(@as(usize, 16), (input_len / 16) + 8);
-            }
-
-            // Keep startup reserves bounded so giant sparse/plaintext inputs do
-            // not try to preallocate nodes proportional to total byte length.
-            estimated_nodes = @min(estimated_nodes, MaxInitialNodeReserve);
-
-            try self.nodes.ensureTotalCapacity(alloc, estimated_nodes);
+            const initial_nodes = if (self.input.len <= SmallInputThreshold) SmallInitialNodeCapacity else LargeInitialNodeCapacity;
+            try self.nodes.ensureTotalCapacity(alloc, initial_nodes);
             try self.parse_stack.ensureTotalCapacity(alloc, InitialParseStackCapacity);
 
             // Seed the synthetic document root so every parsed node has a stable
@@ -131,7 +121,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 if (self.input[self.i] != '<') {
                     try self.handleText();
                 } else switch (self.input[self.i + 1]) {
-                    '/' => self.parseClosingTag(),
+                    '/' => try self.parseClosingTag(),
                     '?' => {
                         @branchHint(.cold);
                         self.skipPi();
@@ -323,7 +313,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             });
         }
 
-        inline fn parseClosingTag(noalias self: *Self) void {
+        inline fn parseClosingTag(noalias self: *Self) !void {
             self.i += 2; // </
             // no whitespace after `<` is allowed, same behavior as browser
 
@@ -354,6 +344,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 return;
             }
 
+            try self.ensureOpenIndex();
             if (self.open_by_tag.get(close_name)) |found_pos| {
                 @branchHint(.likely);
                 const pos: usize = found_pos;
@@ -385,17 +376,20 @@ fn ParseState(comptime opts: ParseOptions) type {
         fn pushOpen(noalias self: *Self, open_value: OpenElem) !void {
             std.debug.assert(self.parse_stack.items.len < std.math.maxInt(u32));
             var open = open_value;
-            const name = self.nodes.items[open.idx].name_or_text.slice(self.input);
-            const result = try self.open_by_tag.getOrPut(self.doc.allocator, name);
-            open.prev_same_tag = if (result.found_existing) result.value_ptr.* else open_tag_index.none;
-            const position: u32 = @intCast(self.parse_stack.items.len);
-            result.value_ptr.* = position;
+            if (self.open_index_active) {
+                const name = self.nodes.items[open.idx].name_or_text.slice(self.input);
+                const result = try self.open_by_tag.getOrPut(self.doc.allocator, name);
+                open.prev_same_tag = if (result.found_existing) result.value_ptr.* else open_tag_index.none;
+                const position: u32 = @intCast(self.parse_stack.items.len);
+                result.value_ptr.* = position;
+            }
             try self.parse_stack.append(self.doc.allocator, open);
         }
 
         fn popOpen(noalias self: *Self) OpenElem {
             const open = self.parse_stack.pop().?;
             std.debug.assert(open.idx != 0);
+            if (!self.open_index_active) return open;
             const name = self.nodes.items[open.idx].name_or_text.slice(self.input);
             if (open.prev_same_tag == open_tag_index.none) {
                 std.debug.assert(self.open_by_tag.remove(name));
@@ -403,7 +397,24 @@ fn ParseState(comptime opts: ParseOptions) type {
                 const top = self.open_by_tag.getPtr(name) orelse unreachable;
                 top.* = open.prev_same_tag;
             }
+            if (self.parse_stack.items.len == 1) {
+                self.open_by_tag.clearRetainingCapacity();
+                self.open_index_active = false;
+            }
             return open;
+        }
+
+        fn ensureOpenIndex(noalias self: *Self) !void {
+            if (self.open_index_active) return;
+            var position: usize = 1;
+            while (position < self.parse_stack.items.len) : (position += 1) {
+                const open = &self.parse_stack.items[position];
+                const name = self.nodes.items[open.idx].name_or_text.slice(self.input);
+                const result = try self.open_by_tag.getOrPut(self.doc.allocator, name);
+                open.prev_same_tag = if (result.found_existing) result.value_ptr.* else open_tag_index.none;
+                result.value_ptr.* = @intCast(position);
+            }
+            self.open_index_active = true;
         }
 
         inline fn addNode(noalias self: *Self, name_or_text: anytype, is_element: bool, overrides: anytype) !void {
