@@ -1336,3 +1336,27 @@ test "fuzz parser preserves invariants across parse modes" {
         "<script>const a = 1; <div>still script",
     } });
 }
+
+test "curated tokenizer corpus keeps destructive and read-only modes equivalent" {
+    const alloc = std.testing.allocator;
+    const corpus = [_][]const u8{
+        "<!DOCTYPE html><!--before--><DiV ID=x DaTa-V = 'a&amp;b'>text<!--middle-->tail</DiV>",
+        "<p id=a>one<p id=b>two<ul><li>x<li>y</ul>",
+        "<script>if (a < b) x = '&amp;';</ScRiPt x = \"a>b\"><title>a&amp;<b</title>",
+        "<div a='single > quote' b=\"double > quote\" c = naked d=></div>",
+        "<div id=x <broken = 'a>b'><span id=y></span></div>",
+        "<![CDATA[not markup <div id=x>]]><p id=after></p>",
+        "<plaintext><DIV id=not-a-node>&amp;<!--still text-->",
+        "<very-long-custom-element-name data-very-long-attribute-name='abcdefghijklmnopqrstuvwxyz&amp;0123456789'></very-long-custom-element-name>",
+        "<div data-n='a\x00b&#0;c' data-invalid='\xff\xfe'><span>\x00&amp;\xff</span></div>",
+    };
+
+    for (corpus) |input| try runParserPropertyCase(alloc, input);
+
+    var deep: std.Io.Writer.Allocating = .init(alloc);
+    defer deep.deinit();
+    for (0..128) |_| try deep.writer.writeAll("<DiV data-v='a&amp;b'>");
+    try deep.writer.writeAll("leaf");
+    for (0..128) |_| try deep.writer.writeAll("</dIv>");
+    try runParserPropertyCase(alloc, deep.written());
+}

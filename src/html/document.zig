@@ -2923,3 +2923,100 @@ test "format document types" {
     defer alloc.free(doc_out);
     try std.testing.expectEqualStrings("<div><span></span><span></span></div>", doc_out);
 }
+
+test "query iterator lifecycle releases scratch and copies independently" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var src = "<div><span id=a></span><span id=b></span><span id=c></span></div>".*;
+    try resetParsed(.{}, &doc, &src);
+
+    // Dropping an iterator before its first next() is allocation-free.
+    {
+        const unused = doc.query("span");
+        try std.testing.expect(unused.scratch == null);
+    }
+
+    var early = doc.query("span");
+    try std.testing.expect(early.next() != null);
+    try std.testing.expect(early.scratch != null);
+    early.deinit();
+    try std.testing.expect(early.scratch == null);
+
+    var exhausted = doc.query(".missing");
+    try std.testing.expect(exhausted.next() == null);
+    try std.testing.expect(exhausted.scratch == null);
+
+    var original = doc.query("span");
+    var copied = original;
+    const original_first = original.next() orelse return error.TestUnexpectedResult;
+    const copied_first = copied.next() orelse return error.TestUnexpectedResult;
+    defer original.deinit();
+    defer copied.deinit();
+    try std.testing.expectEqual(original_first.index, copied_first.index);
+
+    const remaining = try original.collect(alloc);
+    defer alloc.free(remaining);
+    try std.testing.expectEqual(@as(usize, 2), remaining.len);
+    try std.testing.expectEqualStrings("b", (try remaining[0].getAttributeValue(alloc, "id")).?.value);
+    try std.testing.expectEqualStrings("c", (try remaining[1].getAttributeValue(alloc, "id")).?.value);
+}
+
+test "query collect frees its output when shrinking fails" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var src = "<div><span></span><i></i><span></span></div>".*;
+    try resetParsed(.{}, &doc, &src);
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 1 });
+    const it = doc.query("span");
+    try std.testing.expectError(error.OutOfMemory, it.collect(failing.allocator()));
+}
+
+test "serialization state matrix after attribute and text decoding" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var src = "<div title=\"a&amp;b &quot;c&quot;\">a&amp;b   a&lt;b</div>".*;
+    try resetParsed(.{}, &doc, &src);
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
+
+    var before: std.Io.Writer.Allocating = .init(alloc);
+    defer before.deinit();
+    try div.writeHtml(&before.writer, false);
+    try std.testing.expectEqualStrings(
+        "<div title=\"a&amp;b &quot;c&quot;\">a&amp;b   a&lt;b</div>",
+        before.written(),
+    );
+
+    const title = (try div.getAttributeValue(alloc, "title")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a&b \"c\"", title.value);
+
+    var after_attr: std.Io.Writer.Allocating = .init(alloc);
+    defer after_attr.deinit();
+    try div.writeHtml(&after_attr.writer, false);
+    try std.testing.expectEqualStrings(before.written(), after_attr.written());
+
+    const decoded = try div.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+    try std.testing.expectEqualStrings("a&b   a<b", decoded.value);
+
+    var raw: std.Io.Writer.Allocating = .init(alloc);
+    defer raw.deinit();
+    try div.writeHtml(&raw.writer, false);
+    try std.testing.expectEqualStrings(
+        "<div title=\"a&amp;b &quot;c&quot;\">a&b   a<b</div>",
+        raw.written(),
+    );
+
+    const normalized = try div.innerTextWithOptions(alloc, .{});
+    try std.testing.expectEqualStrings("a&b a<b", normalized.value);
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try div.writeHtml(&encoded.writer, true);
+    try std.testing.expectEqualStrings(
+        "<div title=\"a&amp;b &quot;c&quot;\">a&amp;b a&lt;b</div>",
+        encoded.written(),
+    );
+}
