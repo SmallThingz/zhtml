@@ -1887,6 +1887,31 @@ const ParserSuiteResult = struct {
     failures: []const ParserFailure,
 };
 
+fn freeSummaryExamples(alloc: std.mem.Allocator, examples: []const []const u8) void {
+    if (examples.len == 0) return;
+    for (examples) |example| alloc.free(example);
+    alloc.free(examples);
+}
+
+fn freeSelectorFailures(alloc: std.mem.Allocator, failures: []const SelectorFailure) void {
+    if (failures.len == 0) return;
+    for (failures) |failure| {
+        alloc.free(failure.selector);
+        if (failure.context) |context| alloc.free(context);
+    }
+    alloc.free(failures);
+}
+
+fn freeParserFailures(alloc: std.mem.Allocator, failures: []const ParserFailure) void {
+    if (failures.len == 0) return;
+    for (failures) |failure| {
+        alloc.free(failure.input_preview);
+        if (failure.expected.len != 0) freeOwnedStringSlice(alloc, failure.expected);
+        if (failure.actual.len != 0) freeOwnedStringSlice(alloc, failure.actual);
+    }
+    alloc.free(failures);
+}
+
 const ExternalFailuresOut = struct {
     modes: []const ModeFailuresOut,
 };
@@ -2495,6 +2520,7 @@ fn runParserCases(io: std.Io, alloc: std.mem.Allocator, mode: []const u8, cases:
                 var src_short = c.html;
                 if (src_short.len > 100) src_short = src_short[0..100];
                 const src_escaped = try std.mem.replaceOwned(u8, alloc, src_short, "\n", "\\n");
+                defer alloc.free(src_escaped);
                 const msg = try std.fmt.allocPrint(alloc, "{s}", .{src_escaped});
                 try examples.append(alloc, msg);
             }
@@ -2520,8 +2546,15 @@ fn runParserCases(io: std.Io, alloc: std.mem.Allocator, mode: []const u8, cases:
 }
 
 fn runHtml5libParserSuite(io: std.Io, alloc: std.mem.Allocator, mode: []const u8, max_cases: usize) !ParserSuiteResult {
-    const tc_dir = SUITES_DIR ++ "/html5lib-tests/tree-construction";
-    var dir = try std.Io.Dir.cwd().openDir(io, tc_dir, .{ .iterate = true });
+    var tc_dir: []const u8 = SUITES_DIR ++ "/html5lib-tests/tree-construction";
+    var dir = std.Io.Dir.cwd().openDir(io, tc_dir, .{ .iterate = true }) catch |err| switch (err) {
+        // Upstream moved the tree-construction .dat corpus into WPT in 2026.
+        error.FileNotFound => blk: {
+            tc_dir = SUITES_DIR ++ "/wpt/html/syntax/parsing/resources";
+            break :blk try std.Io.Dir.cwd().openDir(io, tc_dir, .{ .iterate = true });
+        },
+        else => return err,
+    };
     defer dir.close(io);
 
     var dat_names = std.ArrayList([]const u8).empty;
@@ -2674,6 +2707,18 @@ fn runExternalSuites(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]con
         parser_whatwg_failures: []const ParserFailure,
     }).empty;
     defer mode_reports.deinit(alloc);
+    defer {
+        for (mode_reports.items) |report| {
+            freeSummaryExamples(alloc, report.nw.examples);
+            freeSummaryExamples(alloc, report.qw.examples);
+            freeSummaryExamples(alloc, report.parser_html5lib.examples);
+            freeSummaryExamples(alloc, report.parser_whatwg.examples);
+            freeSelectorFailures(alloc, report.nw_failures);
+            freeSelectorFailures(alloc, report.qw_failures);
+            freeParserFailures(alloc, report.parser_html5lib_failures);
+            freeParserFailures(alloc, report.parser_whatwg_failures);
+        }
+    }
 
     for (modes) |mode| {
         const sel = try runSelectorSuites(io, alloc, mode);

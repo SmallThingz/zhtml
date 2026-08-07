@@ -13,6 +13,11 @@ fn fastestDocumentType() type {
     return options.Document();
 }
 
+fn fullDocumentType() type {
+    const options: html.ParseOptions = .{ .store_last_child = true, .store_prev_sibling = true };
+    return options.Document();
+}
+
 const ParsedFixture = union(ParseMode) {
     strictest: struct {
         doc: strictestDocumentType(),
@@ -20,6 +25,10 @@ const ParsedFixture = union(ParseMode) {
     },
     fastest: struct {
         doc: fastestDocumentType(),
+        working: []u8,
+    },
+    full: struct {
+        doc: fullDocumentType(),
         working: []u8,
     },
 
@@ -30,6 +39,10 @@ const ParsedFixture = union(ParseMode) {
                 alloc.free(parsed.working);
             },
             .fastest => |*parsed| {
+                parsed.doc.deinit();
+                alloc.free(parsed.working);
+            },
+            .full => |*parsed| {
                 parsed.doc.deinit();
                 alloc.free(parsed.working);
             },
@@ -56,6 +69,12 @@ fn parseFixtureDoc(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixtur
             var doc = try options.parse(alloc, working);
             errdefer doc.deinit();
             break :blk .{ .fastest = .{ .doc = doc, .working = working } };
+        },
+        .full => blk: {
+            const options: html.ParseOptions = .{ .store_last_child = true, .store_prev_sibling = true };
+            var doc = try options.parse(alloc, working);
+            errdefer doc.deinit();
+            break :blk .{ .full = .{ .doc = doc, .working = working } };
         },
     };
 }
@@ -117,6 +136,12 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
                 }
             }
         },
+        .full => |*fixture| {
+            var it = fixture.doc.queryRuntime(sel);
+            while (it.next()) |node| {
+                if ((try node.getAttributeValue(alloc, "id"))) |id| try out_ids.append(alloc, id.value);
+            }
+        },
     }
 
     var out_buf: std.Io.Writer.Allocating = .init(alloc);
@@ -140,6 +165,10 @@ fn runSelectorCount(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixtu
             while (it.next()) |_| count += 1;
         },
         .fastest => |*fixture| {
+            var it = fixture.doc.queryRuntime(sel);
+            while (it.next()) |_| count += 1;
+        },
+        .full => |*fixture| {
             var it = fixture.doc.queryRuntime(sel);
             while (it.next()) |_| count += 1;
         },
@@ -167,6 +196,12 @@ fn runSelectorCountScopeTag(io: std.Io, alloc: std.mem.Allocator, mode: ParseMod
             }
         },
         .fastest => |*fixture| {
+            if (fixture.doc.findFirstTag(scope_tag)) |scope| {
+                var it = scope.queryRuntime(sel);
+                while (it.next()) |_| count += 1;
+            }
+        },
+        .full => |*fixture| {
             if (fixture.doc.findFirstTag(scope_tag)) |scope| {
                 var it = scope.queryRuntime(sel);
                 while (it.next()) |_| count += 1;
@@ -200,6 +235,12 @@ fn runParseTagsFile(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixtu
                 try tags.append(alloc, n.name_or_text.slice(fixture.doc.source));
             }
         },
+        .full => |*fixture| {
+            for (fixture.doc.nodes, 0..) |*n, idx| {
+                if (!n.isElement(@intCast(idx))) continue;
+                try tags.append(alloc, n.name_or_text.slice(fixture.doc.source));
+            }
+        },
     }
 
     var out_buf: std.Io.Writer.Allocating = .init(alloc);
@@ -211,7 +252,7 @@ fn runParseTagsFile(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixtu
 
 fn usage() noreturn {
     std.debug.print(
-        "usage:\n  suite_runner selector-ids <strictest|fastest> <fixture.html> <selector>\n  suite_runner selector-count <strictest|fastest> <fixture.html> <selector>\n  suite_runner selector-count-scope-tag <strictest|fastest> <fixture.html> <scope-tag> <selector>\n  suite_runner parse-tags-file <strictest|fastest> <fixture.html>\n",
+        "usage:\n  suite_runner selector-ids <strictest|fastest|full> <fixture.html> <selector>\n  suite_runner selector-count <strictest|fastest|full> <fixture.html> <selector>\n  suite_runner selector-count-scope-tag <strictest|fastest|full> <fixture.html> <scope-tag> <selector>\n  suite_runner parse-tags-file <strictest|fastest|full> <fixture.html>\n",
         .{},
     );
     std.process.exit(2);
