@@ -744,26 +744,44 @@ fn GetNode(comptime options: ParseOptions) type {
 
         /// Escapes attribute value bytes required by HTML serialization.
         fn writeEscapedAttrValue(writer: anytype, value: []const u8) WriterError(@TypeOf(writer))!void {
-            for (value) |c| {
+            var chunk_start: usize = 0;
+            for (value, 0..) |c, i| {
                 switch (c) {
-                    '&' => try writer.writeAll("&amp;"),
-                    '<' => try writer.writeAll("&lt;"),
-                    '"' => try writer.writeAll("&quot;"),
-                    else => try writeByte(writer, c),
+                    '&', '<', '"' => {
+                        if (chunk_start < i) try writer.writeAll(value[chunk_start..i]);
+                        switch (c) {
+                            '&' => try writer.writeAll("&amp;"),
+                            '<' => try writer.writeAll("&lt;"),
+                            '"' => try writer.writeAll("&quot;"),
+                            else => unreachable,
+                        }
+                        chunk_start = i + 1;
+                    },
+                    else => {},
                 }
             }
+            if (chunk_start < value.len) try writer.writeAll(value[chunk_start..]);
         }
 
         /// Escapes decoded text bytes that can be interpreted as HTML markup.
         fn writeEscapedText(writer: anytype, value: []const u8) WriterError(@TypeOf(writer))!void {
-            for (value) |c| {
+            var chunk_start: usize = 0;
+            for (value, 0..) |c, i| {
                 switch (c) {
-                    '&' => try writer.writeAll("&amp;"),
-                    '<' => try writer.writeAll("&lt;"),
-                    '>' => try writer.writeAll("&gt;"),
-                    else => try writeByte(writer, c),
+                    '&', '<', '>' => {
+                        if (chunk_start < i) try writer.writeAll(value[chunk_start..i]);
+                        switch (c) {
+                            '&' => try writer.writeAll("&amp;"),
+                            '<' => try writer.writeAll("&lt;"),
+                            '>' => try writer.writeAll("&gt;"),
+                            else => unreachable,
+                        }
+                        chunk_start = i + 1;
+                    },
+                    else => {},
                 }
             }
+            if (chunk_start < value.len) try writer.writeAll(value[chunk_start..]);
         }
 
         /// Writes one byte through the generic writer API.
@@ -3014,4 +3032,47 @@ test "serialization state matrix after attribute and text decoding" {
         "<div title=\"a&amp;b &quot;c&quot;\">a&amp;b a&lt;b</div>",
         encoded.written(),
     );
+}
+
+test "chunked escaping preserves large sparse attribute and text spans" {
+    const alloc = std.testing.allocator;
+    var input: std.Io.Writer.Allocating = .init(alloc);
+    defer input.deinit();
+    try input.writer.writeAll("<div title=\"");
+    for (0..4096) |_| try input.writer.writeAll("a");
+    try input.writer.writeAll("&amp;&quot;&lt;");
+    for (0..4096) |_| try input.writer.writeAll("b");
+    try input.writer.writeAll("\">");
+    for (0..4096) |_| try input.writer.writeAll("x");
+    try input.writer.writeAll("&amp;&lt;&gt;");
+    for (0..4096) |_| try input.writer.writeAll("y");
+    try input.writer.writeAll("</div>");
+
+    const source = try input.toOwnedSlice();
+    defer alloc.free(source);
+    const expected = try alloc.dupe(u8, source);
+    defer alloc.free(expected);
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    try resetParsed(.{}, &doc, source);
+
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    defer output.deinit();
+    try doc.writeHtml(&output.writer, true);
+    try std.testing.expectEqualSlices(u8, expected, output.written());
+
+    const CountingWriter = struct {
+        pub const Error = error{};
+        calls: usize = 0,
+        bytes: usize = 0,
+
+        pub fn writeAll(self: *@This(), bytes: []const u8) Error!void {
+            self.calls += 1;
+            self.bytes += bytes.len;
+        }
+    };
+    var counter: CountingWriter = .{};
+    try doc.writeHtml(&counter, true);
+    try std.testing.expectEqual(expected.len, counter.bytes);
+    try std.testing.expect(counter.calls < 64);
 }
