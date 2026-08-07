@@ -677,6 +677,30 @@ test "streaming attribute iterator stops at self-closing slash" {
     try std.testing.expect(ctx.checked);
 }
 
+test "streaming attribute iterator accepts framework attribute names" {
+    const Ctx = struct {
+        checked: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .start_tag) return true;
+            var it = ev.attributes();
+            const expected = [_][]const u8{ "@click", "*ngIf", "(change)", "[value]", "v-on:click", "x-on:keydown", "data-foo.bar" };
+            for (expected) |name| {
+                const item = it.next() orelse return error.TestUnexpectedResult;
+                try std.testing.expectEqualStrings(name, item.nameSlice());
+                try std.testing.expectEqualStrings("x", item.valueRaw());
+            }
+            try std.testing.expect(it.next() == null);
+            self.checked = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<div @click=x *ngIf=x (change)=x [value]=x v-on:click=x x-on:keydown=x data-foo.bar=x>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.checked);
+}
+
 test "streaming parser handles raw text comments and implicit closes" {
     const Ctx = struct {
         starts: usize = 0,

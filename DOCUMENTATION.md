@@ -127,6 +127,7 @@ All examples are verified by running `zig build examples-check`
 - destructive attribute lists use `name[=decoded-value]NUL ... >`; quoted and unquoted values share one representation, and empty assignments collapse to valueless attributes
 - compact values may contain whitespace, `>`, `/`, `=`, and malformed UTF-8 because only NUL terminates them
 - destructive decoding changes literal NUL bytes to spaces and numeric NUL references to U+FFFD; malformed leading UTF-8 bytes in attribute names are replaced with an internal marker
+- tag and attribute names use delimiter blacklists rather than identifier whitelists, allowing framework names such as `@click`, `*ngIf`, `(change)`, and `[value]`
 - destructive text spans use an in-bounds NUL byte immediately after the span to remember that entity decoding already occurred; terminal text without spare capacity may be checked again
 - `writeHtml(writer, comptime encode_entities)` can materialize and escape RW text as `&amp;`, `&lt;`, and `&gt;`; `format` deliberately passes `false` to retain its existing behavior
 - `script` and `style` are parsed as raw text and never entity-decoded; `title` and `textarea` are parsed opaquely as escapable raw text and do decode character references during extraction

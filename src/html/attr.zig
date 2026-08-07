@@ -53,10 +53,7 @@ pub fn scanAttrNameOrSkip(source: []const u8, end: usize, start: usize) ScanAttr
 
     var i = start;
     const name_start = i;
-    while (i < end) : (i += 1) {
-        const b = source[i];
-        if (b == '=' or b == '/' or b == '>' or tables.WhitespaceTable[b]) break;
-    }
+    while (i < end and tables.AttrNameCharTable[source[i]]) : (i += 1) {}
     if (i == name_start) {
         return .{ .name = "", .next_start = i + 1 };
     }
@@ -390,6 +387,18 @@ test "scanAttrNameOrSkip handles terminators and skips non-name bytes" {
         const i: usize = 0;
         const scanned = scanAttrNameOrSkip(src, src.len, i);
         try testing.expect(scanned.name == null);
+    }
+}
+
+test "scanAttrNameOrSkip accepts framework attribute punctuation" {
+    const src = "@click *ngIf (change) [value] v-on:click x-on:keydown data-foo.bar";
+    var i: usize = 0;
+    const expected = [_][]const u8{ "@click", "*ngIf", "(change)", "[value]", "v-on:click", "x-on:keydown", "data-foo.bar" };
+    for (expected) |want| {
+        while (i < src.len and tables.WhitespaceTable[src[i]]) : (i += 1) {}
+        const scanned = scanAttrNameOrSkip(src, src.len, i);
+        try std.testing.expectEqualStrings(want, scanned.name.?);
+        i = scanned.next_start;
     }
 }
 

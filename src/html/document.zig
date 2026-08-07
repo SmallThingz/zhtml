@@ -2586,6 +2586,21 @@ test "unquoted attribute values preserve slash characters" {
     try std.testing.expect(firstQuery(doc.query("a[href='/docs/v1/api'][data-path='assets/img/logo.svg']")) != null);
 }
 
+test "document attribute lookup accepts framework attribute names" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div @click=a *ngIf=b (change)=c [value]=d v-on:click=e x-on:keydown=f data-foo.bar=g></div>".*;
+    try resetParsed(.{}, &doc, &html);
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
+    const names = [_][]const u8{ "@click", "*ngIf", "(change)", "[value]", "v-on:click", "x-on:keydown", "data-foo.bar" };
+    const values = "abcdefg";
+    for (names, values) |name, value| {
+        const found = (try div.getAttributeValue(alloc, name)) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualSlices(u8, &[_]u8{value}, found.value);
+    }
+}
+
 test "moved document keeps node-scoped queries and navigation valid" {
     const alloc = std.testing.allocator;
     var html = "<root><div id='a'><span id='b'></span></div></root>".*;

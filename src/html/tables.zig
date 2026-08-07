@@ -1,9 +1,3 @@
-// I tried combining the tables but that results in
-// ~ 0.5% (all 4 in 1 or isIdentStart+isIdentChar)
-// ~ 1.5% (isTagNameChar+isWhitespace)
-// performance loss [tested 3v3 runs for all 3 cases]
-//
-// Maybe i did something wrong or this was just noise; want to reduce the table sizes tho
 const std = @import("std");
 
 /// Builds a 256-entry boolean lookup table from a predicate.
@@ -21,12 +15,12 @@ fn isWhitespace(c: u8) bool {
     return c == ' ' or c == '\n' or c == '\r' or c == '\t' or c == '\x0c';
 }
 
-/// Returns whether byte is a valid identifier start.
+/// CSS selector identifier start; HTML names use separate blacklist tables.
 fn isIdentStart(c: u8) bool {
     return std.ascii.isAlphabetic(c) or c == '_' or c == ':';
 }
 
-/// Returns whether byte is a valid identifier continuation.
+/// CSS selector identifier continuation.
 fn isIdentChar(c: u8) bool {
     return isIdentStart(c) or std.ascii.isDigit(c) or c == '-' or c == '.';
 }
@@ -37,14 +31,22 @@ fn isTagNameChar(c: u8) bool {
     return !isWhitespace(c) and c != '/' and c != '>' and c != 0;
 }
 
+/// Returns whether byte is consumed by the HTML attribute-name state.
+/// Attribute names are blacklist-based so framework punctuation remains valid.
+fn isAttrNameChar(c: u8) bool {
+    return c >= 0x21 and c != 0x7f and c != '"' and c != '\'' and c != '>' and c != '/' and c != '=';
+}
+
 /// Precomputed whitespace classification table.
 pub const WhitespaceTable = makeClassTable(isWhitespace);
-/// Precomputed identifier-start classification table.
+/// Precomputed CSS selector identifier-start classification table.
 pub const IdentStartTable = makeClassTable(isIdentStart);
-/// Precomputed identifier-char classification table.
+/// Precomputed CSS selector identifier-char classification table.
 pub const IdentCharTable = makeClassTable(isIdentChar);
 /// Precomputed tag-name-char classification table.
 pub const TagNameCharTable = makeClassTable(isTagNameChar);
+/// Precomputed permissive attribute-name-char classification table.
+pub const AttrNameCharTable = makeClassTable(isAttrNameChar);
 
 /// Trims HTML/ASCII whitespace from both ends using the parser whitespace table.
 pub fn trimAsciiWhitespace(slice: []const u8) []const u8 {
@@ -76,4 +78,12 @@ test "tag name state includes < and excludes delimiters" {
     try std.testing.expect(!isTagNameChar('>'));
     try std.testing.expect(!isTagNameChar('/'));
     try std.testing.expect(!isTagNameChar(' '));
+}
+
+test "attribute name state accepts framework punctuation and rejects delimiters" {
+    for ("@*()[]:.-_") |c| try std.testing.expect(isAttrNameChar(c));
+    for ([_]u8{ ' ', '\t', '\n', '\r', '\x0c', '"', '\'', '>', '/', '=', 0, 0x1f, 0x7f }) |c| {
+        try std.testing.expect(!isAttrNameChar(c));
+    }
+    try std.testing.expect(isAttrNameChar(0x80));
 }
