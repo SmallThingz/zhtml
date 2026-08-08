@@ -150,7 +150,6 @@ pub const MatchWorkspace = struct {
         return .{ .allocator = allocator };
     }
 
-
     pub fn deinit(self: *@This()) void {
         self.topology_prev.deinit(self.allocator);
         self.topology_prev = .empty;
@@ -546,6 +545,9 @@ fn prevElementSiblingAccelerated(comptime Doc: type, doc: *const Doc, node_index
         const previous = doc.nodes[node_index].prev_sibling;
         return if (previous == InvalidIndex) null else previous;
     }
+    // Invariant: cache miss implies parent topology not yet materialized, so
+    // this node can only be reached via the first-child path below (or is the
+    // root). The lookup must not miss for a node that got inserted by a build.
     if (workspace.topology_prev.get(node_index)) |previous| return if (previous == InvalidIndex) null else previous;
     const parent = doc.nodes[node_index].parent;
     if (parent == InvalidIndex or parent >= doc.nodes.len) return null;
@@ -572,7 +574,9 @@ fn prevElementSiblingAccelerated(comptime Doc: type, doc: *const Doc, node_index
         cursor += 1;
     }
 
-    const result = workspace.topology_prev.get(node_index) orelse InvalidIndex;
+    // Invariant: this build inserted node_index itself, so the read-back must
+    // not miss. A miss here signals a corrupted sibling-topology.
+    const result = workspace.topology_prev.get(node_index).?;
     return if (result == InvalidIndex) null else result;
 }
 
@@ -623,7 +627,6 @@ pub const NodeContext = struct {
 };
 
 const PseudoMode = enum { rtl, forward };
-
 
 pub fn matchesCompoundForward(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, ctx: *NodeContext) !bool {
     std.debug.assert(ctx.scratch != null);
@@ -842,7 +845,8 @@ fn attrValueByName(doc: anytype, node: anytype, allocator: std.mem.Allocator, no
     }
 
     if (!probe.overflow and probe.count < MaxProbeEntries) {
-        const value = try attr.getAttrValue(doc, node, name, allocator);
+        const result = try attr.getAttrValue(doc, node, name, allocator);
+        const value = if (result) |r| r.value else null;
         const idx = probe.count;
         probe.entries[idx] = .{
             .name = name,
@@ -855,7 +859,8 @@ fn attrValueByName(doc: anytype, node: anytype, allocator: std.mem.Allocator, no
     probe.overflow = true;
     // Fallback for very large compounds still stays allocation-free; we simply
     // bypass memoization once the fixed probe budget is exhausted.
-    return try attr.getAttrValue(doc, node, name, allocator);
+    const result = try attr.getAttrValue(doc, node, name, allocator);
+    return if (result) |r| r.value else null;
 }
 
 const AttrProbeEntry = struct {

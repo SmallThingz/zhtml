@@ -65,6 +65,21 @@ pub const ParseOptions = struct {
         return if (options.non_destructive) []const u8 else []u8;
     }
 
+    /// Returns the lightweight node wrapper type bound to this option set.
+    pub fn Node(options: @This()) type {
+        return GetNode(options);
+    }
+
+    /// Returns the lazy query iterator type for this option set.
+    pub fn QueryIter(options: @This()) type {
+        return GetQueryIter(options);
+    }
+
+    /// Returns direct-child iterator type for this option set.
+    pub fn ChildrenIter(options: @This()) type {
+        return GetChildrenIter(options);
+    }
+
     /// Parses borrowed `input`; the returned document owns node storage only.
     pub fn parse(comptime options: @This(), gpa: std.mem.Allocator, input: options.Input()) !options.Document() {
         return parser.parse(options, gpa, input);
@@ -152,19 +167,8 @@ fn GetNode(comptime options: ParseOptions) type {
             }
         };
 
-        /// Byte-slice result that may either borrow document source or own an
-        /// allocation made by the caller-supplied allocator.
-        pub const SliceResult = struct {
-            value: []const u8,
-            owned: bool = false,
-
-            pub fn free(self: @This(), gpa: std.mem.Allocator) void {
-                if (self.owned and self.value.len != 0) gpa.free(self.value);
-            }
-        };
-
-        pub const TextResult = SliceResult;
-        pub const AttributeValueResult = SliceResult;
+        pub const TextResult = common.SliceResult;
+        pub const AttributeValueResult = common.SliceResult;
 
         /// Returns the error set exposed by a writer value or writer pointer.
         pub fn WriterError(comptime WriterType: type) type {
@@ -415,15 +419,7 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Returns decoded attribute value for `name`, if present.
         pub fn getAttributeValue(self: @This(), allocator: std.mem.Allocator, name: []const u8) !?AttributeValueResult {
             self.assertElement();
-            const value = try attr.getAttrValue(self.doc, &self.doc.nodes[self.index], name, allocator) orelse return null;
-            return .{ .value = value, .owned = value.len != 0 and !sliceBorrowed(self.doc, value) };
-        }
-
-        fn sliceBorrowed(doc: *const DocType, bytes: []const u8) bool {
-            if (doc.source.len == 0 or bytes.len == 0) return false;
-            const source_start = @intFromPtr(doc.source.ptr);
-            const bytes_start = @intFromPtr(bytes.ptr);
-            return bytes_start >= source_start and bytes_start + bytes.len <= source_start + doc.source.len;
+            return attr.getAttrValue(self.doc, &self.doc.nodes[self.index], name, allocator);
         }
 
         /// Returns raw attribute value bytes for `name`, if present.
@@ -603,18 +599,18 @@ fn GetNode(comptime options: ParseOptions) type {
             const source: []const u8 = doc.source;
             var it: attr.RawIterator = .{ .source = source, .cursor = i, .end = source.len };
             while (it.next()) |item| {
-                if (!item.has_value) {
+                const value_raw = item.value orelse {
                     try writeAttrName(writer, item.name);
                     continue;
-                }
+                };
                 if (comptime entity_encoding == .force) {
                     try writeAttrName(writer, item.name);
                     try writer.writeAll("=\"");
-                    try writeDecodedEscaped(writer, source[item.raw.start..item.raw.end], true);
+                    try writeDecodedEscaped(writer, source[value_raw.start..value_raw.end], true);
                     try writeByte(writer, '"');
                 } else {
                     try writeByte(writer, ' ');
-                    try writer.writeAll(source[item.name_start..item.raw.next_start]);
+                    try writer.writeAll(source[item.name_start..value_raw.next_start]);
                 }
             }
         }

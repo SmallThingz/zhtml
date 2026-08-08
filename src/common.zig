@@ -52,6 +52,19 @@ pub const Span = struct {
         try writer.print("Span{{start={}, len={}}}", .{ self.start, self.len });
     }
 };
+
+/// Byte-slice result that either borrows document source or owns an allocation
+/// made by the caller-supplied allocator. Producers set `owned` when they
+/// allocate; callers must not infer it from pointer location.
+pub const SliceResult = struct {
+    value: []const u8,
+    owned: bool = false,
+
+    pub fn free(self: @This(), allocator: std.mem.Allocator) void {
+        if (self.owned) allocator.free(self.value);
+    }
+};
+
 /// Parent element index for `node_index`, excluding root-document index 0.
 pub fn parentElement(doc: anytype, node_index: IndexInt) ?IndexInt {
     const p = doc.nodeAt(node_index).raw().parent;

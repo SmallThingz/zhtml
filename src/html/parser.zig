@@ -65,8 +65,7 @@ fn ParseState(comptime opts: ParseOptions) type {
         /// Open-element stack used only while building the tree.
         parse_stack: std.ArrayListUnmanaged(OpenElem) = .empty,
         /// Lazily activated malformed-close index. Normal parsing touches only the stack.
-        tag_map: open_tag_index.Map = .empty,
-        index_active: bool = false,
+        tag_index: open_tag_index.LiveIndex(OpenElem) = .{},
 
         const Self = @This();
         const RawNode = document.GetRawNode(opts);
@@ -81,6 +80,10 @@ fn ParseState(comptime opts: ParseOptions) type {
             last_child: IndexInt = InvalidIndex,
             /// Previous open stack entry with the same close-tag signature.
             prev_same: open_tag_index.StackPos = open_tag_index.no_stack_pos,
+
+            pub fn sig(self: *const @This()) open_tag_index.TagSig {
+                return open_tag_index.signature(self.tag_key, self.tag_len);
+            }
         };
         const TagNameScan = scanner.TagName;
 
@@ -110,7 +113,7 @@ fn ParseState(comptime opts: ParseOptions) type {
 
         inline fn parse(noalias self: *Self) !void {
             defer self.parse_stack.deinit(self.doc.allocator);
-            defer self.tag_map.deinit(self.doc.allocator);
+            defer self.tag_index.deinit(self.doc.allocator);
             try self.initContainers();
 
             // Main tokenization loop. Text spans and tags are dispatched here,
@@ -373,65 +376,40 @@ fn ParseState(comptime opts: ParseOptions) type {
 
         fn pushOpen(noalias self: *Self, open_value: OpenElem) !void {
             var open = open_value;
-            if (self.index_active) {
-                const sig = open_tag_index.signature(open.tag_key, open.tag_len);
-                try self.tag_map.ensureTotalCapacity(self.doc.allocator, self.tag_map.count() + 1);
-                open.prev_same = self.tag_map.get(sig) orelse open_tag_index.no_stack_pos;
-            }
+            try self.tag_index.preparePush(self.doc.allocator, &open);
             try self.parse_stack.append(self.doc.allocator, open);
-            if (self.index_active) {
-                const sig = open_tag_index.signature(open.tag_key, open.tag_len);
-                self.tag_map.putAssumeCapacity(sig, @intCast(self.parse_stack.items.len - 1));
-            }
+            self.tag_index.commitPush(&self.parse_stack.items[self.parse_stack.items.len - 1], self.parse_stack.items.len);
         }
 
         fn popOpen(noalias self: *Self) OpenElem {
             const pos = self.parse_stack.items.len - 1;
             const open = self.parse_stack.pop().?;
             std.debug.assert(open.idx != 0);
-            if (self.index_active) {
-                const sig = open_tag_index.signature(open.tag_key, open.tag_len);
-                std.debug.assert(self.tag_map.get(sig).? == pos);
-                if (open.prev_same == open_tag_index.no_stack_pos)
-                    std.debug.assert(self.tag_map.remove(sig))
-                else
-                    self.tag_map.getPtr(sig).?.* = open.prev_same;
-            }
+            self.tag_index.pop(&open, pos + 1);
+            self.tag_index.maybeDeactivate(self.doc.allocator, self.parse_stack.items.len);
             return open;
         }
 
         fn findOpenForSlowClose(noalias self: *Self, close_name: []const u8, close_key: u64) !?open_tag_index.StackPos {
-            if (!self.index_active) {
+            if (!self.tag_index.active) {
+                // Covers the top of the stack (index len-1) down to index 1;
+                // index 0 is the document root and is never matched.
                 var pos = self.parse_stack.items.len - 1;
-                while (pos > 1) {
-                    pos -= 1;
+                while (pos >= 1) {
                     if (self.openElemMatchesClose(self.parse_stack.items[pos], close_name, close_key)) return @intCast(pos);
+                    pos -= 1;
                 }
-                try self.activateCloseIndex();
+                try self.tag_index.activate(self.doc.allocator, self.parse_stack.items);
                 return null;
             }
 
-            const sig = open_tag_index.signature(close_key, @intCast(close_name.len));
-            var pos = self.tag_map.get(sig) orelse return null;
+            var pos = self.tag_index.find(close_key, close_name.len) orelse return null;
             while (pos != open_tag_index.no_stack_pos) {
-                const open = self.parse_stack.items[pos];
+                const open = self.parse_stack.items[@intCast(pos)];
                 if (self.openElemMatchesClose(open, close_name, close_key)) return pos;
                 pos = open.prev_same;
             }
             return null;
-        }
-
-        fn activateCloseIndex(noalias self: *Self) !void {
-            std.debug.assert(!self.index_active and self.tag_map.count() == 0);
-            try self.tag_map.ensureTotalCapacity(self.doc.allocator, @intCast(self.parse_stack.items.len -| 1));
-            var pos: usize = 1;
-            while (pos < self.parse_stack.items.len) : (pos += 1) {
-                const open = &self.parse_stack.items[pos];
-                const sig = open_tag_index.signature(open.tag_key, open.tag_len);
-                open.prev_same = self.tag_map.get(sig) orelse open_tag_index.no_stack_pos;
-                self.tag_map.putAssumeCapacity(sig, @intCast(pos));
-            }
-            self.index_active = true;
         }
 
         inline fn addNode(noalias self: *Self, name_or_text: anytype, is_element: bool, overrides: anytype) !void {
@@ -1378,7 +1356,7 @@ test "lazy closing-tag index activates only after full miss and stays live" {
     const input = "abcdefghX1 abcdefghY1 a b c x y";
     var state = ParseState(TestOptions){ .doc = &doc, .input = @constCast(input), .i = 0, .nodes = &nodes };
     defer state.parse_stack.deinit(alloc);
-    defer state.tag_map.deinit(alloc);
+    defer state.tag_index.deinit(alloc);
     try state.initContainers();
 
     const Push = struct {
@@ -1399,10 +1377,10 @@ test "lazy closing-tag index activates only after full miss and stays live" {
     try Push.one(&state, 24, 25); // b
     try Push.one(&state, 26, 27); // c
     try std.testing.expectEqual(@as(usize, 1), (try state.findOpenForSlowClose("a", tags.first8KeyWithMode("a", false))).?);
-    try std.testing.expect(!state.index_active);
+    try std.testing.expect(!state.tag_index.active);
 
     try std.testing.expect(try state.findOpenForSlowClose("missing", tags.first8KeyWithMode("missing", false)) == null);
-    try std.testing.expect(state.index_active);
+    try std.testing.expect(state.tag_index.active);
 
     _ = state.popOpen();
     _ = state.popOpen();

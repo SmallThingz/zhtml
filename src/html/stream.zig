@@ -106,7 +106,7 @@ pub const Parser = struct {
         };
         if (self.options.track_nesting) try p.stack.append(allocator, .{ .name = .{}, .key = 0, .depth = 0 });
         defer p.stack.deinit(allocator);
-        defer p.tag_map.deinit(allocator);
+        defer p.tag_index.deinit(allocator);
         try p.run();
     }
 };
@@ -121,6 +121,10 @@ const OpenTag = struct {
     depth: u32,
     foreign: bool = false,
     prev_same: open_tag_index.StackPos = open_tag_index.no_stack_pos,
+
+    pub fn sig(self: *const @This()) open_tag_index.TagSig {
+        return open_tag_index.signature(self.key, self.name.len);
+    }
 };
 
 fn State(comptime Ctx: type, comptime callback: anytype) type {
@@ -131,8 +135,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         options: Options,
         i: usize = 0,
         stack: std.ArrayList(OpenTag) = .empty,
-        tag_map: open_tag_index.Map = .empty,
-        index_active: bool = false,
+        tag_index: open_tag_index.LiveIndex(OpenTag) = .{},
 
         const Self = @This();
 
@@ -396,66 +399,41 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
         fn pushOpen(self: *Self, open_value: OpenTag) !void {
             var open = open_value;
-            if (self.index_active) {
-                const sig = open_tag_index.signature(open.key, open.name.len);
-                try self.tag_map.ensureTotalCapacity(self.allocator, self.tag_map.count() + 1);
-                open.prev_same = self.tag_map.get(sig) orelse open_tag_index.no_stack_pos;
-            }
+            try self.tag_index.preparePush(self.allocator, &open);
             try self.stack.append(self.allocator, open);
-            if (self.index_active) {
-                const sig = open_tag_index.signature(open.key, open.name.len);
-                self.tag_map.putAssumeCapacity(sig, @intCast(self.stack.items.len - 1));
-            }
+            self.tag_index.commitPush(&self.stack.items[self.stack.items.len - 1], self.stack.items.len);
         }
 
         fn popOpen(self: *Self) OpenTag {
             const pos = self.stack.items.len - 1;
             const open = self.stack.pop().?;
             std.debug.assert(open.name.len != 0);
-            if (self.index_active) {
-                const sig = open_tag_index.signature(open.key, open.name.len);
-                std.debug.assert(self.tag_map.get(sig).? == pos);
-                if (open.prev_same == open_tag_index.no_stack_pos)
-                    std.debug.assert(self.tag_map.remove(sig))
-                else
-                    self.tag_map.getPtr(sig).?.* = open.prev_same;
-            }
+            self.tag_index.pop(&open, pos + 1);
+            self.tag_index.maybeDeactivate(self.allocator, self.stack.items.len);
             return open;
         }
 
         fn findOpenForSlowClose(self: *Self, close: TagScan) !?open_tag_index.StackPos {
             const close_name = self.source[close.start..close.end];
-            if (!self.index_active) {
+            if (!self.tag_index.active) {
+                // Covers the top of the stack (index len-1) down to index 1;
+                // index 0 is the pseudo-root sentinel and is never matched.
                 var pos = self.stack.items.len - 1;
-                while (pos > 1) {
-                    pos -= 1;
+                while (pos >= 1) {
                     if (self.openMatchesName(self.stack.items[pos], close_name, close.key)) return @intCast(pos);
+                    pos -= 1;
                 }
-                try self.activateCloseIndex();
+                try self.tag_index.activate(self.allocator, self.stack.items);
                 return null;
             }
 
-            const sig = open_tag_index.signature(close.key, @intCast(close_name.len));
-            var pos = self.tag_map.get(sig) orelse return null;
+            var pos = self.tag_index.find(close.key, close_name.len) orelse return null;
             while (pos != open_tag_index.no_stack_pos) {
-                const open = self.stack.items[pos];
+                const open = self.stack.items[@intCast(pos)];
                 if (self.openMatchesName(open, close_name, close.key)) return pos;
                 pos = open.prev_same;
             }
             return null;
-        }
-
-        fn activateCloseIndex(self: *Self) !void {
-            std.debug.assert(!self.index_active and self.tag_map.count() == 0);
-            try self.tag_map.ensureTotalCapacity(self.allocator, @intCast(self.stack.items.len -| 1));
-            var pos: usize = 1;
-            while (pos < self.stack.items.len) : (pos += 1) {
-                const open = &self.stack.items[pos];
-                const sig = open_tag_index.signature(open.key, open.name.len);
-                open.prev_same = self.tag_map.get(sig) orelse open_tag_index.no_stack_pos;
-                self.tag_map.putAssumeCapacity(sig, @intCast(pos));
-            }
-            self.index_active = true;
         }
 
         inline fn openMatchesName(self: *const Self, open: OpenTag, close_name: []const u8, close_key: u64) bool {
@@ -550,8 +528,6 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
     };
 }
 
-
-
 test "streaming parser emits element text and attrs" {
     const Ctx = struct {
         seen_div: bool = false,
@@ -563,7 +539,7 @@ test "streaming parser emits element text and attrs" {
                 var it = ev.attributes();
                 const id = it.next() orelse return error.TestUnexpectedResult;
                 try std.testing.expectEqualStrings("id", id.nameSlice());
-                try std.testing.expectEqualStrings("a", id.valueRaw());
+                try std.testing.expectEqualStrings("a", id.valueRaw().?);
             }
             if (ev.kind == .text and std.mem.eql(u8, ev.valueSlice(), "hello")) self.seen_text = true;
             return true;
@@ -586,20 +562,19 @@ test "streaming attribute iterator handles whitespace around equals and booleans
 
             const hidden = it.next() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualStrings("hidden", hidden.nameSlice());
-            try std.testing.expectEqualStrings("", hidden.valueRaw());
-            try std.testing.expectEqual(attr.RawKind.empty, hidden.raw.kind);
+            try std.testing.expect(hidden.valueRaw() == null);
 
             const id = it.next() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualStrings("id", id.nameSlice());
-            try std.testing.expectEqualStrings("x", id.valueRaw());
+            try std.testing.expectEqualStrings("x", id.valueRaw().?);
 
             const class = it.next() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualStrings("class", class.nameSlice());
-            try std.testing.expectEqualStrings("a b", class.valueRaw());
+            try std.testing.expectEqualStrings("a b", class.valueRaw().?);
 
             const tail = it.next() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualStrings("tail", tail.nameSlice());
-            try std.testing.expectEqualStrings("", tail.valueRaw());
+            try std.testing.expect(tail.valueRaw() == null);
             try std.testing.expect(it.next() == null);
             self.checked = true;
             return true;
@@ -620,7 +595,7 @@ test "streaming attribute iterator stops at self-closing slash" {
             var it = ev.attributes();
             const id = it.next() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualStrings("id", id.nameSlice());
-            try std.testing.expectEqualStrings("x", id.valueRaw());
+            try std.testing.expectEqualStrings("x", id.valueRaw().?);
             try std.testing.expect(it.next() == null);
             self.checked = true;
             return true;
@@ -714,7 +689,7 @@ test "streaming attribute iterator accepts framework attribute names" {
             for (expected) |name| {
                 const item = it.next() orelse return error.TestUnexpectedResult;
                 try std.testing.expectEqualStrings(name, item.nameSlice());
-                try std.testing.expectEqualStrings("x", item.valueRaw());
+                try std.testing.expectEqualStrings("x", item.valueRaw().?);
             }
             try std.testing.expect(it.next() == null);
             self.checked = true;

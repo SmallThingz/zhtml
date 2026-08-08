@@ -6,6 +6,7 @@ test {
 }
 const tables = @import("tables.zig");
 const entities = @import("entities.zig");
+const common = @import("../common.zig");
 
 pub const RawKind = enum {
     empty,
@@ -102,21 +103,22 @@ pub fn parseRawValue(source: []const u8, span_end: usize, eq_index: usize) RawVa
     return .{ .kind = .naked, .start = i, .end = j, .next_start = j };
 }
 
-/// One raw attribute from source. `has_value` distinguishes `name=` from a
-/// valueless `name`; `raw.kind` describes the value payload encoding.
+/// One raw attribute from source. `value` is null for valueless boolean
+/// attributes (`name`) and Some for `name=` plus any value payload; the raw
+/// `RawKind` describes the value encoding.
 pub const RawAttribute = struct {
     source: []const u8,
     name: []const u8,
     name_start: usize,
-    raw: RawValue,
-    has_value: bool,
+    value: ?RawValue,
 
     pub inline fn nameSlice(self: @This()) []const u8 {
         return self.name;
     }
 
-    pub inline fn valueRaw(self: @This()) []const u8 {
-        return self.source[self.raw.start..self.raw.end];
+    pub inline fn valueRaw(self: @This()) ?[]const u8 {
+        const raw = self.value orelse return null;
+        return self.source[raw.start..raw.end];
     }
 };
 
@@ -144,15 +146,14 @@ pub const RawIterator = struct {
                     .source = self.source,
                     .name = name,
                     .name_start = name_start,
-                    .raw = .{ .kind = .empty, .start = self.end, .end = self.end, .next_start = self.end },
-                    .has_value = false,
+                    .value = null,
                 };
             }
 
             if (self.source[delim] == '=') {
                 const raw = parseRawValue(self.source, self.end, delim);
                 self.cursor = raw.next_start;
-                return .{ .source = self.source, .name = name, .name_start = name_start, .raw = raw, .has_value = true };
+                return .{ .source = self.source, .name = name, .name_start = name_start, .value = raw };
             }
 
             const terminates = self.source[delim] == '>' or self.source[delim] == '/';
@@ -162,8 +163,7 @@ pub const RawIterator = struct {
                 .source = self.source,
                 .name = name,
                 .name_start = name_start,
-                .raw = .{ .kind = .empty, .start = delim, .end = delim, .next_start = next_pos },
-                .has_value = false,
+                .value = null,
             };
         }
         return null;
@@ -218,12 +218,14 @@ pub fn materializeAttributes(comptime entity_decoding: entities.EntityDecoding, 
         }
         write += item.name.len;
 
-        if (item.has_value and item.raw.kind != .empty and item.raw.end > item.raw.start) {
-            const decoded_len = entities.decodeAttributeInPlaceWithMode(entity_decoding, source[item.raw.start..item.raw.end], null);
-            source[write] = '=';
-            write += 1;
-            std.mem.copyForwards(u8, source[write .. write + decoded_len], source[item.raw.start .. item.raw.start + decoded_len]);
-            write += decoded_len;
+        if (item.value) |raw| {
+            if (raw.kind != .empty and raw.end > raw.start) {
+                const decoded_len = entities.decodeAttributeInPlaceWithMode(entity_decoding, source[raw.start..raw.end], null);
+                source[write] = '=';
+                write += 1;
+                std.mem.copyForwards(u8, source[write .. write + decoded_len], source[raw.start .. raw.start + decoded_len]);
+                write += decoded_len;
+            }
         }
 
         source[write] = 0;
@@ -251,19 +253,22 @@ inline fn hasConstSource(comptime Doc: type) bool {
 }
 
 /// Returns attribute value by name from in-place attribute bytes, decoding lazily.
-pub inline fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
+/// The result is owned by `allocator` exactly when `SliceResult.owned` is set.
+pub inline fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) !?common.SliceResult {
     const Doc = @TypeOf(doc_ptr.*);
     if (comptime hasConstSource(Doc)) {
         return getAttrValueNonDestructive(doc_ptr, node, name, allocator);
     } else {
-        return getAttrValueDestructive(doc_ptr, node, name);
+        const value = getAttrValueDestructive(doc_ptr, node, name) orelse return null;
+        return .{ .value = value };
     }
 }
 
 /// Returns the current raw attribute value span for `name`.
 /// In destructive documents this may point at already-mutated decoded bytes.
 pub fn getAttrValueRaw(noalias doc_ptr: anytype, node: anytype, name: []const u8) ?[]const u8 {
-    return getAttrValueSingle(doc_ptr, node, name, undefined, .raw) catch unreachable;
+    const result = getAttrValueSingle(doc_ptr, node, name, undefined, .raw) catch unreachable;
+    return if (result) |r| r.value else null;
 }
 
 /// One-pass multi-attribute collector used by matcher hot paths.
@@ -337,7 +342,7 @@ fn collectSelectedValuesNonDestructive(
     if (start >= source.len) return;
     if (!tables.WhitespaceTable[source[start]]) {
         for (selected_names, 0..) |name, idx| {
-            if (out_values[idx] == null) out_values[idx] = try getAttrValueNonDestructive(doc_ptr, node, name, allocator);
+            if (out_values[idx] == null) out_values[idx] = (try getAttrValueNonDestructive(doc_ptr, node, name, allocator)).?.value;
         }
         return;
     }
@@ -346,8 +351,8 @@ fn collectSelectedValuesNonDestructive(
     while (remaining != 0) {
         const item = it.next() orelse break;
         const idx = firstUnresolvedMatch(selected_names, out_values, item.name) orelse continue;
-        out_values[idx] = if (item.has_value)
-            try materializeRawValueOwned(@TypeOf(doc_ptr.*).Options.entity_decoding, allocator, source, item.raw)
+        out_values[idx] = if (item.value) |raw|
+            (try materializeRawValue(@TypeOf(doc_ptr.*).Options.entity_decoding, allocator, source, raw)).value
         else
             "";
         remaining -= 1;
@@ -363,24 +368,27 @@ inline fn getAttrValueDestructive(doc: anytype, node: anytype, name: []const u8)
 }
 
 /// Finds and materializes one attribute value without mutating document source.
-inline fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
+inline fn getAttrValueNonDestructive(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator) !?common.SliceResult {
     return getAttrValueSingle(doc, node, name, allocator, .non_destructive);
 }
 
 /// Shared single-attribute traversal; mode only changes value materialization.
-inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator, comptime mode: AttrValueMode) !?[]const u8 {
+inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allocator: std.mem.Allocator, comptime mode: AttrValueMode) !?common.SliceResult {
     const source = doc.source;
     const start: usize = node.name_or_text.end();
     if (start >= source.len) return null;
-    if (!tables.WhitespaceTable[source[start]]) return getCompactAttrValue(source, start, name);
+    if (!tables.WhitespaceTable[source[start]]) {
+        const value = getCompactAttrValue(source, start, name) orelse return null;
+        return .{ .value = value };
+    }
 
     var it: RawIterator = .{ .source = source, .cursor = start, .end = source.len };
     while (it.next()) |item| {
         if (!std.ascii.eqlIgnoreCase(item.name, name)) continue;
-        if (!item.has_value) return "";
+        const raw = item.value orelse return .{ .value = "" };
         return switch (comptime mode) {
-            .raw => source[item.raw.start..item.raw.end],
-            .non_destructive => try materializeRawValueOwned(@TypeOf(doc.*).Options.entity_decoding, allocator, source, item.raw),
+            .raw => .{ .value = source[raw.start..raw.end] },
+            .non_destructive => try materializeRawValue(@TypeOf(doc.*).Options.entity_decoding, allocator, source, raw),
         };
     }
     return null;
@@ -395,20 +403,25 @@ fn getCompactAttrValue(source: []const u8, start: usize, name: []const u8) ?[]co
     return null;
 }
 
-/// Returns decoded raw value for non-destructive documents, allocating only when needed.
-fn materializeRawValueOwned(comptime entity_decoding: entities.EntityDecoding, allocator: std.mem.Allocator, source: []const u8, raw: RawValue) ![]const u8 {
-    if (raw.kind == .empty) return "";
+/// Decodes a raw attribute value, allocating only when decoding or NUL
+/// replacement is required. Ownership is explicit in the returned result.
+fn materializeRawValue(comptime entity_decoding: entities.EntityDecoding, allocator: std.mem.Allocator, source: []const u8, raw: RawValue) !common.SliceResult {
+    if (raw.kind == .empty) return .{ .value = "" };
 
     const slice = source[raw.start..raw.end];
     const first = entities.firstDecodableEntityWithMode(entity_decoding, true, slice, 0);
-    if (first == null and std.mem.indexOfScalar(u8, slice, 0) == null) return slice;
+    if (first == null and std.mem.indexOfScalar(u8, slice, 0) == null) return .{ .value = slice };
 
     const copied = try allocator.dupe(u8, slice);
     errdefer allocator.free(copied);
 
     const new_len = entities.decodeAttributeInPlaceWithMode(entity_decoding, copied, first);
-    if (new_len == copied.len) return copied;
-    return try allocator.realloc(copied, new_len);
+    const result = if (new_len == copied.len) copied else try allocator.realloc(copied, new_len);
+
+    return .{
+        .value = result,
+        .owned = true,
+    };
 }
 
 /// Returns the first unresolved requested name matching `name`.
