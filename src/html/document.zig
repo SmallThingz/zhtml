@@ -948,15 +948,16 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         engine: Engine,
 
         fn init(doc: *const DocType, selector: ast.Selector, plan: forward.Plan, scope_root: IndexInt, next_index: IndexInt, end_index: IndexInt) @This() {
+            const use_wide = plan.stateful and selector.compounds.len > forward.MaxForwardCompounds;
             return .{
                 .doc = doc,
                 .scope_root = scope_root,
                 .next_index = next_index,
                 .end_index = end_index,
-                .engine = switch (plan.kind) {
-                    .simple, .forward => .{ .compact = ForwardExecutor.init(doc, selector, plan, scope_root) },
-                    .wide => .{ .wide = WideForwardExecutor.init(doc, selector, plan, scope_root) },
-                },
+                .engine = if (use_wide)
+                    .{ .wide = WideForwardExecutor.init(doc, selector, plan, scope_root) }
+                else
+                    .{ .compact = ForwardExecutor.init(doc, selector, plan, scope_root) },
             };
         }
 
@@ -3177,7 +3178,7 @@ test "query iterator lifecycle releases scratch and copies independently" {
         try std.testing.expect(!unused.engine.compact.initialized);
     }
 
-    var early = doc.query("span");
+    var early = doc.query("div > span");
     try std.testing.expect(try early.next() != null);
     try std.testing.expect(early.engine.compact.initialized);
     early.deinit();
@@ -3375,7 +3376,7 @@ test "forward plan boundary uses inline state through 64 compounds and wide stat
     }
     var selector64 = try ast.Selector.compileRuntime(alloc, source64.items);
     defer selector64.deinit(alloc);
-    try std.testing.expectEqual(forward.Kind.forward, forward.buildPlan(selector64).kind);
+    try std.testing.expect(forward.buildPlan(selector64).stateful);
 
     var source63 = std.ArrayList(u8).empty;
     defer source63.deinit(alloc);
@@ -3385,7 +3386,7 @@ test "forward plan boundary uses inline state through 64 compounds and wide stat
     }
     var selector63 = try ast.Selector.compileRuntime(alloc, source63.items);
     defer selector63.deinit(alloc);
-    try std.testing.expectEqual(forward.Kind.forward, forward.buildPlan(selector63).kind);
+    try std.testing.expect(forward.buildPlan(selector63).stateful);
 
     var html_writer: std.Io.Writer.Allocating = .init(alloc);
     defer html_writer.deinit();
@@ -3399,6 +3400,7 @@ test "forward plan boundary uses inline state through 64 compounds and wide stat
 
     var forward_it = doc.queryRuntime(selector64);
     defer forward_it.deinit();
+    try std.testing.expect(std.meta.activeTag(forward_it.engine) == .compact);
     var forward_count: usize = 0;
     while (try forward_it.next()) |_| forward_count += 1;
     var rtl_count: usize = 0;
@@ -3416,10 +3418,11 @@ test "forward plan boundary uses inline state through 64 compounds and wide stat
     }
     var selector = try ast.Selector.compileRuntime(alloc, source.items);
     defer selector.deinit(alloc);
-    try std.testing.expectEqual(forward.Kind.wide, forward.buildPlan(selector).kind);
+    try std.testing.expect(forward.buildPlan(selector).stateful);
 
     var wide_it = doc.queryRuntime(selector);
     defer wide_it.deinit();
+    try std.testing.expect(std.meta.activeTag(wide_it.engine) == .wide);
     var wide_count: usize = 0;
     while (try wide_it.next()) |_| wide_count += 1;
     try std.testing.expectEqual(@as(usize, 0), wide_count);
@@ -3448,13 +3451,14 @@ test "wide forward query processes intermediate tags that cannot be final candid
     try selector_source.appendSlice(alloc, " > span#target");
     var selector = try ast.Selector.compileRuntime(alloc, selector_source.items);
     defer selector.deinit(alloc);
-    try std.testing.expectEqual(forward.Kind.wide, forward.buildPlan(selector).kind);
+    try std.testing.expect(forward.buildPlan(selector).stateful);
 
     const target: IndexInt = @intCast(doc.nodes.len - 1);
     try std.testing.expect(try matcher.matchesSelectorAt(GetDocument(.{}), &doc, selector, target, 0));
 
     var it = doc.queryRuntime(selector);
     defer it.deinit();
+    try std.testing.expect(std.meta.activeTag(it.engine) == .wide);
     const hit = (try it.next()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(target, hit.index);
     try std.testing.expect(try it.next() == null);
@@ -3596,7 +3600,7 @@ test "RTL sibling failure merges witnesses and uses optional topology" {
     try std.testing.expectEqual(@as(usize, 0), linked_workspace.stats.topology_parent_builds);
 }
 
-test "wide selector lists of simple groups require no persistent forward state" {
+test "stateless selector lists route through compact even beyond 64 compounds" {
     const alloc = std.testing.allocator;
     var source = std.ArrayList(u8).empty;
     defer source.deinit(alloc);
@@ -3608,8 +3612,7 @@ test "wide selector lists of simple groups require no persistent forward state" 
     var selector = try ast.Selector.compileRuntime(alloc, source.items);
     defer selector.deinit(alloc);
     const plan = forward.buildPlan(selector);
-    try std.testing.expectEqual(forward.Kind.wide, plan.kind);
-    try std.testing.expect(!plan.requires_forward_state);
+    try std.testing.expect(!plan.stateful);
 
     var doc = GetDocument(.{}).init(alloc);
     defer doc.deinit();
@@ -3617,9 +3620,10 @@ test "wide selector lists of simple groups require no persistent forward state" 
     try resetParsed(.{}, &doc, &html);
     var it = doc.queryRuntime(selector);
     defer it.deinit();
+    try std.testing.expect(std.meta.activeTag(it.engine) == .compact);
     try std.testing.expect(try it.next() != null);
-    try std.testing.expectEqual(@as(usize, 0), it.engine.wide.masks.len);
-    try std.testing.expectEqual(@as(usize, 0), it.engine.wide.states.items.len);
+    try std.testing.expectEqual(@as(usize, 1), it.engine.compact.stats.nodes_processed);
+    try std.testing.expectEqual(@as(usize, 128), it.engine.compact.stats.local_unique_predicate_evals);
 }
 
 test "query collect frees partial output when growth fails" {

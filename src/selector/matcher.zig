@@ -660,32 +660,33 @@ fn prevElementSiblingAccelerated(comptime Doc: type, doc: *const Doc, node_index
     if (workspace.topology_prev.get(node_index)) |previous| return if (previous == InvalidIndex) null else previous;
     const parent = doc.nodes[node_index].parent;
     if (parent == InvalidIndex or parent >= doc.nodes.len) return null;
-    // Building a parent's topology inserts every direct element child (first
-    // child included, as InvalidIndex) into topology_prev, so its absence for
-    // this node means the parent's topology has not been built yet.
-    if (workspace.topology_prev.get(node_index) == null) {
-        workspace.stats.topology_parent_builds += 1;
-        var previous: IndexInt = InvalidIndex;
-        var cursor: IndexInt = parent + 1;
-        const end = doc.nodes[parent].subtree_end;
-        while (cursor <= end and cursor < doc.nodes.len) {
-            const raw = &doc.nodes[cursor];
-            if (raw.parent == parent) {
-                workspace.stats.topology_child_visits += 1;
-                if (raw.isElement(cursor)) {
-                    try workspace.topology_prev.put(workspace.allocator, cursor, previous);
-                    previous = cursor;
-                    cursor = raw.subtree_end + 1;
-                } else {
-                    cursor += 1;
-                }
+
+    // Cache miss means this node's parent topology has not been materialized.
+    // Building it inserts every direct element child (first child included, as
+    // InvalidIndex) into topology_prev, so no second lookup or marker map is
+    // needed to know it was built.
+    workspace.stats.topology_parent_builds += 1;
+    var previous: IndexInt = InvalidIndex;
+    var cursor: IndexInt = parent + 1;
+    const end = doc.nodes[parent].subtree_end;
+    while (cursor <= end and cursor < doc.nodes.len) {
+        const raw = &doc.nodes[cursor];
+        if (raw.parent == parent) {
+            workspace.stats.topology_child_visits += 1;
+            if (raw.isElement(cursor)) {
+                try workspace.topology_prev.put(workspace.allocator, cursor, previous);
+                previous = cursor;
+                cursor = raw.subtree_end + 1;
             } else {
                 cursor += 1;
             }
+        } else {
+            cursor += 1;
         }
     }
-    const previous = workspace.topology_prev.get(node_index) orelse InvalidIndex;
-    return if (previous == InvalidIndex) null else previous;
+
+    const result = workspace.topology_prev.get(node_index).?;
+    return if (result == InvalidIndex) null else result;
 }
 
 fn groupHasExistential(selector: ast.Selector, group: ast.Group, rel_index: IndexInt) bool {

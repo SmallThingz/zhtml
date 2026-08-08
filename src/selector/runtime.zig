@@ -42,7 +42,6 @@ const Parser = struct {
     attrs: std.ArrayList(ast.AttrSelector),
     pseudos: std.ArrayList(ast.Pseudo),
     not_items: std.ArrayList(ast.NotSimple),
-    max_compound_len: IndexInt = 0,
 
     fn init(source: []u8, alloc: std.mem.Allocator) Parser {
         return .{
@@ -86,7 +85,6 @@ const Parser = struct {
 
             const group_end: IndexInt = @intCast(self.compounds.items.len);
             if (group_end == group_start) return error.InvalidSelector;
-            self.max_compound_len = @max(self.max_compound_len, group_end - group_start);
             try self.pushGroup(.{
                 .compound_start = group_start,
                 .compound_len = group_end - group_start,
@@ -127,7 +125,6 @@ const Parser = struct {
             .attrs = attrs,
             .pseudos = pseudos,
             .not_items = not_items,
-            .max_compound_len = self.max_compound_len,
         };
     }
 
@@ -561,7 +558,6 @@ test "runtime selector parser tracks combinator chain and grouping" {
     var sel = try compileRuntimeImpl(alloc, "a b > c + d ~ e, #x");
     defer sel.deinit(alloc);
     try test_helpers.expectCombinatorChain(sel);
-    try std.testing.expectEqual(@as(IndexInt, 5), sel.max_compound_len);
 }
 
 test "runtime selector parser supports leading combinator and pseudo-only compounds" {

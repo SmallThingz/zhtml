@@ -128,6 +128,18 @@ pub const Parser = struct {
     pub fn parse(self: @This(), allocator: std.mem.Allocator, source: []const u8, ctx: anytype, comptime callback: anytype) !void {
         if (!common.lenFits(source.len)) return error.InputTooLarge;
 
+        if (!self.options.emit_start_tags and
+            !self.options.emit_text and
+            !self.options.emit_end_tags and
+            !self.options.include_comments and
+            !self.options.include_doctype and
+            !self.options.include_processing_instructions)
+        {
+            // No event kind is enabled: nothing to scan or emit, and no parser
+            // state to construct.
+            return;
+        }
+
         var p = State(@TypeOf(ctx), callback){
             .allocator = allocator,
             .source = source,
@@ -169,17 +181,6 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         const BeforeEntry = open_tag_index.BeforeEntry(Span);
 
         fn run(self: *Self) !void {
-            if (!self.options.emit_start_tags and
-                !self.options.emit_text and
-                !self.options.emit_end_tags and
-                !self.options.include_comments and
-                !self.options.include_doctype and
-                !self.options.include_processing_instructions)
-            {
-                // No event kind is enabled: there is nothing to scan or emit.
-                return;
-            }
-
             while (self.i < self.source.len) {
                 const lt = std.mem.indexOfScalarPos(u8, self.source, self.i, '<') orelse self.source.len;
                 if (lt > self.i and self.options.emit_text) try self.emitText(self.i, lt);
@@ -225,6 +226,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             };
             const self_closing = tag_end > tag.start and self.source[tag_end - 1] == '/';
             const tag_name = self.source[tag.start..tag.end];
+            const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
             const foreign_element = self.currentForeignContext() or tags.isSvgWithKey(tag_name, tag.key) or tags.isMathWithKey(tag_name, tag.key);
             const void_element = !foreign_element and tags.isVoidTagWithKey(tag_name, tag.key);
             const closes_immediately = void_element or (foreign_element and self_closing);
@@ -243,7 +245,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     .source = self.source,
                     .kind = .start_tag,
                     .depth = depth,
-                    .name = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) },
+                    .name = name_span,
                     .attrs = .{ .start = @intCast(attrs_start), .len = @intCast(attrs_end - attrs_start) },
                     .token = .{ .start = @intCast(token_start), .len = @intCast(tag_end + 1 - token_start) },
                     .self_closing = self_closing,
@@ -275,7 +277,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 return;
             }
 
-            if (self.options.track_nesting) try self.pushOpen(.{ .name = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) }, .key = tag.key, .depth = depth, .foreign = foreign_element });
+            if (self.options.track_nesting) try self.pushOpen(.{ .name = name_span, .key = tag.key, .depth = depth, .foreign = foreign_element });
         }
 
         /// Returns whether a new start tag is parsed in foreign content. SVG's

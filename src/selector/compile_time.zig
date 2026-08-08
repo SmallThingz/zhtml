@@ -80,7 +80,6 @@ pub fn compileImpl(comptime source: []const u8) ast.Selector {
         .attrs = attrs,
         .pseudos = pseudos,
         .not_items = not_items,
-        .max_compound_len = parsed.max_compound_len,
     };
 }
 
@@ -119,7 +118,6 @@ test "compile-time parser accepts attribute case flags" {
 test "compile-time parser tracks combinator chain and grouping" {
     const sel = comptime compileImpl("a b > c + d ~ e, #x");
     try test_helpers.expectCombinatorChain(sel);
-    try std.testing.expectEqual(@as(ast.Int, 5), sel.max_compound_len);
 }
 
 test "compile-time parser supports leading combinator and nth-child variants" {

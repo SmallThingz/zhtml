@@ -1,2 +1,2 @@
 stream parser lives src/html/stream.zig. zero DOM. callback returns !bool; false skips subtree.
-scan-only: byte loop for '<' beats memchr on dense HTML. end/bang/pi tag '>' use 32-byte linear probe then memchr.
+no-event config (all emit/include flags off) short-circuits to O(1): no scanning at all.

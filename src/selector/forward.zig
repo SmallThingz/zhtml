@@ -13,10 +13,7 @@ const InvalidIndex = common.InvalidIndex;
 
 pub const MaxForwardCompounds: usize = 64;
 
-pub const Kind = enum { simple, forward, wide };
-
 pub const Plan = struct {
-    kind: Kind = .wide,
     start_none: u64 = 0,
     start_child: u64 = 0,
     start_descendant: u64 = 0,
@@ -26,7 +23,7 @@ pub const Plan = struct {
     sibling_targets: u64 = 0,
     final_mask: u64 = 0,
     needs_child_position: bool = false,
-    requires_forward_state: bool = false,
+    stateful: bool = false,
     scope_self_seed_mask: u64 = 0,
     scope_lineage_seed_mask: u64 = 0,
 };
@@ -38,21 +35,23 @@ inline fn bit(index: usize) u64 {
 
 pub fn buildPlan(selector: ast.Selector) Plan {
     if (selector.compounds.len > MaxForwardCompounds) {
-        var wide: Plan = .{ .kind = .wide };
-        var requires_forward_state = false;
+        // Beyond one machine word only `stateful` and child-position features
+        // matter; the wide executor compiles its own masks from the selector.
+        var plan: Plan = .{};
+        var stateful = false;
         for (selector.groups) |group| {
-            if (group.compound_len > 1) requires_forward_state = true;
+            if (group.compound_len > 1) stateful = true;
             var rel: IndexInt = 0;
             while (rel < group.compound_len) : (rel += 1) {
-                inspectCompoundFeatures(selector, selector.compounds[group.compound_start + rel], &wide, &requires_forward_state);
+                inspectCompoundFeatures(selector, selector.compounds[group.compound_start + rel], &plan, &stateful);
             }
         }
-        wide.requires_forward_state = requires_forward_state;
-        return wide;
+        plan.stateful = stateful;
+        return plan;
     }
 
-    var plan: Plan = .{ .kind = .simple };
-    var requires_forward_state = false;
+    var plan: Plan = .{};
+    var stateful = false;
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
         const start: usize = @intCast(group.compound_start);
@@ -64,20 +63,16 @@ pub fn buildPlan(selector: ast.Selector) Plan {
             const comp = selector.compounds[absolute];
             const compound_bit = bit(absolute);
             if (relative == 0) {
+                // Leading combinators are anchored checks in processSimple, not
+                // transitions: `> div` and a leading descendant need no stack.
                 switch (comp.combinator) {
                     .none => plan.start_none |= compound_bit,
-                    .child => {
-                        plan.start_child |= compound_bit;
-                        requires_forward_state = true;
-                    },
-                    .descendant => {
-                        plan.start_descendant |= compound_bit;
-                        requires_forward_state = true;
-                    },
+                    .child => plan.start_child |= compound_bit,
+                    .descendant => plan.start_descendant |= compound_bit,
                     .adjacent, .sibling => {},
                 }
             } else {
-                requires_forward_state = true;
+                stateful = true;
                 switch (comp.combinator) {
                     .child => plan.child_targets |= compound_bit,
                     .descendant => plan.descendant_targets |= compound_bit,
@@ -86,24 +81,23 @@ pub fn buildPlan(selector: ast.Selector) Plan {
                     .none => {},
                 }
             }
-            inspectCompoundFeatures(selector, comp, &plan, &requires_forward_state);
+            inspectCompoundFeatures(selector, comp, &plan, &stateful);
         }
     }
 
     plan.scope_self_seed_mask = (plan.child_targets | plan.descendant_targets) >> 1;
     plan.scope_lineage_seed_mask = plan.descendant_targets >> 1;
-    if (requires_forward_state) plan.kind = .forward;
-    plan.requires_forward_state = requires_forward_state;
+    plan.stateful = stateful;
     return plan;
 }
 
-fn inspectCompoundFeatures(selector: ast.Selector, comp: ast.Compound, plan: *Plan, requires_forward_state: *bool) void {
+fn inspectCompoundFeatures(selector: ast.Selector, comp: ast.Compound, plan: *Plan, stateful: *bool) void {
     var i: IndexInt = 0;
     while (i < comp.pseudo_len) : (i += 1) {
         switch (selector.pseudos[comp.pseudo_start + i].kind) {
             .first_child, .nth_child => {
                 plan.needs_child_position = true;
-                requires_forward_state.* = true;
+                stateful.* = true;
             },
             .last_child => {},
         }
@@ -162,8 +156,8 @@ pub fn Executor(comptime Doc: type) type {
         }
 
         pub fn process(self: *Self, idx: IndexInt) !bool {
+            if (!self.plan.stateful) return self.processSimple(idx);
             if (!self.initialized) try self.ensureInitialized();
-            if (self.plan.kind == .simple) return self.processSimple(idx);
             self.syncStack(idx);
             const raw = &self.doc.nodes[idx];
             if (!raw.isElement(idx)) return false;
@@ -335,7 +329,6 @@ pub fn WideExecutor(comptime Doc: type) type {
         const State = enum(usize) { self_matches, lineage, prev_child, any_child };
         const WideFrame = struct {
             subtree_end: IndexInt,
-            node_index: IndexInt,
             slot: usize,
             element_child_count: usize = 0,
         };
@@ -369,7 +362,6 @@ pub fn WideExecutor(comptime Doc: type) type {
         }
 
         pub fn process(self: *Self, idx: IndexInt) !bool {
-            if (!self.plan.requires_forward_state) return self.processSimple(idx);
             if (!self.initialized) try self.ensureInitialized();
             self.syncStack(idx);
             const raw = &self.doc.nodes[idx];
@@ -380,8 +372,8 @@ pub fn WideExecutor(comptime Doc: type) type {
             var child_position: usize = 0;
             if (self.plan.needs_child_position) {
                 if (self.stack.items.len == 0) {
-                    self.rootChildCount().* += 1;
-                    child_position = self.rootChildCount().*;
+                    self.root_child_count += 1;
+                    child_position = self.root_child_count;
                 } else {
                     self.stack.items[self.stack.items.len - 1].element_child_count += 1;
                     child_position = self.stack.items[self.stack.items.len - 1].element_child_count;
@@ -406,34 +398,12 @@ pub fn WideExecutor(comptime Doc: type) type {
                 @memset(self.state(temp_slot, .any_child), 0);
                 try self.stack.append(self.doc.allocator, .{
                     .subtree_end = raw.subtree_end,
-                    .node_index = idx,
                     .slot = temp_slot,
                 });
             }
             const is_match = intersects(matched, self.mask(.final));
             if (is_match) self.stats.nodes_emitted += 1;
             return is_match;
-        }
-
-        fn processSimple(self: *Self, idx: IndexInt) !bool {
-            const raw = &self.doc.nodes[idx];
-            if (!raw.isElement(idx)) return false;
-            self.stats.nodes_processed += 1;
-            self.node_ctx.begin(self.doc.allocator, 0);
-            for (self.selector.groups) |group| {
-                if (group.compound_len != 1) continue;
-                const comp = self.selector.compounds[group.compound_start];
-                const anchored = switch (comp.combinator) {
-                    .none, .descendant => true,
-                    .child => raw.parent == self.scope_root,
-                    .adjacent, .sibling => false,
-                };
-                if (anchored and try matcher.matchesCompoundForward(Doc, self.doc, self.selector, comp, idx, &self.node_ctx)) {
-                    self.stats.nodes_emitted += 1;
-                    return true;
-                }
-            }
-            return false;
         }
 
         fn ensureInitialized(self: *Self) !void {
@@ -484,8 +454,10 @@ pub fn WideExecutor(comptime Doc: type) type {
             try self.seedMaskAt(self.mask(.scope_self), self.scope_root, self_state);
             const lineage = self.state(0, .lineage);
             @memcpy(lineage, self_state);
-            const pending = try self.doc.allocator.dupe(u64, self.mask(.scope_lineage));
-            defer self.doc.allocator.free(pending);
+            // eligible_words is scratch: overwritten by buildEligible before any
+            // normal matching, so reuse it instead of a temporary allocation.
+            const pending = self.eligible_words;
+            @memcpy(pending, self.mask(.scope_lineage));
             var cursor = self.scope_root;
             while (any(pending) and cursor != InvalidIndex and cursor != 0) {
                 const found = self.state(1, .self_matches);
@@ -559,13 +531,6 @@ pub fn WideExecutor(comptime Doc: type) type {
             @memset(self.states.items[old_len..], 0);
         }
 
-        fn rootChildCount(self: *Self) *usize {
-            // The root frame has no separate metadata. Reuse this executor-only
-            // counter stored in the first stack frame is impossible before a
-            // push, so keep it in the spare final state word's high-level path.
-            return &self.root_child_count;
-        }
-
         fn mask(self: *Self, which: Mask) []u64 {
             const start = @intFromEnum(which) * self.word_count;
             return self.masks[start .. start + self.word_count];
@@ -630,7 +595,7 @@ test "forward plan flattens groups into exact transition masks" {
     var selector = try ast.Selector.compileRuntime(allocator, "a > b c + d ~ e, x > y");
     defer selector.deinit(allocator);
     const plan = buildPlan(selector);
-    try std.testing.expectEqual(Kind.forward, plan.kind);
+    try std.testing.expect(plan.stateful);
     try std.testing.expectEqual(bit(0) | bit(5), plan.start_none);
     try std.testing.expectEqual(bit(1) | bit(6), plan.child_targets);
     try std.testing.expectEqual(bit(2), plan.descendant_targets);
