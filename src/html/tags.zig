@@ -89,9 +89,13 @@ const KEY = struct {
     const ARTICLE = litKey("article");
     const ASIDE = litKey("aside");
     const BLOCKQUOTE = litKey("blockquote");
+    const DETAILS = litKey("details");
+    const DIALOG = litKey("dialog");
     const DIV = litKey("div");
     const DL = litKey("dl");
     const FIELDSET = litKey("fieldset");
+    const FIGCAPTION = litKey("figcaption");
+    const FIGURE = litKey("figure");
     const FOOTER = litKey("footer");
     const FORM = litKey("form");
     const H1 = litKey("h1");
@@ -101,10 +105,13 @@ const KEY = struct {
     const H5 = litKey("h5");
     const H6 = litKey("h6");
     const HEADER = litKey("header");
+    const HGROUP = litKey("hgroup");
     const MAIN = litKey("main");
+    const MENU = litKey("menu");
     const NAV = litKey("nav");
     const OL = litKey("ol");
     const PRE = litKey("pre");
+    const SEARCH = litKey("search");
     const SECTION = litKey("section");
     const TABLE = litKey("table");
     const UL = litKey("ul");
@@ -204,6 +211,7 @@ pub inline fn mayTriggerImplicitCloseWithKey(new_tag: []const u8, new_key: u64) 
             KEY.BODY,
             KEY.FORM,
             KEY.MAIN,
+            KEY.MENU,
             => true,
             else => false,
         },
@@ -215,14 +223,19 @@ pub inline fn mayTriggerImplicitCloseWithKey(new_tag: []const u8, new_key: u64) 
         },
         6 => switch (new_key) {
             KEY.OPTION,
+            KEY.DIALOG,
+            KEY.FIGURE,
             KEY.FOOTER,
             KEY.HEADER,
+            KEY.HGROUP,
+            KEY.SEARCH,
             => true,
             else => false,
         },
         7 => switch (new_key) {
             KEY.ADDRESS,
             KEY.ARTICLE,
+            KEY.DETAILS,
             KEY.SECTION,
             => true,
             else => false,
@@ -233,6 +246,7 @@ pub inline fn mayTriggerImplicitCloseWithKey(new_tag: []const u8, new_key: u64) 
         },
         10 => switch (new_key) {
             KEY.BLOCKQUOTE => std.ascii.toLower(new_tag[8]) == 't' and std.ascii.toLower(new_tag[9]) == 'e',
+            KEY.FIGCAPTION => std.ascii.toLower(new_tag[8]) == 'o' and std.ascii.toLower(new_tag[9]) == 'n',
             else => false,
         },
         else => false,
@@ -320,6 +334,7 @@ fn closesPWithKey(new_tag: []const u8, new_key: u64) bool {
         4 => switch (new_key) {
             KEY.FORM,
             KEY.MAIN,
+            KEY.MENU,
             => true,
             else => false,
         },
@@ -330,14 +345,19 @@ fn closesPWithKey(new_tag: []const u8, new_key: u64) bool {
             else => false,
         },
         6 => switch (new_key) {
+            KEY.DIALOG,
+            KEY.FIGURE,
             KEY.FOOTER,
             KEY.HEADER,
+            KEY.HGROUP,
+            KEY.SEARCH,
             => true,
             else => false,
         },
         7 => switch (new_key) {
             KEY.ADDRESS,
             KEY.ARTICLE,
+            KEY.DETAILS,
             KEY.SECTION,
             => true,
             else => false,
@@ -348,6 +368,7 @@ fn closesPWithKey(new_tag: []const u8, new_key: u64) bool {
         },
         10 => switch (new_key) {
             KEY.BLOCKQUOTE => std.ascii.toLower(new_tag[8]) == 't' and std.ascii.toLower(new_tag[9]) == 'e',
+            KEY.FIGCAPTION => std.ascii.toLower(new_tag[8]) == 'o' and std.ascii.toLower(new_tag[9]) == 'n',
             else => false,
         },
         else => false,
@@ -377,6 +398,13 @@ test "tag helpers on canonical lowercase names" {
     try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "article", KEY.ARTICLE));
     try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "section", KEY.SECTION));
     try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "fieldset", KEY.FIELDSET));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "details", KEY.DETAILS));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "dialog", KEY.DIALOG));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "figcaption", KEY.FIGCAPTION));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "figure", KEY.FIGURE));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "hgroup", KEY.HGROUP));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "menu", KEY.MENU));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "search", KEY.SEARCH));
 }
 
 test "first8KeyWithMode canonicalizes only in non-destructive mode" {

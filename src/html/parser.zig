@@ -233,10 +233,16 @@ fn ParseState(comptime opts: ParseOptions) type {
             const tag_name_key = tag.key;
             const tag_name = self.input[name_start..name_end];
 
-            // Handle malformed input similar to browser; treated the `<` as text only
-            if (name_end == name_start or self.i >= self.input.len) {
+            // A non-tag `<...` remains text, but EOF while a start tag token is
+            // still open discards that token (HTML tokenizer `eof-in-tag`).
+            if (name_end == name_start) {
                 @branchHint(.cold);
                 return self.handleInvalidOpeningTag(@intCast(name_start - 1));
+            }
+            if (self.i >= self.input.len) {
+                @branchHint(.cold);
+                self.i = self.input.len;
+                return;
             }
 
             const attr_end: usize = blk: {
@@ -541,7 +547,6 @@ fn ParseState(comptime opts: ParseOptions) type {
                 if (lt + 1 >= self.input.len) return null;
 
                 self.i = lt + 1;
-                self.skipWs();
                 if (self.i >= self.input.len) return null;
 
                 switch (self.input[self.i]) {
@@ -555,7 +560,6 @@ fn ParseState(comptime opts: ParseOptions) type {
                     '?' => self.skipPi(),
                     '/' => {
                         self.i += 1;
-                        self.skipWs();
                         const name_start = self.i;
                         while (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) : (self.i += 1) {}
                         const gt = std.mem.indexOfScalarPos(u8, self.input, self.i, '>') orelse return null;
@@ -1135,6 +1139,49 @@ test "optional-close p/li/td-th/dt-dd/head-body preserve expected query semantic
     try std.testing.expect(firstQuery(doc.query("head + body")) != null);
 }
 
+test "p optional-close set includes modern block elements" {
+    const alloc = std.testing.allocator;
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+
+    var html = ("<p id='p1'>a<details id='d'></details>" ++
+        "<p id='p2'>b<figure id='f'></figure>" ++
+        "<p id='p3'>c<menu id='m'></menu>" ++
+        "<p id='p4'>d<search id='s'></search>").*;
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    try std.testing.expect(firstQuery(doc.query("#p1 + #d")) != null);
+    try std.testing.expect(firstQuery(doc.query("#p2 + #f")) != null);
+    try std.testing.expect(firstQuery(doc.query("#p3 + #m")) != null);
+    try std.testing.expect(firstQuery(doc.query("#p4 + #s")) != null);
+}
+
+test "unterminated start tags at EOF are discarded consistently" {
+    const alloc = std.testing.allocator;
+
+    var no_attrs = "<div".*;
+    var doc_a = try parse(DefaultTestOptions, alloc, &no_attrs);
+    defer doc_a.deinit();
+    try std.testing.expectEqual(@as(usize, 1), doc_a.nodes.len);
+
+    var attrs = "<div id=x".*;
+    var doc_b = try parse(DefaultTestOptions, alloc, &attrs);
+    defer doc_b.deinit();
+    try std.testing.expectEqual(@as(usize, 1), doc_b.nodes.len);
+}
+
+test "non-destructive malformed attr separator cannot panic batch lookup" {
+    const alloc = std.testing.allocator;
+    var doc = NonDestructiveTestDocument.init(alloc);
+    defer doc.deinit();
+
+    const html = "<div\x00 id=x></div>";
+    try resetParsed(NonDestructiveTestOptions, &doc, html);
+
+    try std.testing.expect(firstQuery(doc.query("div#x")) != null);
+    try std.testing.expect(firstQuery(doc.query("div#x.missing")) == null);
+}
+
 test "mismatched close with identical first8 prefix does not close long tag" {
     const alloc = std.testing.allocator;
     var doc = TestDocument.init(alloc);
@@ -1179,6 +1226,18 @@ test "processing-instruction-like nodes end at the next >" {
     const y = firstQuery(doc.query("p#y")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("div", x.tagName());
     try std.testing.expectEqualStrings("p", y.tagName());
+}
+
+test "spaced svg end tag does not terminate skipped svg subtree" {
+    const alloc = std.testing.allocator;
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+
+    var html = "<svg>opaque</ svg><div id='inside'></div></svg><p id='after'></p>".*;
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    try std.testing.expect(firstQuery(doc.query("#inside")) == null);
+    try std.testing.expect(firstQuery(doc.query("#after")) != null);
 }
 
 test "bang nodes respect quoted > when skipping doctype-like declarations" {

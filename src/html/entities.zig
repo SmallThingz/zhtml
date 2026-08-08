@@ -314,9 +314,10 @@ fn parseNumericDecimal(rem: []const u8) ?Decoded {
     var i: usize = 0;
     while (i < rem.len and rem[i] == '0') : (i += 1) {}
 
-    const scan_end = @min(rem.len, i + 9);
-    const semi_rel = std.mem.indexOfScalar(u8, rem[i..scan_end], ';') orelse return null;
-    const semi = i + semi_rel;
+    var semi = i;
+    while (semi < rem.len and NumericDigitTable[rem[semi]] <= 9) : (semi += 1) {}
+    if (semi >= rem.len or rem[semi] != ';') return null;
+    const semi_rel = semi - i;
     const consumed = semi + 3;
     if (semi_rel == 0) return if (i == 0) replacementDecoded(consumed) else numericNullDecoded(consumed);
     if (semi_rel > 7) return replacementDecoded(consumed);
@@ -337,9 +338,10 @@ fn parseNumericHex(rem: []const u8) ?Decoded {
     var i: usize = 0;
     while (i < rem.len and rem[i] == '0') : (i += 1) {}
 
-    const scan_end = @min(rem.len, i + 8);
-    const semi_rel = std.mem.indexOfScalar(u8, rem[i..scan_end], ';') orelse return null;
-    const semi = i + semi_rel;
+    var semi = i;
+    while (semi < rem.len and NumericDigitTable[rem[semi]] != InvalidDigit) : (semi += 1) {}
+    if (semi >= rem.len or rem[semi] != ';') return null;
+    const semi_rel = semi - i;
     const consumed = semi + 4;
     if (semi_rel == 0) return if (i == 0) replacementDecoded(consumed) else numericNullDecoded(consumed);
     if (semi_rel > 6) return replacementDecoded(consumed);
@@ -486,6 +488,16 @@ test "decode numeric entities allows leading zeros and rejects oversized values"
     var buf = "&#0000032;&#x00003E;&#1114112;&#x110000;".*;
     const n = decodeInPlaceWithMode(.common, false, &buf);
     try std.testing.expectEqualSlices(u8, " >" ++ &ReplacementUtf8 ++ &ReplacementUtf8, buf[0..n]);
+}
+
+test "decode oversized numeric entities beyond fast digit windows" {
+    var buf = "&#123456789;&#1234567890;&#x12345678;&#x123456789;".*;
+    const n = decodeInPlaceWithMode(.common, false, &buf);
+    try std.testing.expectEqualSlices(
+        u8,
+        &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8,
+        buf[0..n],
+    );
 }
 
 test "decode numeric entities rejects missing digits" {

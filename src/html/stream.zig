@@ -179,7 +179,6 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             self.i = tag.end;
 
             const tag_end = self.findTagEnd(self.i) orelse {
-                try self.emitText(token_start, self.source.len);
                 self.i = self.source.len;
                 return;
             };
@@ -329,15 +328,16 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         fn parsePi(self: *Self) !void {
             const start = self.i;
             const content_start = self.i + 2;
-            const close = std.mem.indexOfPos(u8, self.source, content_start, "?>") orelse std.mem.indexOfScalarPos(u8, self.source, content_start, '>') orelse self.source.len;
-            const token_end = if (close < self.source.len and self.source[close] == '?') close + 2 else @min(close + 1, self.source.len);
+            const close = std.mem.indexOfScalarPos(u8, self.source, content_start, '>') orelse self.source.len;
+            const value_end = if (close > content_start and close < self.source.len and self.source[close - 1] == '?') close - 1 else close;
+            const token_end = @min(close + 1, self.source.len);
             self.i = token_end;
             if (self.options.include_processing_instructions) {
                 _ = try callback(self.ctx, .{
                     .source = self.source,
                     .kind = .processing_instruction,
                     .depth = self.currentDepth(),
-                    .value = .{ .start = @intCast(content_start), .len = @intCast(close - content_start) },
+                    .value = .{ .start = @intCast(content_start), .len = @intCast(value_end - content_start) },
                     .token = .{ .start = @intCast(start), .len = @intCast(token_end - start) },
                 });
             }
@@ -729,6 +729,49 @@ test "streaming parser handles raw text comments and implicit closes" {
     try std.testing.expect(ctx.ends >= 3);
     try std.testing.expect(ctx.raw_text);
     try std.testing.expectEqual(@as(usize, 1), ctx.comments);
+}
+
+test "streaming unterminated start tag is discarded at EOF" {
+    const Ctx = struct {
+        events: usize = 0,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            _ = ev;
+            self.events += 1;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<div id=x", &ctx, Ctx.cb);
+    try std.testing.expectEqual(@as(usize, 0), ctx.events);
+}
+
+test "streaming processing instruction ends at first greater-than" {
+    const Ctx = struct {
+        pi_ok: bool = false,
+        saw_div: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .processing_instruction) {
+                try std.testing.expectEqualStrings("<?x >", ev.token.slice(ev.source));
+                try std.testing.expectEqualStrings("x ", ev.valueSlice());
+                self.pi_ok = true;
+            }
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "div")) self.saw_div = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try (Parser{ .options = .{ .include_processing_instructions = true } }).parse(
+        std.testing.allocator,
+        "<?x > trailing ?><div></div>",
+        &ctx,
+        Ctx.cb,
+    );
+    try std.testing.expect(ctx.pi_ok);
+    try std.testing.expect(ctx.saw_div);
 }
 
 test "streaming raw-text close respects attributes with spaced assignment" {

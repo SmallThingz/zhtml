@@ -340,12 +340,6 @@ fn collectSelectedValuesNonDestructive(
     const source = doc_ptr.source;
     const start: usize = node.name_or_text.end();
     if (start >= source.len) return;
-    if (!tables.WhitespaceTable[source[start]]) {
-        for (selected_names, 0..) |name, idx| {
-            if (out_values[idx] == null) out_values[idx] = (try getAttrValueNonDestructive(doc_ptr, node, name, allocator)).?.value;
-        }
-        return;
-    }
 
     var it: RawIterator = .{ .source = source, .cursor = start, .end = source.len };
     while (remaining != 0) {
@@ -377,9 +371,14 @@ inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allo
     const source = doc.source;
     const start: usize = node.name_or_text.end();
     if (start >= source.len) return null;
-    if (!tables.WhitespaceTable[source[start]]) {
-        const value = getCompactAttrValue(source, start, name) orelse return null;
-        return .{ .value = value };
+    // Only destructive documents ever use the compact `name[=value]NUL` form.
+    // Read-only documents must keep using the raw scanner even when malformed
+    // bytes appear immediately after the tag name.
+    if (comptime !hasConstSource(@TypeOf(doc.*))) {
+        if (!tables.WhitespaceTable[source[start]]) {
+            const value = getCompactAttrValue(source, start, name) orelse return null;
+            return .{ .value = value };
+        }
     }
 
     var it: RawIterator = .{ .source = source, .cursor = start, .end = source.len };
