@@ -40,14 +40,6 @@ pub inline fn scanTagName(source: []const u8, start: usize, comptime normalize_f
     return .{ .start = start, .end = i, .key = key };
 }
 
-pub inline fn startsWithIgnoreCase(source: []const u8, start: usize, comptime needle: []const u8) bool {
-    if (start + needle.len > source.len) return false;
-    inline for (needle, 0..) |want, off| {
-        if (std.ascii.toLower(source[start + off]) != want) return false;
-    }
-    return true;
-}
-
 /// Finds a normal tag's closing `>`, respecting quoted attribute values and
 /// optional whitespace between `=` and the opening quote.
 pub inline fn findTagEnd(source: []const u8, start: usize) ?usize {

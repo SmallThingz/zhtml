@@ -933,35 +933,28 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         const ForwardExecutor = forward.Executor(DocType);
         const WideForwardExecutor = forward.WideExecutor(DocType);
         const Engine = union(enum) {
-            simple: ForwardExecutor,
-            forward: ForwardExecutor,
+            compact: ForwardExecutor,
             wide: WideForwardExecutor,
         };
 
         /// Owning document pointer.
         doc: *const DocType,
-        /// Selector evaluated by this iterator.
-        selector: ast.Selector,
         /// Optional subtree root for scoped queries.
         scope_root: IndexInt = InvalidIndex,
         /// Next node index to test.
         next_index: IndexInt = 1,
         /// Exclusive traversal bound for `next_index`.
         end_index: IndexInt = 1,
-        plan: forward.Plan,
         engine: Engine,
 
         fn init(doc: *const DocType, selector: ast.Selector, plan: forward.Plan, scope_root: IndexInt, next_index: IndexInt, end_index: IndexInt) @This() {
             return .{
                 .doc = doc,
-                .selector = selector,
                 .scope_root = scope_root,
                 .next_index = next_index,
                 .end_index = end_index,
-                .plan = plan,
                 .engine = switch (plan.kind) {
-                    .simple => .{ .simple = ForwardExecutor.init(doc, selector, plan, scope_root) },
-                    .forward => .{ .forward = ForwardExecutor.init(doc, selector, plan, scope_root) },
+                    .simple, .forward => .{ .compact = ForwardExecutor.init(doc, selector, plan, scope_root) },
                     .wide => .{ .wide = WideForwardExecutor.init(doc, selector, plan, scope_root) },
                 },
             };
@@ -970,7 +963,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         /// Releases matcher scratch if iteration stops before exhaustion.
         pub fn deinit(noalias self: *@This()) void {
             switch (self.engine) {
-                .simple, .forward => |*executor| executor.deinit(),
+                .compact => |*executor| executor.deinit(),
                 .wide => |*executor| executor.deinit(),
             }
         }
@@ -986,11 +979,11 @@ fn GetQueryIter(comptime options: ParseOptions) type {
 
             while (self.next_index < self.end_index) : (self.next_index += 1) {
                 const matched = switch (self.engine) {
-                    .simple, .forward => |*executor| try executor.process(self.next_index),
                     // Wide forward matching is stateful: every element can establish
                     // ancestry/sibling state for a later rightmost candidate. Do not
                     // apply candidateCouldMatch here; that predicate is only safe for
                     // the final candidate in an RTL/local match.
+                    .compact => |*executor| try executor.process(self.next_index),
                     .wide => |*executor| try executor.process(self.next_index),
                 };
                 if (matched) {
@@ -1667,19 +1660,6 @@ test "runtime query iterator is invalidated by clear and reparsing" {
     var new_it = try runtimeQuery(&doc, runtime_arena.allocator(), "span.y");
     try std.testing.expect(try new_it.next() != null);
     try std.testing.expect(try new_it.next() == null);
-}
-
-test "matcher firstMatchIndex rejects invalid scope roots safely" {
-    const alloc = std.testing.allocator;
-    var doc = GetDocument(.{}).init(alloc);
-    defer doc.deinit();
-
-    var html = "<div id='x'></div>".*;
-    try resetParsed(.{}, &doc, &html);
-
-    const sel = comptime ast.Selector.compile("div");
-    const idx = try matcher.firstMatchIndex(GetDocument(.{}), &doc, sel, @as(IndexInt, @intCast(doc.nodes.len + 10)));
-    try std.testing.expect(idx == null);
 }
 
 test "query results matrix (comptime selectors)" {
@@ -3194,18 +3174,18 @@ test "query iterator lifecycle releases scratch and copies independently" {
     // Dropping an iterator before its first next() is allocation-free.
     {
         const unused = doc.query("span");
-        try std.testing.expect(!unused.engine.simple.initialized);
+        try std.testing.expect(!unused.engine.compact.initialized);
     }
 
     var early = doc.query("span");
     try std.testing.expect(try early.next() != null);
-    try std.testing.expect(early.engine.simple.initialized);
+    try std.testing.expect(early.engine.compact.initialized);
     early.deinit();
-    try std.testing.expect(!early.engine.simple.initialized);
+    try std.testing.expect(!early.engine.compact.initialized);
 
     var exhausted = doc.query(".missing");
     try std.testing.expect(try exhausted.next() == null);
-    try std.testing.expect(!exhausted.engine.simple.initialized);
+    try std.testing.expect(!exhausted.engine.compact.initialized);
 
     var original = doc.query("span");
     var copied = original;
@@ -3498,9 +3478,9 @@ test "forward automaton processes and emits nested matches exactly once" {
     var emitted: usize = 0;
     while (try it.next()) |_| emitted += 1;
     try std.testing.expectEqual(@as(usize, 127), emitted);
-    try std.testing.expectEqual(@as(usize, 128), it.engine.forward.stats.nodes_processed);
-    try std.testing.expectEqual(@as(usize, 127), it.engine.forward.stats.nodes_emitted);
-    try std.testing.expectEqual(@as(usize, 128), it.engine.forward.stats.local_unique_predicate_evals);
+    try std.testing.expectEqual(@as(usize, 128), it.engine.compact.stats.nodes_processed);
+    try std.testing.expectEqual(@as(usize, 127), it.engine.compact.stats.nodes_emitted);
+    try std.testing.expectEqual(@as(usize, 128), it.engine.compact.stats.local_unique_predicate_evals);
 }
 
 test "selector-list overlap emits each candidate once" {
@@ -3549,7 +3529,6 @@ test "wide RTL automaton shifts predecessor state across word boundaries" {
 
     try std.testing.expect(try matcher.matchesSelectorAtWithWorkspace(GetDocument(.{}), &doc, selector, @intCast(doc.nodes.len - 1), InvalidIndex, &workspace));
     try std.testing.expectEqual(@as(usize, 65), workspace.stats.reverse_nodes_processed);
-    try std.testing.expectEqual(@as(usize, 0), workspace.stats.reverse_node_duplicate_processes);
     try std.testing.expectEqual(@as(usize, 65), workspace.stats.local_unique_predicate_evals);
 }
 
@@ -3577,7 +3556,6 @@ test "RTL descendant failure merges ambiguous states and processes each node onc
     defer workspace.deinit();
     try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(GetDocument(.{}), &doc, selector, @intCast(doc.nodes.len - 1), InvalidIndex, &workspace));
     try std.testing.expectEqual(@as(usize, 128), workspace.stats.reverse_nodes_processed);
-    try std.testing.expectEqual(@as(usize, 0), workspace.stats.reverse_node_duplicate_processes);
     try std.testing.expect(workspace.stats.local_unique_predicate_evals <= 128 * 2);
 }
 
@@ -3605,7 +3583,6 @@ test "RTL sibling failure merges witnesses and uses optional topology" {
     defer compact_workspace.deinit();
     try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(@TypeOf(compact_doc), &compact_doc, selector, @intCast(compact_doc.nodes.len - 1), InvalidIndex, &compact_workspace));
     try std.testing.expectEqual(@as(usize, 128), compact_workspace.stats.reverse_nodes_processed);
-    try std.testing.expectEqual(@as(usize, 0), compact_workspace.stats.reverse_node_duplicate_processes);
     try std.testing.expectEqual(@as(usize, 1), compact_workspace.stats.topology_parent_builds);
     try std.testing.expectEqual(@as(usize, 128), compact_workspace.stats.topology_child_visits);
 
@@ -3616,7 +3593,6 @@ test "RTL sibling failure merges witnesses and uses optional topology" {
     defer linked_workspace.deinit();
     try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(@TypeOf(linked_doc), &linked_doc, selector, @intCast(linked_doc.nodes.len - 1), InvalidIndex, &linked_workspace));
     try std.testing.expectEqual(@as(usize, 128), linked_workspace.stats.reverse_nodes_processed);
-    try std.testing.expectEqual(@as(usize, 0), linked_workspace.stats.reverse_node_duplicate_processes);
     try std.testing.expectEqual(@as(usize, 0), linked_workspace.stats.topology_parent_builds);
 }
 

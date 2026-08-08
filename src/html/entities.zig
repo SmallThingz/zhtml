@@ -66,10 +66,6 @@ pub fn firstDecodableEntity(slice: []const u8, start: usize) ?usize {
     return firstDecodableEntityWithMode(.common, false, slice, start);
 }
 
-pub fn firstDecodableEntityFull(comptime attribute: bool, slice: []const u8, start: usize) ?usize {
-    return firstDecodableEntityWithMode(.full, attribute, slice, start);
-}
-
 pub fn firstDecodableEntityWithMode(comptime mode: EntityDecoding, comptime attribute: bool, slice: []const u8, start: usize) ?usize {
     var i = start;
     while (std.mem.indexOfScalarPos(u8, slice, i, '&')) |amp| {
@@ -101,10 +97,6 @@ fn decodeInPlaceFromMode(comptime mode: EntityDecoding, comptime normalize_white
 /// that already searched for a decodable entity.
 pub fn decodeAttributeInPlace(slice: []u8, first: ?usize) usize {
     return decodeAttributeInPlaceWithMode(.common, slice, first);
-}
-
-pub fn decodeAttributeInPlaceFull(slice: []u8, first: ?usize) usize {
-    return decodeAttributeInPlaceWithMode(.full, slice, first);
 }
 
 pub fn decodeAttributeInPlaceWithMode(comptime mode: EntityDecoding, slice: []u8, first: ?usize) usize {
@@ -274,10 +266,6 @@ fn decodeReferenceAlloc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
 
 pub fn decodeEntity(rem: []const u8) ?Decoded {
     return decodeEntityWithMode(.common, false, rem);
-}
-
-pub fn decodeEntityFull(comptime attribute: bool, rem: []const u8) ?Decoded {
-    return decodeEntityWithMode(.full, attribute, rem);
 }
 
 pub fn decodeEntityWithMode(comptime mode: EntityDecoding, comptime attribute: bool, rem: []const u8) ?Decoded {

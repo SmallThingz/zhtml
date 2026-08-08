@@ -26,8 +26,6 @@ pub const Plan = struct {
     sibling_targets: u64 = 0,
     final_mask: u64 = 0,
     needs_child_position: bool = false,
-    needs_last_child: bool = false,
-    needs_attributes: bool = false,
     requires_forward_state: bool = false,
     scope_self_seed_mask: u64 = 0,
     scope_lineage_seed_mask: u64 = 0,
@@ -100,7 +98,6 @@ pub fn buildPlan(selector: ast.Selector) Plan {
 }
 
 fn inspectCompoundFeatures(selector: ast.Selector, comp: ast.Compound, plan: *Plan, requires_forward_state: *bool) void {
-    if (comp.hasId() or comp.class_len != 0 or comp.attr_len != 0) plan.needs_attributes = true;
     var i: IndexInt = 0;
     while (i < comp.pseudo_len) : (i += 1) {
         switch (selector.pseudos[comp.pseudo_start + i].kind) {
@@ -108,14 +105,7 @@ fn inspectCompoundFeatures(selector: ast.Selector, comp: ast.Compound, plan: *Pl
                 plan.needs_child_position = true;
                 requires_forward_state.* = true;
             },
-            .last_child => plan.needs_last_child = true,
-        }
-    }
-    i = 0;
-    while (i < comp.not_len) : (i += 1) {
-        switch (selector.not_items[comp.not_start + i].kind) {
-            .id, .class, .attr => plan.needs_attributes = true,
-            .tag => {},
+            .last_child => {},
         }
     }
 }
@@ -132,7 +122,6 @@ pub const Frame = struct {
 
 pub const Stats = struct {
     nodes_processed: usize = 0,
-    state_word_ops: usize = 0,
     local_unique_predicate_evals: usize = 0,
     nodes_emitted: usize = 0,
 };
@@ -200,7 +189,6 @@ pub fn Executor(comptime Doc: type) type {
                     .lineage_matches = lineage,
                 });
             }
-            self.stats.state_word_ops += 6;
             const is_match = (matched & self.plan.final_mask) != 0;
             if (is_match) self.stats.nodes_emitted += 1;
             return is_match;
@@ -422,7 +410,6 @@ pub fn WideExecutor(comptime Doc: type) type {
                     .slot = temp_slot,
                 });
             }
-            self.stats.state_word_ops += self.word_count * 6;
             const is_match = intersects(matched, self.mask(.final));
             if (is_match) self.stats.nodes_emitted += 1;
             return is_match;

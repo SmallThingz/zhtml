@@ -239,11 +239,6 @@ pub inline fn mayTriggerImplicitCloseWithKey(new_tag: []const u8, new_key: u64) 
     };
 }
 
-/// Returns true when `open_tag` is an optional-close source tag.
-pub fn isImplicitCloseSourceWithKey(open_tag: []const u8, open_key: u64) bool {
-    return isImplicitCloseSourceWithLenAndKey(open_tag.len, open_key);
-}
-
 /// Returns true when `open_tag_len`/`open_key` represent an optional-close source tag.
 pub fn isImplicitCloseSourceWithLenAndKey(open_tag_len: usize, open_key: u64) bool {
     return switch (open_tag_len) {
