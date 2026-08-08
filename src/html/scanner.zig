@@ -51,6 +51,11 @@ pub inline fn scanTagName(source: []const u8, start: usize, comptime normalize_f
 /// between quoted values and quote bytes that occur in attribute names or
 /// unquoted values. The common no-quote case stays a single vectorized search.
 pub inline fn findTagEnd(source: []const u8, start: usize) ?usize {
+    if (start >= source.len) return null;
+    return findTagEndNonEmpty(source, start);
+}
+
+fn findTagEndNonEmpty(source: []const u8, start: usize) ?usize {
     const first_special = start + (std.mem.indexOfAny(u8, source[start..], ">\"'") orelse return null);
     if (source[first_special] == '>') return first_special;
 
