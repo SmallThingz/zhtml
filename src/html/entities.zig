@@ -82,18 +82,25 @@ pub fn firstDecodableEntityWithMode(comptime mode: EntityDecoding, comptime attr
 /// Total number of additional bytes needed when all decodable references are
 /// expanded. Zero means the slice is safe for forward in-place decoding.
 pub fn expansionExtraWithMode(comptime mode: EntityDecoding, comptime attribute: bool, slice: []const u8) usize {
+    _ = attribute;
     if (comptime mode != .full) return 0;
+
+    // In the WHATWG named-entity table only &nLt; and &nGt; produce more
+    // bytes than they consume (six UTF-8 bytes from five source bytes).
+    // Detect those two literals directly instead of running the full named
+    // lookup for every ampersand before an in-place decode.
     var extra: usize = 0;
     var i: usize = 0;
     while (std.mem.indexOfScalarPos(u8, slice, i, '&')) |amp| {
-        if (decodeEntityWithMode(mode, attribute, slice[amp + 1 ..])) |decoded| {
-            const produced: usize = decoded.len;
-            const consumed: usize = decoded.consumed;
-            if (produced > consumed) extra += produced - consumed;
-            i = amp + consumed;
-        } else {
-            i = amp + 1;
+        if (amp + 5 <= slice.len) {
+            const candidate = slice[amp .. amp + 5];
+            if (std.mem.eql(u8, candidate, "&nLt;") or std.mem.eql(u8, candidate, "&nGt;")) {
+                extra += 1;
+                i = amp + 5;
+                continue;
+            }
         }
+        i = amp + 1;
     }
     return extra;
 }
@@ -340,16 +347,22 @@ pub fn decodeEntityWithMode(comptime mode: EntityDecoding, comptime attribute: b
     return switch (rem[0]) {
         'a' => matchNamedLiteral(attribute, rem, "amp", "&", true) orelse
             matchNamedLiteral(attribute, rem, "apos", "'", false),
+        'A' => matchNamedLiteral(attribute, rem, "AMP", "&", true),
         'l' => matchNamedLiteral(attribute, rem, "lt", "<", true),
+        'L' => matchNamedLiteral(attribute, rem, "LT", "<", true),
         'g' => matchNamedLiteral(attribute, rem, "gt", ">", true),
+        'G' => matchNamedLiteral(attribute, rem, "GT", ">", true),
         'q' => matchNamedLiteral(attribute, rem, "quot", "\"", true),
+        'Q' => matchNamedLiteral(attribute, rem, "QUOT", "\"", true),
         'n' => if (comptime mode == .common)
             matchNamedLiteral(attribute, rem, "nbsp", "\xc2\xa0", true) orelse
                 matchNamedLiteral(attribute, rem, "ndash", "\xe2\x80\x93", false)
         else
             null,
         'c' => if (comptime mode == .common) matchNamedLiteral(attribute, rem, "copy", "\xc2\xa9", true) else null,
+        'C' => if (comptime mode == .common) matchNamedLiteral(attribute, rem, "COPY", "\xc2\xa9", true) else null,
         'r' => if (comptime mode == .common) matchNamedLiteral(attribute, rem, "reg", "\xc2\xae", true) else null,
+        'R' => if (comptime mode == .common) matchNamedLiteral(attribute, rem, "REG", "\xc2\xae", true) else null,
         'm' => if (comptime mode == .common) matchNamedLiteral(attribute, rem, "mdash", "\xe2\x80\x94", false) else null,
         'h' => if (comptime mode == .common) matchNamedLiteral(attribute, rem, "hellip", "\xe2\x80\xa6", false) else null,
         else => null,
@@ -712,6 +725,20 @@ test "legacy named references without semicolons follow text and attribute rules
     try std.testing.expectEqualStrings("&ampx &amp= &! &copycat \xc2\xa9!", attribute[0..attr_len]);
 }
 
+test "fast entity modes include canonical uppercase legacy aliases" {
+    var minimal = "&AMP;&LT;&GT;&QUOT; &AMP &LT &GT &QUOT".*;
+    const minimal_len = decodeInPlaceWithMode(.minimal, false, &minimal);
+    try std.testing.expectEqualStrings("&<>\" & < > \"", minimal[0..minimal_len]);
+
+    var common = "&COPY;&REG; &COPY &REG".*;
+    const common_len = decodeInPlaceWithMode(.common, false, &common);
+    try std.testing.expectEqualStrings("\xc2\xa9\xc2\xae \xc2\xa9 \xc2\xae", common[0..common_len]);
+
+    var attribute = "&AMPx &AMP= &AMP! &COPYcat &COPY!".*;
+    const attr_len = decodeAttributeInPlaceWithMode(.common, &attribute, null);
+    try std.testing.expectEqualStrings("&AMPx &AMP= &! &COPYcat \xc2\xa9!", attribute[0..attr_len]);
+}
+
 test "common named entities decode without full table" {
     var buf = "&nbsp;&copy;&reg;&mdash;&ndash;&hellip;".*;
     const n = decodeInPlaceWithMode(.common, false, &buf);
@@ -728,6 +755,12 @@ test "full named entity mode decodes uncommon and two-codepoint values" {
     var buf = "&eacute; &NotNestedGreaterGreater;".*;
     const n = decodeInPlaceWithMode(.full, false, &buf);
     try std.testing.expectEqualStrings("\xc3\xa9 \xe2\xaa\xa2\xcc\xb8", buf[0..n]);
+}
+
+test "full expansion preflight recognizes exactly the expanding literals" {
+    try std.testing.expectEqual(@as(usize, 2), expansionExtraWithMode(.full, false, "a&nLt;b&nGt;c"));
+    try std.testing.expectEqual(@as(usize, 0), expansionExtraWithMode(.full, false, "&nLtv;&NotNestedGreaterGreater;&amp;"));
+    try std.testing.expectEqual(@as(usize, 0), expansionExtraWithMode(.common, false, "&nLt;&nGt;"));
 }
 
 test "expanding full entities reject in-place decode transactionally" {

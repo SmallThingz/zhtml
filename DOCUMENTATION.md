@@ -60,6 +60,7 @@ All examples are verified by running `zig build examples-check`
 - destructive options accept mutable input and parse it in place
 - non-destructive options accept read-only input and parse directly from the original bytes
 - documents own node storage and borrow input; callers retain input ownership and must keep it alive
+- `Node` and `ChildrenIter` values are views into the current document generation; `clear()`, reparsing into the document, or replacing the document invalidates them
 - maximum parseable input size is controlled at build time with `-Dintlen`
 
 ### Query APIs

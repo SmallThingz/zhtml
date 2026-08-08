@@ -40,22 +40,176 @@ pub inline fn scanTagName(source: []const u8, start: usize, comptime normalize_f
     return .{ .start = start, .end = i, .key = key };
 }
 
-/// Finds a normal tag's closing `>`, respecting quoted attribute values and
-/// optional whitespace between `=` and the opening quote.
+/// Finds a normal tag's closing `>`, respecting the tokenizer distinction
+/// between quoted values and quote bytes that occur in attribute names or
+/// unquoted values. The common no-quote case stays a single vectorized search.
 pub inline fn findTagEnd(source: []const u8, start: usize) ?usize {
-    var i = start;
-    while (i < source.len) {
-        const pos = std.mem.indexOfAnyPos(u8, source, i, ">=") orelse return null;
-        if (source[pos] == '>') return pos;
+    const first_special = start + (std.mem.indexOfAny(u8, source[start..], ">\"'") orelse return null);
+    if (source[first_special] == '>') return first_special;
 
-        i = pos + 1;
-        while (i < source.len and tables.WhitespaceTable[source[i]]) : (i += 1) {}
-        if (i < source.len and (source[i] == '\'' or source[i] == '"')) {
-            const quote = source[i];
-            i = (std.mem.indexOfScalarPos(u8, source, i + 1, quote) orelse return null) + 1;
+    const State = enum {
+        before_attribute,
+        attribute_name,
+        after_attribute_name,
+        before_value,
+        quoted_single,
+        quoted_double,
+        unquoted,
+        after_quoted,
+    };
+
+    var state: State = .before_attribute;
+    var i = start;
+    while (i < source.len) : (i += 1) {
+        const c = source[i];
+        switch (state) {
+            .before_attribute => {
+                if (c == '>') return i;
+                if (tables.WhitespaceTable[c] or c == '/') continue;
+                state = .attribute_name;
+            },
+            .attribute_name => {
+                if (c == '>') return i;
+                if (tables.WhitespaceTable[c]) {
+                    state = .after_attribute_name;
+                } else if (c == '/') {
+                    state = .before_attribute;
+                } else if (c == '=') {
+                    state = .before_value;
+                }
+            },
+            .after_attribute_name => {
+                if (c == '>') return i;
+                if (tables.WhitespaceTable[c]) continue;
+                if (c == '=') {
+                    state = .before_value;
+                } else if (c == '/') {
+                    state = .before_attribute;
+                } else {
+                    state = .attribute_name;
+                }
+            },
+            .before_value => {
+                if (c == '>') return i;
+                if (tables.WhitespaceTable[c]) continue;
+                state = switch (c) {
+                    '\'' => .quoted_single,
+                    '"' => .quoted_double,
+                    else => .unquoted,
+                };
+            },
+            .quoted_single => {
+                i = std.mem.indexOfScalarPos(u8, source, i, '\'') orelse return null;
+                state = .after_quoted;
+            },
+            .quoted_double => {
+                i = std.mem.indexOfScalarPos(u8, source, i, '"') orelse return null;
+                state = .after_quoted;
+            },
+            .unquoted => {
+                if (c == '>') return i;
+                if (tables.WhitespaceTable[c]) state = .before_attribute;
+            },
+            .after_quoted => {
+                if (c == '>') return i;
+                if (tables.WhitespaceTable[c] or c == '/') {
+                    state = .before_attribute;
+                } else {
+                    // Parse-error recovery reconsumes this byte as the start of
+                    // the next attribute; quote characters here are name data.
+                    state = .attribute_name;
+                }
+            },
         }
     }
     return null;
+}
+
+/// Returns whether the slash immediately before `tag_end` is the tokenizer's
+/// self-closing marker rather than part of an unquoted attribute value.
+///
+/// `tag_end` is the index of `>` and `name_end` is the first byte after the tag
+/// name. In HTML tokenization `/` is ordinary data while in an unquoted value,
+/// so `<x a=b/>` has value `b/` and is not a self-closing start tag.
+pub fn isSelfClosingStartTag(source: []const u8, name_end: usize, tag_end: usize) bool {
+    if (tag_end <= name_end or tag_end >= source.len or source[tag_end] != '>' or source[tag_end - 1] != '/') return false;
+    const slash = tag_end - 1;
+    if (slash == name_end) return true;
+
+    const State = enum {
+        before_attribute,
+        attribute_name,
+        after_attribute_name,
+        before_value,
+        quoted_single,
+        quoted_double,
+        unquoted,
+        after_quoted,
+    };
+
+    var state: State = .before_attribute;
+    var i = name_end;
+    while (i < slash) : (i += 1) {
+        const c = source[i];
+        switch (state) {
+            .before_attribute => {
+                if (tables.WhitespaceTable[c]) continue;
+                if (c == '/') continue;
+                state = .attribute_name;
+            },
+            .attribute_name => {
+                if (tables.WhitespaceTable[c]) {
+                    state = .after_attribute_name;
+                } else if (c == '=') {
+                    state = .before_value;
+                } else if (c == '/') {
+                    state = .before_attribute;
+                }
+            },
+            .after_attribute_name => {
+                if (tables.WhitespaceTable[c]) continue;
+                if (c == '=') {
+                    state = .before_value;
+                } else if (c == '/') {
+                    state = .before_attribute;
+                } else {
+                    state = .attribute_name;
+                }
+            },
+            .before_value => {
+                if (tables.WhitespaceTable[c]) continue;
+                state = switch (c) {
+                    '\'' => .quoted_single,
+                    '"' => .quoted_double,
+                    else => .unquoted,
+                };
+            },
+            .quoted_single => {
+                if (c == '\'') state = .after_quoted;
+            },
+            .quoted_double => {
+                if (c == '"') state = .after_quoted;
+            },
+            .unquoted => {
+                if (tables.WhitespaceTable[c]) state = .before_attribute;
+            },
+            .after_quoted => {
+                if (tables.WhitespaceTable[c]) {
+                    state = .before_attribute;
+                } else if (c == '/') {
+                    state = .before_attribute;
+                } else {
+                    // Parse-error recovery starts another attribute.
+                    state = .attribute_name;
+                }
+            },
+        }
+    }
+
+    return switch (state) {
+        .unquoted, .before_value, .quoted_single, .quoted_double => false,
+        else => true,
+    };
 }
 
 /// Finds an opaque declaration's closing `>`. Unlike normal attributes,
@@ -81,8 +235,10 @@ pub inline fn findRawTextClose(
     name: []const u8,
     key: u64,
     start: usize,
-    comptime normalize_first8: bool,
 ) ?RawTextClose {
+    // Candidate end-tag names live inside the raw text until they have been
+    // proven to be an appropriate end tag. Never normalize those speculative
+    // bytes in place: a near miss such as </ScRiPtX> is script data.
     if (name.len == 0) return null;
     var search = start;
     const first = std.ascii.toLower(name[0]);
@@ -90,8 +246,11 @@ pub inline fn findRawTextClose(
         search = lt + 1;
         if (lt + 2 >= source.len or source[lt + 1] != '/' or std.ascii.toLower(source[lt + 2]) != first) continue;
 
-        const close = scanTagName(source, lt + 2, normalize_first8);
+        const close = scanTagName(source, lt + 2, false);
         if (!tags.equalByLenAndKeyIgnoreCase(source[close.start..close.end], close.key, name, key)) continue;
+        if (close.end >= source.len) return null;
+        const delimiter = source[close.end];
+        if (delimiter != '>' and delimiter != '/' and !tables.WhitespaceTable[delimiter]) continue;
         const tag_end = findTagEnd(source, close.end) orelse return null;
         return .{ .content_end = lt, .close_start = lt, .close_end = tag_end + 1 };
     }
@@ -116,10 +275,50 @@ test "shared tag end scanner respects only attribute value quotes" {
     try std.testing.expectEqual(@as(?usize, 6), findDeclarationEnd("x '>' >", 0));
 }
 
+test "tag end scanner does not invent quoted values inside unquoted data" {
+    // In an unquoted value, `=` and quote bytes are parse-error data. The first
+    // `>` therefore closes the tag rather than being hidden by a fake quote.
+    const malformed = " a=x=\">\" id=y>tail";
+    try std.testing.expectEqual(@as(?usize, 6), findTagEnd(malformed, 0));
+
+    const quoted = " a=\"x>y\" id=z>tail";
+    try std.testing.expectEqual(@as(?usize, 13), findTagEnd(quoted, 0));
+}
+
+test "self-closing marker excludes slash inside unquoted attribute values" {
+    try std.testing.expect(isSelfClosingStartTag("<x/>", 2, 3));
+    try std.testing.expect(isSelfClosingStartTag("<x disabled/>", 2, 12));
+    try std.testing.expect(isSelfClosingStartTag("<x a='b'/>", 2, 9));
+    try std.testing.expect(isSelfClosingStartTag("<x a=b />", 2, 8));
+
+    try std.testing.expect(!isSelfClosingStartTag("<x a=b/>", 2, 7));
+    try std.testing.expect(!isSelfClosingStartTag("<x a=/>", 2, 6));
+    try std.testing.expect(!isSelfClosingStartTag("<x a= />", 2, 7));
+}
+
 test "shared raw text close scanner handles case and spaced attributes" {
     const source = "a<b</ScRiPt x = \"a>b\">tail";
     const key = tags.first8KeyWithMode("script", false);
-    const close = findRawTextClose(source, "script", key, 0, false).?;
+    const close = findRawTextClose(source, "script", key, 0).?;
     try std.testing.expectEqual(@as(usize, 3), close.content_end);
     try std.testing.expectEqualStrings("tail", source[close.close_end..]);
+}
+
+test "raw text close requires an end-tag-name delimiter" {
+    const key = tags.first8KeyWithMode("script", false);
+    const source = "a</script=x>b</script!>c</script>d";
+    const close = findRawTextClose(source, "script", key, 0).?;
+    try std.testing.expectEqualStrings("a</script=x>b</script!>c", source[0..close.content_end]);
+    try std.testing.expectEqualStrings("d", source[close.close_end..]);
+}
+
+test "destructive raw text search does not mutate rejected close candidates" {
+    var source = "x</ScRiPtX>y</SCRIPT=z>q</SCRIPT>tail".*;
+    const original = source;
+    const key = tags.first8KeyWithMode("script", false);
+    const close = findRawTextClose(&source, "script", key, 0).?;
+    try std.testing.expectEqualStrings("x</ScRiPtX>y</SCRIPT=z>q", source[0..close.content_end]);
+    try std.testing.expectEqualStrings("tail", source[close.close_end..]);
+    // Searching itself is read-only, including the ultimately accepted close.
+    try std.testing.expectEqualSlices(u8, &original, &source);
 }

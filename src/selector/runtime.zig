@@ -336,7 +336,8 @@ const Parser = struct {
     }
 
     fn parseNthChildPseudo(noalias self: *Parser) Error!void {
-        self.skipWs();
+        // Functional pseudo syntax requires `(` immediately after the name;
+        // whitespace would terminate the function token in CSS tokenization.
         if (!self.consumeIf('(')) return error.InvalidSelector;
         self.skipWs();
         const arg = self.parseUntil(')') orelse return error.InvalidSelector;
@@ -345,7 +346,6 @@ const Parser = struct {
     }
 
     fn parseNotPseudo(noalias self: *Parser) Error!void {
-        self.skipWs();
         if (!self.consumeIf('(')) return error.InvalidSelector;
         self.skipWs();
         const item = try self.parseSimpleNot();
@@ -630,6 +630,8 @@ test "runtime selector parser rejects invalid selectors" {
         "div:not()",
         "div:not(.a,.b)",
         "div:nth-child()",
+        "div:nth-child (2)",
+        "div:not (.x)",
         "div:nth-child(2n+)",
         "div:nth-child(2n1)",
         "div:nth-child(2n 1)",

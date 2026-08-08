@@ -209,7 +209,7 @@ fn ParseState(comptime opts: ParseOptions) type {
         ) !void {
             const parent_idx: IndexInt = @intCast(self.nodes.items.len);
             try self.addNode(.{ name_start, name_end }, true, .{});
-            if (self.input[attr_end - 1] == '/') return;
+            if (scanner.isSelfClosingStartTag(self.input, name_end, attr_end)) return;
 
             const content_start = self.i;
             const content_end = self.findSvgContentEnd() orelse blk: {
@@ -259,6 +259,12 @@ fn ParseState(comptime opts: ParseOptions) type {
                 }
             };
 
+            // Resolve optional-close HTML elements before any special-content
+            // branch so tags such as <plaintext> cannot remain nested in an open <p>.
+            if (self.parse_stack.items.len > 1 and tags.mayTriggerImplicitCloseWithKey(tag_name, tag_name_key)) {
+                self.applyImplicitClosures(tag_name, tag_name_key);
+            }
+
             // In case this is an svg tag: Note: we still treat svg's attribute like we do html attributes which is not 100% correct
             // This is preferred over the complications that arise from parsing as xml tho
             if (isSvgTagKey(tag_name_key)) {
@@ -299,12 +305,6 @@ fn ParseState(comptime opts: ParseOptions) type {
                 return;
             }
 
-            // Optional-close HTML elements are resolved before the new element
-            // is appended so sibling/parent links reflect the implied structure.
-            if (self.parse_stack.items.len > 1 and tags.mayTriggerImplicitCloseWithKey(tag_name, tag_name_key)) {
-                self.applyImplicitClosures(tag_name, tag_name_key);
-            }
-
             const node_idx = self.nodes.items.len;
             try self.addNode(.{ name_start, name_end }, true, .{});
 
@@ -333,8 +333,10 @@ fn ParseState(comptime opts: ParseOptions) type {
             if (self.i < self.input.len and self.input[self.i] == '>') {
                 self.i += 1;
             } else if (self.findTagEndRespectAttrQuotes() == null) {
-                // Unterminated end tag consumes the rest of the input.
+                // HTML tokenizer eof-in-tag: the unfinished end-tag token is
+                // discarded, so it must not mutate the open-element stack.
                 self.i = self.input.len;
+                return;
             }
 
             if (close_name.len == 0 or self.parse_stack.items.len <= 1) { // root-only stack means there is nothing to close
@@ -566,26 +568,31 @@ fn ParseState(comptime opts: ParseOptions) type {
 
                 switch (self.input[self.i]) {
                     '!' => {
-                        if (self.i + 2 < self.input.len and self.input[self.i + 1] == '-' and self.input[self.i + 2] == '-') {
+                        const bang = self.i;
+                        self.i = lt; // shared helpers expect the cursor at `<`
+                        if (bang + 2 < self.input.len and self.input[bang + 1] == '-' and self.input[bang + 2] == '-') {
                             self.skipComment();
                         } else {
                             self.skipBangNode();
                         }
                     },
-                    '?' => self.skipPi(),
+                    '?' => {
+                        self.i = lt; // skipPi likewise consumes from `<`
+                        self.skipPi();
+                    },
                     '/' => {
                         self.i += 1;
                         const name_start = self.i;
                         while (self.i < self.input.len and tables.TagNameCharTable[self.input[self.i]]) : (self.i += 1) {}
-                        const gt = std.mem.indexOfScalarPos(u8, self.input, self.i, '>') orelse return null;
+                        const tag_end = scanner.findTagEnd(self.input, self.i) orelse return null;
                         if (self.i - name_start == 3 and isSvgTag(self.input[name_start..self.i])) {
                             depth -= 1;
                             if (depth == 0) {
-                                self.i = gt + 1;
+                                self.i = tag_end + 1;
                                 return lt;
                             }
                         }
-                        self.i = gt + 1;
+                        self.i = tag_end + 1;
                     },
                     else => {
                         const name_start = self.i;
@@ -597,7 +604,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                         }
 
                         const tag_end = self.findTagEndRespectAttrQuotes() orelse return null;
-                        if (name_end - name_start == 3 and isSvgTag(self.input[name_start..name_end]) and self.input[tag_end - 1] != '/') {
+                        if (name_end - name_start == 3 and isSvgTag(self.input[name_start..name_end]) and !scanner.isSelfClosingStartTag(self.input, name_end, tag_end)) {
                             depth += 1;
                         }
                     },
@@ -607,7 +614,7 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         inline fn findRawTextClose(noalias self: *Self, tag_name: []const u8, tag_key: u64, start: usize) ?struct { content_end: usize, close_end: usize } {
-            const close = scanner.findRawTextClose(self.input, tag_name, tag_key, start, !opts.non_destructive) orelse return null;
+            const close = scanner.findRawTextClose(self.input, tag_name, tag_key, start) orelse return null;
             self.i = close.close_end;
             return .{ .content_end = close.content_end, .close_end = close.close_end };
         }
@@ -1036,6 +1043,31 @@ test "raw text element metadata remains valid after child append growth" {
     try std.testing.expect(div.index > script.raw().subtree_end);
 }
 
+test "SVG opaque scan keeps cursor contracts for empty comments and PI" {
+    const alloc = std.testing.allocator;
+    var html = "<svg><!----><?pi?><g></g></svg><div id='tail'></div>".*;
+
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    try std.testing.expect(firstQuery(doc.query("svg")) != null);
+    try std.testing.expect(firstQuery(doc.query("#tail")) != null);
+}
+
+test "SVG slash inside unquoted value does not terminate nested SVG" {
+    const alloc = std.testing.allocator;
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+
+    var html = ("<svg><svg data=x/>inside</svg><span id='still-svg'></span></svg>" ++
+        "<div id='after'></div>").*;
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    try std.testing.expect(firstQuery(doc.query("#still-svg")) == null);
+    try std.testing.expect(firstQuery(doc.query("#after")) != null);
+}
+
 test "raw-text close handles mixed-case end tag and embedded < bytes" {
     const alloc = std.testing.allocator;
     var doc = TestDocument.init(alloc);
@@ -1152,6 +1184,46 @@ test "optional-close p/li/td-th/dt-dd/head-body preserve expected query semantic
     try std.testing.expect(firstQuery(doc.query("#td1 + #th1")) != null);
     try std.testing.expect(firstQuery(doc.query("#th1 + #td2")) != null);
     try std.testing.expect(firstQuery(doc.query("head + body")) != null);
+}
+
+test "optional-close option and optgroup preserve select sibling structure" {
+    const alloc = std.testing.allocator;
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+
+    var html = "<select><optgroup id='g1'><option id='o1'>one<optgroup id='g2'><option id='o2'>two</select>".*;
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    try std.testing.expect(firstQuery(doc.query("#g1 + #g2")) != null);
+    try std.testing.expect(firstQuery(doc.query("#g1 #o1")) != null);
+    try std.testing.expect(firstQuery(doc.query("#g2 #o2")) != null);
+    try std.testing.expect(firstQuery(doc.query("#o1 #g2")) == null);
+}
+
+test "hr closes open option and optgroup in select" {
+    const alloc = std.testing.allocator;
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+
+    var html = "<select><optgroup id='g'><option id='o'>one<hr id='h'></select>".*;
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    try std.testing.expect(firstQuery(doc.query("#g + #h")) != null);
+    try std.testing.expect(firstQuery(doc.query("#g #o")) != null);
+    try std.testing.expect(firstQuery(doc.query("#o #h")) == null);
+}
+
+test "plaintext start tag implicitly closes an open paragraph" {
+    const alloc = std.testing.allocator;
+    var html = "<p id='p'>before<plaintext>after".*;
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    const p_node = firstQuery(doc.query("#p")) orelse return error.TestUnexpectedResult;
+    const plaintext = firstQuery(doc.query("plaintext")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(IndexInt, 0), plaintext.raw().parent);
+    try std.testing.expect(plaintext.index > p_node.raw().subtree_end);
 }
 
 test "optional-close sources are found through inline descendants without crossing scope" {

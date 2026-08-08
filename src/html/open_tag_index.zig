@@ -65,8 +65,14 @@ pub fn LiveIndex(comptime T: type) type {
         pub fn preparePush(self: *Self, allocator: std.mem.Allocator, item: *T) !void {
             if (!self.active) return;
             const sig = item.sig();
+            if (self.map.get(sig)) |previous| {
+                // Updating an existing signature cannot grow the hash map. Avoid
+                // a capacity check/allocation on repeated nested tags.
+                item.prev_same = previous;
+                return;
+            }
             try self.map.ensureUnusedCapacity(allocator, 1);
-            item.prev_same = self.map.get(sig) orelse no_stack_pos;
+            item.prev_same = no_stack_pos;
         }
 
         /// Commits a push: records the item's new position. `stack_len` is the
@@ -74,7 +80,14 @@ pub fn LiveIndex(comptime T: type) type {
         pub fn commitPush(self: *Self, item: *const T, stack_len: usize) void {
             if (!self.active) return;
             const sig = item.sig();
-            self.map.putAssumeCapacity(sig, @intCast(stack_len - 1));
+            const pos: StackPos = @intCast(stack_len - 1);
+            if (item.prev_same != no_stack_pos) {
+                // preparePush already proved the entry exists. Updating through
+                // the pointer avoids re-running hash-map insertion machinery.
+                self.map.getPtr(sig).?.* = pos;
+            } else {
+                self.map.putAssumeCapacity(sig, pos);
+            }
         }
 
         /// Reverts a pop of the top item. `stack_len` is the length *before*

@@ -320,20 +320,14 @@ fn GetNode(comptime options: ParseOptions) type {
             const doc = self.doc;
             const node_raw = self.raw();
 
-            // RW documents remember entity decoding on each source text span.
-            // Normalization remains a post-join operation so whitespace behavior
-            // across element/text-node boundaries is unchanged.
-            if (comptime !options.non_destructive and opts.unescape) {
-                var idx = scan.first_idx;
-                while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
-                    if (!doc.nodes[idx].isText(idx)) continue;
-                    _ = materializeRwText(doc, idx, true, false);
-                }
-            }
-
             var total: usize = 0;
             var have_text = false;
             {
+                // Materialize destructive text while sizing the owned result.
+                // This used to be a separate full subtree walk before this pass.
+                if (comptime !options.non_destructive and opts.unescape) {
+                    _ = materializeRwText(doc, scan.first_idx, true, false);
+                }
                 const first_slice = doc.nodes[scan.first_idx].name_or_text.slice(doc.source);
                 if (first_slice.len != 0) {
                     total = first_slice.len;
@@ -346,6 +340,9 @@ fn GetNode(comptime options: ParseOptions) type {
                 var idx = scan.resume_idx;
                 while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
                     if (!doc.nodeAt(idx).isText()) continue;
+                    if (comptime !options.non_destructive and opts.unescape) {
+                        _ = materializeRwText(doc, idx, true, false);
+                    }
                     const slice = doc.nodes[idx].name_or_text.slice(doc.source);
                     if (slice.len == 0) continue;
                     if (have_text) total = try std.math.add(usize, total, 1);
@@ -387,7 +384,18 @@ fn GetNode(comptime options: ParseOptions) type {
             if (comptime !opts.unescape) return false;
             if (isOpaqueTextNode(doc, idx)) return false;
             if (comptime options.non_destructive) return true;
-            return rwTextState(doc, idx) == .decode_failed;
+
+            const state = rwTextState(doc, idx);
+            if (state == .decode_failed) return true;
+            if (state != .raw) return false;
+
+            // EOF text has no following byte in which to persist the RW marker.
+            // By the time this helper is used by the owned multi-text path the
+            // span has already been materialized. Only an expanding reference
+            // can therefore still require the allocating decoder.
+            const node = &doc.nodes[idx];
+            if (node.name_or_text.end() < doc.source.len) return false;
+            return entities.expansionExtraWithMode(options.entity_decoding, false, node.name_or_text.slice(doc.source)) != 0;
         }
 
         /// Applies final text decoding/normalization and transfers buffer ownership.
@@ -1071,12 +1079,18 @@ fn GetDocument(comptime options: ParseOptions) type {
         /// Compiles selector at comptime and returns lazy iterator over matches.
         /// Call iterator `deinit` when stopping before exhaustion.
         pub fn query(self: *const @This(), comptime selector: []const u8) QueryIterType {
-            return self.root().query(selector);
+            const sel = comptime ast.Selector.compile(selector);
+            const plan = comptime forward.buildPlan(sel);
+            if (self.nodes.len == 0) return QueryIterType.init(self, sel, plan, InvalidIndex, 1, 1);
+            return self.root().queryIter(sel, plan);
         }
 
         /// Returns lazy iterator over matches for already compiled selector.
         /// Call iterator `deinit` when stopping before exhaustion.
         pub fn queryRuntime(self: *const @This(), sel: ast.Selector) QueryIterType {
+            // Empty documents cannot match anything; avoid walking a potentially
+            // large runtime selector solely to build transition masks.
+            if (self.nodes.len == 0) return QueryIterType.init(self, sel, .{}, InvalidIndex, 1, 1);
             return self.root().queryIter(sel, forward.buildPlan(sel));
         }
 
@@ -1118,6 +1132,7 @@ fn GetDocument(comptime options: ParseOptions) type {
 
         /// Writes HTML serialization of this node and its subtree to `writer`.
         pub fn writeHtml(self: *const @This(), writer: anytype, comptime entity_encoding: EntityEncoding) NodeTypeWrapper.WriterError(@TypeOf(writer))!void {
+            if (self.nodes.len == 0) return;
             if (comptime options.non_destructive and entity_encoding != .force) {
                 try writer.writeAll(self.source);
                 return;
@@ -1167,6 +1182,31 @@ test "raw node optional metadata follows parse options" {
     try std.testing.expect(@FieldType(CompactRaw, "prev_sibling") == void);
     try std.testing.expect(@FieldType(FullRaw, "last_child") == IndexInt);
     try std.testing.expect(@FieldType(FullRaw, "prev_sibling") == IndexInt);
+}
+
+test "querying initialized or cleared document is empty" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+
+    var empty = doc.query("div");
+    defer empty.deinit();
+    try std.testing.expect(try empty.next() == null);
+
+    var html = "<div></div>".*;
+    try resetParsed(.{}, &doc, &html);
+    doc.clear();
+
+    var cleared = doc.query("div");
+    defer cleared.deinit();
+    try std.testing.expect(try cleared.next() == null);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const runtime = try ast.Selector.compileRuntime(arena.allocator(), "div");
+    var runtime_empty = doc.queryRuntime(runtime);
+    defer runtime_empty.deinit();
+    try std.testing.expect(try runtime_empty.next() == null);
 }
 
 test "document source type follows parse mode" {
@@ -1980,6 +2020,24 @@ test "RW multi-node owned text materializes each span and still normalizes after
     }
 }
 
+test "empty document serialization is empty" {
+    const alloc = std.testing.allocator;
+
+    var rw = GetDocument(.{}).init(alloc);
+    defer rw.deinit();
+    var rw_out: std.Io.Writer.Allocating = .init(alloc);
+    defer rw_out.deinit();
+    try rw.writeHtml(&rw_out.writer, .force);
+    try std.testing.expectEqualStrings("", rw_out.written());
+
+    var ro = GetDocument(.{ .non_destructive = true }).init(alloc);
+    defer ro.deinit();
+    var ro_out: std.Io.Writer.Allocating = .init(alloc);
+    defer ro_out.deinit();
+    try ro.writeHtml(&ro_out.writer, .force);
+    try std.testing.expectEqualStrings("", ro_out.written());
+}
+
 test "RW serialization reconstructs markup replaced by a text marker" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);
@@ -2174,6 +2232,29 @@ test "expanding full entities use marked allocating fallbacks" {
     try eof_div.writeHtml(&eof_out.writer, .force);
     try std.testing.expect(std.mem.indexOf(u8, eof_out.written(), "&nLt;") == null);
     try std.testing.expect(std.mem.indexOf(u8, eof_out.written(), "&amp;nLt;") == null);
+}
+
+test "multi-node innerText decodes an expanding final EOF text span" {
+    const alloc = std.testing.allocator;
+    const opts: ParseOptions = .{ .entity_decoding = .full };
+    var doc = opts.Document().init(alloc);
+    defer doc.deinit();
+
+    var html = "<div>a<span>b</span>&nLt;".*;
+    try resetParsed(opts, &doc, &html);
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
+
+    const expected_tail = try entities.decodeAllocWithMode(.full, false, alloc, "&nLt;");
+    defer alloc.free(expected_tail);
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(alloc);
+    try expected.appendSlice(alloc, "a b ");
+    try expected.appendSlice(alloc, expected_tail);
+
+    const text = try div.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+    defer text.free(alloc);
+    try std.testing.expect(text.owned);
+    try std.testing.expectEqualSlices(u8, expected.items, text.value);
 }
 
 test "entity serialization modes preserve auto and force contracts" {

@@ -188,7 +188,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 self.i = self.source.len;
                 return;
             };
-            const self_closing = tag_end > tag.start and self.source[tag_end - 1] == '/';
+            const self_closing = scanner.isSelfClosingStartTag(self.source, tag.end, tag_end);
             const tag_name = self.source[tag.start..tag.end];
             const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
             const foreign_element = self.currentForeignContext() or tags.isSvgWithKey(tag_name, tag.key) or tags.isMathWithKey(tag_name, tag.key);
@@ -231,13 +231,18 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             if (closes_immediately) return;
 
             if (!foreign_element and tags.isPlainTextTagWithKey(tag_name, tag.key)) {
-                if (self.options.emit_text and self.i < self.source.len) try self.emitText(self.i, self.source.len);
+                const text_depth = if (self.options.track_nesting) depth + 1 else 0;
+                if (self.options.emit_text and self.i < self.source.len) try self.emitTextAtDepth(self.i, self.source.len, text_depth);
                 self.i = self.source.len;
+                if (self.options.track_nesting) {
+                    const open = OpenTag{ .name = name_span, .key = tag.key, .depth = depth };
+                    try self.emitEnd(open, self.i, self.i, true);
+                }
                 return;
             }
 
             if (!foreign_element and tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
-                try self.parseRawText(tag, depth, token_start);
+                try self.parseRawText(tag, depth);
                 return;
             }
 
@@ -259,7 +264,13 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             self.i += 2;
             const tag = self.scanTagName(self.i);
             self.i = tag.end;
-            const token_end = if (self.findTagEnd(self.i)) |end| end + 1 else self.source.len;
+            const tag_end = self.findTagEnd(self.i) orelse {
+                // HTML tokenizer eof-in-tag: an unfinished end-tag token is
+                // discarded rather than emitted or applied to the open stack.
+                self.i = self.source.len;
+                return;
+            };
+            const token_end = tag_end + 1;
             self.i = token_end;
             const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
 
@@ -349,22 +360,27 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             }
         }
 
-        fn parseRawText(self: *Self, tag: TagScan, depth: u32, open_start: usize) !void {
-            _ = open_start;
+        fn parseRawText(self: *Self, tag: TagScan, depth: u32) !void {
             const content_start = self.i;
             const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
+            const text_depth = if (self.options.track_nesting) depth + 1 else 0;
+            const open = OpenTag{ .name = name_span, .key = tag.key, .depth = depth };
             if (self.findRawTextClose(self.source[tag.start..tag.end], tag.key, self.i)) |close| {
-                if (close.content_end > content_start) try self.emitText(content_start, close.content_end);
-                const open = OpenTag{ .name = name_span, .key = tag.key, .depth = depth };
+                if (close.content_end > content_start) try self.emitTextAtDepth(content_start, close.content_end, text_depth);
                 try self.emitEnd(open, close.close_start, close.close_end, false);
                 self.i = close.close_end;
             } else {
-                if (content_start < self.source.len) try self.emitText(content_start, self.source.len);
+                if (content_start < self.source.len) try self.emitTextAtDepth(content_start, self.source.len, text_depth);
                 self.i = self.source.len;
+                if (self.options.track_nesting) try self.emitEnd(open, self.i, self.i, true);
             }
         }
 
         fn emitText(self: *Self, start: usize, end: usize) !void {
+            try self.emitTextAtDepth(start, end, self.currentDepth());
+        }
+
+        fn emitTextAtDepth(self: *Self, start: usize, end: usize, depth: u32) !void {
             if (!self.options.emit_text) return;
             if (start >= end) return;
             if (self.options.drop_whitespace_text_nodes) {
@@ -375,7 +391,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             _ = try callback(self.ctx, .{
                 .source = self.source,
                 .kind = .text,
-                .depth = self.currentDepth(),
+                .depth = depth,
                 .value = .{ .start = @intCast(start), .len = @intCast(end - start) },
                 .token = .{ .start = @intCast(start), .len = @intCast(end - start) },
             });
@@ -484,35 +500,26 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn findRawTextClose(self: *Self, name: []const u8, key: u64, start: usize) ?RawClose {
-            return scanner.findRawTextClose(self.source, name, key, start, false);
+            return scanner.findRawTextClose(self.source, name, key, start);
         }
 
         fn skipSubtree(self: *Self, name: []const u8, key: u64, start: usize, foreign_content: bool) !usize {
-            var stack: std.ArrayList(SkipOpenTag) = .empty;
-            defer stack.deinit(self.allocator);
-
-            // Seed the local scanner with the live ancestors as well as the
-            // skipped root. A start/end tag can close an ancestor and thereby
-            // end the skipped root even when the root itself has no optional
-            // end-tag rule (for example `<p><span>skip<div>keep`).
-            if (self.options.track_nesting) {
-                for (self.stack.items[1..]) |open| {
-                    try stack.append(self.allocator, .{
-                        .name = open.name.slice(self.source),
-                        .key = open.key,
-                        .foreign = open.foreign,
-                    });
-                }
-            }
-            const root_pos = stack.items.len;
-            try stack.append(self.allocator, .{ .name = name, .key = key, .foreign = foreign_content });
+            // Keep the skipped root and the parser's live ancestors out of the
+            // temporary list. Most skipped subtrees are leaves or shallow, so
+            // this avoids both copying the live stack and allocating at all
+            // until an actual nested non-void child is encountered.
+            const ancestor_count = if (self.options.track_nesting) self.stack.items.len - 1 else 0;
+            const root_pos = ancestor_count;
+            const root = SkipOpenTag{ .name = name, .key = key, .foreign = foreign_content };
+            var descendants: std.ArrayList(SkipOpenTag) = .empty;
+            defer descendants.deinit(self.allocator);
 
             var i = start;
             while (std.mem.indexOfScalarPos(u8, self.source, i, '<')) |lt| {
                 if (lt + 1 >= self.source.len) return self.source.len;
 
                 if (std.mem.startsWith(u8, self.source[lt..], "<!--")) {
-                    i = if (std.mem.indexOfPos(u8, self.source, lt + 4, "-->")) |end| end + 3 else self.source.len;
+                    i = if (std.mem.indexOfPos(u8, self.source, lt + 4, "-->")) |close_end| close_end + 3 else self.source.len;
                     continue;
                 }
 
@@ -532,36 +539,36 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                         i = lt + 1;
                         continue;
                     }
-                    const end = if (self.findTagEnd(close.end)) |tag_end| tag_end + 1 else self.source.len;
+                    const token_end = if (self.findTagEnd(close.end)) |tag_end| tag_end + 1 else self.source.len;
                     const close_name = self.source[close.start..close.end];
-                    var pos = stack.items.len;
+                    var pos = ancestor_count + 1 + descendants.items.len;
                     while (pos > 0) {
                         pos -= 1;
-                        const open = stack.items[pos];
+                        const open = self.skipOpenAt(ancestor_count, root, descendants.items, pos);
                         if (!tags.equalByLenAndKeyIgnoreCase(open.name, open.key, close_name, close.key)) continue;
-                        stack.items.len = pos;
                         if (pos < root_pos) return lt;
-                        if (pos == root_pos) return end;
+                        if (pos == root_pos) return token_end;
+                        descendants.items.len = pos - root_pos - 1;
                         break;
                     }
-                    i = end;
+                    i = token_end;
                     continue;
                 } else if (tables.TagNameCharTable[self.source[lt + 1]]) {
                     const child = self.scanTagName(lt + 1);
                     const end_pos = self.findTagEnd(child.end) orelse return self.source.len;
                     const child_name = self.source[child.start..child.end];
-                    const self_closing = end_pos > child.end and self.source[end_pos - 1] == '/';
-                    const parent_foreign = skipForeignContext(stack.items);
+                    const self_closing = scanner.isSelfClosingStartTag(self.source, child.end, end_pos);
+                    const parent_foreign = skipForeignContext(root, descendants.items);
                     const child_foreign = parent_foreign or tags.isSvgWithKey(child_name, child.key) or tags.isMathWithKey(child_name, child.key);
 
                     if (!child_foreign and tags.mayTriggerImplicitCloseWithKey(child_name, child.key)) {
-                        while (stack.items.len != 0) {
-                            var pos = stack.items.len;
+                        while (true) {
+                            var pos = ancestor_count + 1 + descendants.items.len;
                             var found: ?usize = null;
                             var scope: tags.ImplicitCloseScope = .{};
                             while (pos > 0) {
                                 pos -= 1;
-                                const open = stack.items[pos];
+                                const open = self.skipOpenAt(ancestor_count, root, descendants.items, pos);
                                 if (tags.isImplicitCloseSourceWithLenAndKey(open.name.len, open.key) and
                                     tags.shouldImplicitlyCloseWithLenAndKey(open.name.len, open.key, child_name, child.key) and
                                     scope.permits(open.name.len, open.key))
@@ -572,8 +579,8 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                                 scope.observe(open.name.len, open.key);
                             }
                             const found_pos = found orelse break;
-                            stack.items.len = found_pos;
                             if (found_pos <= root_pos) return lt;
+                            descendants.items.len = found_pos - root_pos - 1;
                         }
                     }
 
@@ -584,7 +591,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                         if (!child_foreign and tags.isTextOnlyTagWithKey(child_name, child.key)) {
                             i = if (self.findRawTextClose(child_name, child.key, i)) |raw_close| raw_close.close_end else self.source.len;
                         } else {
-                            try stack.append(self.allocator, .{ .name = child_name, .key = child.key, .foreign = child_foreign });
+                            try descendants.append(self.allocator, .{ .name = child_name, .key = child.key, .foreign = child_foreign });
                         }
                     }
                     continue;
@@ -594,9 +601,27 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             return self.source.len;
         }
 
-        fn skipForeignContext(stack: []const SkipOpenTag) bool {
-            if (stack.len == 0) return false;
-            const open = stack[stack.len - 1];
+        fn skipOpenAt(
+            self: *const Self,
+            ancestor_count: usize,
+            root: SkipOpenTag,
+            descendants: []const SkipOpenTag,
+            pos: usize,
+        ) SkipOpenTag {
+            if (pos < ancestor_count) {
+                const open = self.stack.items[pos + 1];
+                return .{
+                    .name = open.name.slice(self.source),
+                    .key = open.key,
+                    .foreign = open.foreign,
+                };
+            }
+            if (pos == ancestor_count) return root;
+            return descendants[pos - ancestor_count - 1];
+        }
+
+        fn skipForeignContext(root: SkipOpenTag, descendants: []const SkipOpenTag) bool {
+            const open = if (descendants.len != 0) descendants[descendants.len - 1] else root;
             if (!open.foreign) return false;
             return !(open.name.len == 13 and std.ascii.eqlIgnoreCase(open.name, "foreignObject"));
         }
@@ -725,6 +750,30 @@ test "streaming self-closing syntax closes SVG and MathML elements" {
     try std.testing.expectEqual(@as(?usize, 1), ctx.math_text_depth);
     try std.testing.expect(!ctx.implicit_g_end);
     try std.testing.expect(!ctx.implicit_mrow_end);
+}
+
+test "slash in unquoted foreign attribute value is not self-closing syntax" {
+    const Ctx = struct {
+        attr_ok: bool = false,
+        text_depth: ?u32 = null,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "g")) {
+                var it = ev.attributes();
+                const item = it.next() orelse return error.TestUnexpectedResult;
+                try std.testing.expectEqualStrings("data", item.nameSlice());
+                try std.testing.expectEqualStrings("x/", item.valueRaw().?);
+                self.attr_ok = true;
+            }
+            if (ev.kind == .text and std.mem.eql(u8, ev.valueSlice(), "inside")) self.text_depth = ev.depth;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<svg><g data=x/>inside</g></svg>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.attr_ok);
+    try std.testing.expectEqual(@as(?u32, 2), ctx.text_depth);
 }
 
 test "SVG foreignObject children use HTML self-closing rules" {
@@ -891,6 +940,59 @@ test "streaming parser keeps raw and escapable raw tag contents opaque" {
     try std.testing.expect(!ctx.nested_b);
 }
 
+test "streaming text-only and plaintext content has child depth" {
+    const Ctx = struct {
+        script_depth: ?u32 = null,
+        title_depth: ?u32 = null,
+        plaintext_depth: ?u32 = null,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .text) return true;
+            if (std.mem.eql(u8, ev.valueSlice(), "script-text")) self.script_depth = ev.depth;
+            if (std.mem.eql(u8, ev.valueSlice(), "title-text")) self.title_depth = ev.depth;
+            if (std.mem.eql(u8, ev.valueSlice(), "plain-text")) self.plaintext_depth = ev.depth;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(
+        std.testing.allocator,
+        "<main><script>script-text</script><title>title-text</title></main><plaintext>plain-text",
+        &ctx,
+        Ctx.cb,
+    );
+    try std.testing.expectEqual(@as(?u32, 2), ctx.script_depth);
+    try std.testing.expectEqual(@as(?u32, 2), ctx.title_depth);
+    try std.testing.expectEqual(@as(?u32, 1), ctx.plaintext_depth);
+}
+
+test "streaming unterminated text-only elements emit configurable implicit EOF ends" {
+    const Ctx = struct {
+        implicit_script_ends: usize = 0,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .end_tag and ev.implicit and std.mem.eql(u8, ev.nameSlice(), "script")) {
+                self.implicit_script_ends += 1;
+            }
+            return true;
+        }
+    };
+
+    var enabled: Ctx = .{};
+    try parse(std.testing.allocator, "<script>x", &enabled, Ctx.cb);
+    try std.testing.expectEqual(@as(usize, 1), enabled.implicit_script_ends);
+
+    var disabled: Ctx = .{};
+    try (Parser{ .options = .{ .emit_implicit_end_tags = false } }).parse(
+        std.testing.allocator,
+        "<script>x",
+        &disabled,
+        Ctx.cb,
+    );
+    try std.testing.expectEqual(@as(usize, 0), disabled.implicit_script_ends);
+}
+
 test "streaming parser callback can skip subtree" {
     const Ctx = struct {
         text_count: usize = 0,
@@ -905,6 +1007,23 @@ test "streaming parser callback can skip subtree" {
     var ctx: Ctx = .{};
     try parse(std.testing.allocator, "<main>a<section>skip<span>x</span></section>b</main>", &ctx, Ctx.cb);
     try std.testing.expectEqual(@as(usize, 2), ctx.text_count);
+}
+
+test "streaming leaf subtree skip does not allocate when nesting is disabled" {
+    const Ctx = struct {
+        fn cb(_: *@This(), ev: Event) !bool {
+            return ev.kind != .start_tag;
+        }
+    };
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var ctx: Ctx = .{};
+    try (Parser{ .options = .{ .track_nesting = false } }).parse(
+        failing.allocator(),
+        "<section>skip</section>",
+        &ctx,
+        Ctx.cb,
+    );
 }
 
 test "streaming subtree skip ends at an implicit optional close" {
@@ -1127,4 +1246,44 @@ test "streaming lazy closing snapshot handles stale reuse dirty suffix and long 
     try std.testing.expect(ctx.explicit_x);
     try std.testing.expect(ctx.implicit_long_y);
     try std.testing.expect(ctx.explicit_long_x);
+}
+
+test "unterminated end tag is discarded instead of emitted" {
+    const Ctx = struct {
+        ends: usize = 0,
+        implicit_ends: usize = 0,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .end_tag) {
+                self.ends += 1;
+                if (ev.implicit) self.implicit_ends += 1;
+            }
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<div>x</div", &ctx, Ctx.cb);
+    // The unfinished </div token is discarded; only EOF closes the open div.
+    try std.testing.expectEqual(@as(usize, 1), ctx.ends);
+    try std.testing.expectEqual(@as(usize, 1), ctx.implicit_ends);
+}
+
+test "plaintext start tag implicitly closes paragraph before text" {
+    const Ctx = struct {
+        text_depth: ?u32 = null,
+        p_closed: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .end_tag and ev.implicit and std.ascii.eqlIgnoreCase(ev.nameSlice(), "p")) self.p_closed = true;
+            if (ev.kind == .text and std.mem.eql(u8, ev.valueSlice(), "after")) self.text_depth = ev.depth;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<p>before<plaintext>after", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.p_closed);
+    // <p> has closed, so plaintext is at depth 0 and its text is at depth 1.
+    try std.testing.expectEqual(@as(?u32, 1), ctx.text_depth);
 }

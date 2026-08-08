@@ -79,6 +79,7 @@ const KEY = struct {
     const DT = litKey("dt");
     const DD = litKey("dd");
     const OPTION = litKey("option");
+    const OPTGROUP = litKey("optgroup");
     const TR = litKey("tr");
     const TD = litKey("td");
     const TH = litKey("th");
@@ -250,9 +251,12 @@ pub inline fn mayTriggerImplicitCloseWithKey(new_tag: []const u8, new_key: u64) 
             else => false,
         },
         8 => switch (new_key) {
-            KEY.FIELDSET => true,
+            KEY.FIELDSET,
+            KEY.OPTGROUP,
+            => true,
             else => false,
         },
+        9 => new_key == KEY.PLAINTEXT and std.ascii.toLower(new_tag[8]) == 't',
         10 => switch (new_key) {
             KEY.BLOCKQUOTE => std.ascii.toLower(new_tag[8]) == 't' and std.ascii.toLower(new_tag[9]) == 'e',
             KEY.FIGCAPTION => std.ascii.toLower(new_tag[8]) == 'o' and std.ascii.toLower(new_tag[9]) == 'n',
@@ -284,6 +288,10 @@ pub fn isImplicitCloseSourceWithLenAndKey(open_tag_len: usize, open_key: u64) bo
             KEY.OPTION => true,
             else => false,
         },
+        8 => switch (open_key) {
+            KEY.OPTGROUP => true,
+            else => false,
+        },
         else => false,
     };
 }
@@ -309,7 +317,11 @@ pub fn shouldImplicitlyCloseWithLenAndKey(open_tag_len: usize, open_key: u64, ne
             else => false,
         },
         6 => switch (open_key) {
-            KEY.OPTION => new_key == KEY.OPTION,
+            KEY.OPTION => new_key == KEY.OPTION or new_key == KEY.OPTGROUP or new_key == KEY.HR,
+            else => false,
+        },
+        8 => switch (open_key) {
+            KEY.OPTGROUP => new_key == KEY.OPTGROUP or new_key == KEY.HR,
             else => false,
         },
         else => false,
@@ -340,6 +352,7 @@ pub const ImplicitCloseScope = struct {
             },
             4 => if (source_key == KEY.HEAD) !self.regular else true,
             6 => if (source_key == KEY.OPTION) !self.select else true,
+            8 => if (source_key == KEY.OPTGROUP) !self.select else true,
             else => true,
         };
     }
@@ -432,6 +445,7 @@ fn closesPWithKey(new_tag: []const u8, new_key: u64) bool {
             KEY.FIELDSET => true,
             else => false,
         },
+        9 => new_key == KEY.PLAINTEXT and std.ascii.toLower(new_tag[8]) == 't',
         10 => switch (new_key) {
             KEY.BLOCKQUOTE => std.ascii.toLower(new_tag[8]) == 't' and std.ascii.toLower(new_tag[9]) == 'e',
             KEY.FIGCAPTION => std.ascii.toLower(new_tag[8]) == 'o' and std.ascii.toLower(new_tag[9]) == 'n',
@@ -471,6 +485,11 @@ test "tag helpers on canonical lowercase names" {
     try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "hgroup", KEY.HGROUP));
     try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "menu", KEY.MENU));
     try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "search", KEY.SEARCH));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("option", KEY.OPTION, "optgroup", KEY.OPTGROUP));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("option", KEY.OPTION, "hr", KEY.HR));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("optgroup", KEY.OPTGROUP, "optgroup", KEY.OPTGROUP));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("optgroup", KEY.OPTGROUP, "hr", KEY.HR));
+    try std.testing.expect(shouldImplicitlyCloseWithKeys("p", KEY.P, "plaintext", KEY.PLAINTEXT));
 }
 
 test "first8KeyWithMode canonicalizes only in non-destructive mode" {

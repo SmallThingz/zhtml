@@ -57,7 +57,11 @@ pub fn scanAttrNameOrSkip(source: []const u8, end: usize, start: usize) ScanAttr
     std.debug.assert(end <= source.len);
     std.debug.assert(start < end);
     const c = source[start];
-    if (c == '>' or c == '/') return .{ .name = null, .next_start = start };
+    if (c == '>') return .{ .name = null, .next_start = start };
+    if (c == '/') {
+        if (start + 1 >= end or source[start + 1] == '>') return .{ .name = null, .next_start = start };
+        return .{ .name = "", .next_start = start + 1 };
+    }
 
     var i = start;
     const name_start = i;
@@ -158,7 +162,8 @@ pub const RawIterator = struct {
                 return .{ .source = self.source, .name = name, .name_start = name_start, .value = raw };
             }
 
-            const terminates = self.source[delim] == '>' or self.source[delim] == '/';
+            const terminates = self.source[delim] == '>' or
+                (self.source[delim] == '/' and delim + 1 < self.end and self.source[delim + 1] == '>');
             const next_pos = if (terminates) self.end else if (delim == self.cursor) self.cursor + 1 else delim;
             self.cursor = next_pos;
             return .{
@@ -236,7 +241,12 @@ fn rawCompactMarker(raw: RawValue) CompactValueMarker {
 /// and the quote/slash markers identify raw values requiring decode fallback.
 /// Empty assignments and valueless attributes both use `nameNUL`.
 pub fn materializeAttributes(comptime entity_decoding: entities.EntityDecoding, source: []u8, name_end: usize) void {
-    if (name_end >= source.len or !tables.WhitespaceTable[source[name_end]]) return;
+    if (name_end >= source.len) return;
+    // Normal attributes begin after whitespace. A slash that is not immediately
+    // followed by `>` is HTML tokenizer recovery into the before-attribute-name
+    // state (`<div/id=x>`), and must be compacted too. Any other non-whitespace
+    // byte at `name_end` means this tag was already compacted in place.
+    if (!tables.WhitespaceTable[source[name_end]] and source[name_end] != '/') return;
 
     var write = name_end;
     var it: RawIterator = .{ .source = source, .cursor = name_end, .end = source.len };
@@ -262,7 +272,9 @@ pub fn materializeAttributes(comptime entity_decoding: entities.EntityDecoding, 
                     source[write] = @intFromEnum(rawCompactMarker(raw));
                     write += 1;
                     std.mem.copyForwards(u8, source[write .. write + raw_slice.len], raw_slice);
-                    for (source[write .. write + raw_slice.len]) |*b| if (b.* == 0) b.* = ' ';
+                    for (source[write .. write + raw_slice.len]) |*b| {
+                        if (b.* == 0) b.* = ' ';
+                    }
                     write += raw_slice.len;
                 }
             }
@@ -413,7 +425,10 @@ inline fn getAttrValueSingle(doc: anytype, node: anytype, name: []const u8, allo
     // Read-only documents must keep using the raw scanner even when malformed
     // bytes appear immediately after the tag name.
     if (comptime !hasConstSource(@TypeOf(doc.*))) {
-        if (!tables.WhitespaceTable[source[start]]) {
+        // A compact list always starts with an attribute-name byte (or `>` for
+        // no attributes). A raw slash at name_end is tokenizer recovery or the
+        // self-closing marker, not one of our compact value markers.
+        if (!tables.WhitespaceTable[source[start]] and source[start] != '/') {
             const value = getCompactAttrValue(source, start, name) orelse return null;
             return .{ .value = value };
         }
@@ -498,6 +513,53 @@ test "scanAttrNameOrSkip handles terminators and skips non-name bytes" {
         const scanned = scanAttrNameOrSkip(src, src.len, i);
         try testing.expect(scanned.name == null);
     }
+}
+
+test "destructive materialization recovers attributes after tag-name slash" {
+    var source = "div/id=x>".*;
+    materializeAttributes(.full, &source, 3);
+
+    var it: CompactIterator = .{ .source = &source, .cursor = 3 };
+    const id = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("id", id.name);
+    try std.testing.expectEqualStrings("x", id.value.?);
+    try std.testing.expect(it.next() == null);
+}
+
+test "destructive raw lookup does not confuse recovery slash with compact marker" {
+    const FakeDoc = struct {
+        const Options = struct {
+            const entity_decoding: entities.EntityDecoding = .common;
+        };
+        source: []u8,
+    };
+    const FakeNode = struct {
+        name_or_text: common.Span,
+    };
+    var source = "div/id=x>".*;
+    var doc = FakeDoc{ .source = &source };
+    const node = FakeNode{ .name_or_text = .{ .start = 0, .len = 3 } };
+
+    const result = try getAttrValueSingle(&doc, node, "id", undefined, .raw);
+    try std.testing.expectEqualStrings("x", result.?.value);
+}
+
+test "raw iterator recovers after stray slash between attributes" {
+    const source = " / id=x a / b=y>";
+    var it: RawIterator = .{ .source = source, .cursor = 0, .end = source.len };
+
+    const id = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("id", id.name);
+    try std.testing.expectEqualStrings("x", id.valueRaw().?);
+
+    const a = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a", a.name);
+    try std.testing.expect(a.value == null);
+
+    const b = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("b", b.name);
+    try std.testing.expectEqualStrings("y", b.valueRaw().?);
+    try std.testing.expect(it.next() == null);
 }
 
 test "scanAttrNameOrSkip accepts framework attribute punctuation" {
