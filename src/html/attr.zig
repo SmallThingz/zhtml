@@ -6,6 +6,7 @@ test {
 }
 const tables = @import("tables.zig");
 const entities = @import("entities.zig");
+const scanner = @import("scanner.zig");
 const common = @import("../common.zig");
 
 pub const RawKind = enum {
@@ -63,8 +64,11 @@ pub fn scanAttrNameOrSkip(source: []const u8, end: usize, start: usize) ScanAttr
         return .{ .name = "", .next_start = start + 1 };
     }
 
-    var i = start;
-    const name_start = i;
+    const name_start = start;
+    // In before-attribute-name state a leading `=` is a parse error but still
+    // becomes the first byte of the attribute name. A later `=` is the normal
+    // value delimiter, so only the first byte gets this special treatment.
+    var i = start + @intFromBool(c == '=');
     while (i < end and tables.AttrNameCharTable[source[i]]) : (i += 1) {}
     if (i == name_start) {
         return .{ .name = "", .next_start = i + 1 };
@@ -202,9 +206,23 @@ pub const CompactAttribute = struct {
 pub const CompactIterator = struct {
     source: []const u8,
     cursor: usize,
+    raw_tail: ?RawIterator = null,
 
     pub fn next(self: *@This()) ?CompactAttribute {
+        if (self.raw_tail) |*raw_it| return rawTailNext(raw_it);
         if (self.cursor >= self.source.len or self.source[self.cursor] == '>') return null;
+
+        // A zero byte where a compact name would start marks a malformed-name
+        // raw tail. Materialization switches to this representation only when
+        // a recovered HTML attribute name contains one of the compact value
+        // marker bytes (`=`, `'`, or `"`). Keeping the tail raw avoids either
+        // escaping/growing names in place or pre-scanning every normal tag.
+        if (self.source[self.cursor] == 0) {
+            self.cursor += 1;
+            self.raw_tail = .{ .source = self.source, .cursor = self.cursor, .end = self.source.len };
+            return rawTailNext(&self.raw_tail.?);
+        }
+
         const name_start = self.cursor;
         while (self.cursor < self.source.len and !isCompactValueDelimiter(self.source[self.cursor]) and self.source[self.cursor] != 0 and self.source[self.cursor] != '>') : (self.cursor += 1) {}
         if (self.cursor >= self.source.len or self.source[self.cursor] == '>') return null;
@@ -221,6 +239,20 @@ pub const CompactIterator = struct {
         const value = self.source[value_start..self.cursor];
         self.cursor += 1;
         return .{ .name = name, .value = value, .marker = marker };
+    }
+
+    fn rawTailNext(raw_it: *RawIterator) ?CompactAttribute {
+        const item = raw_it.next() orelse return null;
+        const raw = item.value orelse return .{ .name = item.name, .value = null };
+        // Destructive compaction intentionally collapses both valueless and
+        // explicitly empty assignments. Raw-tail fallback must preserve that
+        // public behavior for quoted-empty values as well as `name=`.
+        if (raw.kind == .empty or raw.end == raw.start) return .{ .name = item.name, .value = null };
+        return .{
+            .name = item.name,
+            .value = item.valueRaw(),
+            .marker = rawCompactMarker(raw),
+        };
     }
 };
 
@@ -251,12 +283,23 @@ pub fn materializeAttributes(comptime entity_decoding: entities.EntityDecoding, 
     var write = name_end;
     var it: RawIterator = .{ .source = source, .cursor = name_end, .end = source.len };
     while (it.next()) |item| {
+        const name_write = write;
+        if (std.mem.indexOfAny(u8, item.name, "=/'\"") != null) {
+            // `write` is always before this raw attribute: at least one HTML
+            // separator or recovery slash preceded its name. Preserve the
+            // malformed attribute and everything after it as raw syntax, moved
+            // left behind a zero-byte mode switch. Detect this before copying
+            // the name because the normal left-shift may overlap its source.
+            const tag_end = scanner.findTagEnd(source, item.name_start) orelse source.len - 1;
+            const tail_len = @min(source.len, tag_end + 1) - item.name_start;
+            source[name_write] = 0;
+            std.mem.copyForwards(u8, source[name_write + 1 .. name_write + 1 + tail_len], source[item.name_start .. item.name_start + tail_len]);
+            return;
+        }
+
         const bad_first_utf8 = invalidUtf8First(item.name);
         std.mem.copyForwards(u8, source[write .. write + item.name.len], item.name);
         if (bad_first_utf8) source[write] = 0x01;
-        for (source[write .. write + item.name.len]) |*b| {
-            if (b.* == 0) b.* = 0x01;
-        }
         write += item.name.len;
 
         if (item.value) |raw| {
@@ -498,8 +541,8 @@ test "scanAttrNameOrSkip handles terminators and skips non-name bytes" {
         const scanned = scanAttrNameOrSkip(src, src.len, i);
         const name = scanned.name orelse return error.UnexpectedNull;
         i = scanned.next_start;
-        try testing.expectEqual(@as(usize, 0), name.len);
-        try testing.expectEqual(@as(usize, 1), i);
+        try testing.expectEqualStrings("=a", name);
+        try testing.expectEqual(src.len, i);
     }
     {
         const src = ">";
@@ -559,6 +602,88 @@ test "raw iterator recovers after stray slash between attributes" {
     const b = it.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("b", b.name);
     try std.testing.expectEqualStrings("y", b.valueRaw().?);
+    try std.testing.expect(it.next() == null);
+}
+
+test "raw iterator preserves parse-error bytes in attribute names" {
+    const source = " a\"b=x =lead=y ctl\x01name=z>";
+    var it: RawIterator = .{ .source = source, .cursor = 0, .end = source.len };
+
+    const quoted = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a\"b", quoted.name);
+    try std.testing.expectEqualStrings("x", quoted.valueRaw().?);
+
+    const leading_equal = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("=lead", leading_equal.name);
+    try std.testing.expectEqualStrings("y", leading_equal.valueRaw().?);
+
+    const control = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("ctl\x01name", control.name);
+    try std.testing.expectEqualStrings("z", control.valueRaw().?);
+    try std.testing.expect(it.next() == null);
+}
+
+test "destructive compaction falls back to raw tail for marker-colliding names" {
+    var source = "div ok=v a\"b=x =lead=y tail=z>".*;
+    materializeAttributes(.common, &source, 3);
+
+    var it: CompactIterator = .{ .source = &source, .cursor = 3 };
+    const ok = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("ok", ok.name);
+    try std.testing.expectEqualStrings("v", ok.value.?);
+    try std.testing.expect(ok.isDecoded());
+
+    const quoted = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a\"b", quoted.name);
+    try std.testing.expectEqualStrings("x", quoted.value.?);
+    try std.testing.expect(!quoted.isDecoded());
+
+    const leading_equal = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("=lead", leading_equal.name);
+    try std.testing.expectEqualStrings("y", leading_equal.value.?);
+
+    const tail = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("tail", tail.name);
+    try std.testing.expectEqualStrings("z", tail.value.?);
+    try std.testing.expect(it.next() == null);
+
+    // Re-materialization must recognize the raw-tail sentinel and be idempotent.
+    const once = source;
+    materializeAttributes(.common, &source, 3);
+    try std.testing.expectEqualSlices(u8, &once, &source);
+}
+
+test "destructive raw-tail fallback can begin at the first attribute" {
+    var source = "div a'b=x plain=y>".*;
+    materializeAttributes(.common, &source, 3);
+    try std.testing.expectEqual(@as(u8, 0), source[3]);
+
+    var it: CompactIterator = .{ .source = &source, .cursor = 3 };
+    const malformed = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a'b", malformed.name);
+    try std.testing.expectEqualStrings("x", malformed.value.?);
+    const plain = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("plain", plain.name);
+    try std.testing.expectEqualStrings("y", plain.value.?);
+    try std.testing.expect(it.next() == null);
+}
+
+test "destructive raw-tail fallback collapses quoted-empty assignments" {
+    var source = "div =lead=\"\" a'b='' tail=z>".*;
+    materializeAttributes(.common, &source, 3);
+
+    var it: CompactIterator = .{ .source = &source, .cursor = 3 };
+    const leading_equal = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("=lead", leading_equal.name);
+    try std.testing.expect(leading_equal.value == null);
+
+    const quoted_name = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a'b", quoted_name.name);
+    try std.testing.expect(quoted_name.value == null);
+
+    const tail = it.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("tail", tail.name);
+    try std.testing.expectEqualStrings("z", tail.value.?);
     try std.testing.expect(it.next() == null);
 }
 

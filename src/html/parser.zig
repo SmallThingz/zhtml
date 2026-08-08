@@ -486,32 +486,8 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         fn skipComment(noalias self: *Self) void {
-            self.i += 4;
-            if (self.i < self.input.len and self.input[self.i] == '>') {
-                // Fast-path malformed short comment form: "<!-->"
-                self.i += 1;
-                return;
-            }
-            if (self.i + 1 < self.input.len and self.input[self.i] == '-' and self.input[self.i + 1] == '>') {
-                // Fast-path malformed short comment form: "<!--->"
-                self.i += 2;
-                return;
-            }
-
-            var j = self.i;
-            while (j + 2 < self.input.len) {
-                const dash = std.mem.indexOfScalarPos(u8, self.input, j, '-') orelse {
-                    @branchHint(.cold);
-                    self.i = self.input.len;
-                    return;
-                };
-                if (dash + 2 < self.input.len and self.input[dash + 1] == '-' and self.input[dash + 2] == '>') {
-                    self.i = dash + 3;
-                    return;
-                }
-                j = dash + 1;
-            }
-            self.i = self.input.len;
+            const close = scanner.findCommentClose(self.input, self.i + 4);
+            self.i = close.token_end;
         }
 
         fn skipBangNode(noalias self: *Self) void {
@@ -633,16 +609,21 @@ fn resetParsed(comptime options: ParseOptions, doc: *options.Document(), input: 
     doc.* = try options.parse(doc.allocator, input);
 }
 
-test "malformed short comment does not swallow following nodes" {
+test "malformed comment closes do not swallow following nodes" {
     const alloc = std.testing.allocator;
-    var html = "<!---><div id=x></div>".*;
+    const cases = [_][]const u8{ "<!-->", "<!--->", "<!--x--!>" };
 
-    var doc = TestDocument.init(alloc);
-    defer doc.deinit();
-    try resetParsed(DefaultTestOptions, &doc, &html);
+    for (cases) |prefix| {
+        var buf: [64]u8 = undefined;
+        const html_slice = try std.fmt.bufPrint(&buf, "{s}<div id=x></div>", .{prefix});
+        var doc = TestDocument.init(alloc);
+        defer doc.deinit();
+        try resetParsed(DefaultTestOptions, &doc, html_slice);
 
-    var iter = doc.query("div");
-    try std.testing.expect(try iter.next() != null);
+        var iter = doc.query("div");
+        defer iter.deinit();
+        try std.testing.expect(try iter.next() != null);
+    }
 }
 
 fn expectDocumentStructureValid(doc: anytype) !void {

@@ -179,6 +179,9 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
             const tag = self.scanTagName(self.i);
             if (tag.end == tag.start) {
+                // HTML's data-state `<` is emitted as text when the following
+                // byte cannot start a tag, then that byte is reconsumed.
+                if (self.options.emit_text) try self.emitText(token_start, token_start + 1);
                 self.i = token_start + 1;
                 return;
             }
@@ -312,16 +315,15 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             if (self.i + 3 < self.source.len and self.source[self.i + 2] == '-' and self.source[self.i + 3] == '-') {
                 const start = self.i;
                 const content_start = self.i + 4;
-                const end_marker = std.mem.indexOfPos(u8, self.source, content_start, "-->") orelse self.source.len;
-                const token_end = if (end_marker < self.source.len) end_marker + 3 else self.source.len;
-                self.i = token_end;
+                const close = scanner.findCommentClose(self.source, content_start);
+                self.i = close.token_end;
                 if (self.options.include_comments) {
                     _ = try callback(self.ctx, .{
                         .source = self.source,
                         .kind = .comment,
                         .depth = self.currentDepth(),
-                        .value = .{ .start = @intCast(content_start), .len = @intCast(end_marker - content_start) },
-                        .token = .{ .start = @intCast(start), .len = @intCast(token_end - start) },
+                        .value = .{ .start = @intCast(content_start), .len = @intCast(close.content_end - content_start) },
+                        .token = .{ .start = @intCast(start), .len = @intCast(close.token_end - start) },
                     });
                 }
                 return;
@@ -519,7 +521,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 if (lt + 1 >= self.source.len) return self.source.len;
 
                 if (std.mem.startsWith(u8, self.source[lt..], "<!--")) {
-                    i = if (std.mem.indexOfPos(u8, self.source, lt + 4, "-->")) |close_end| close_end + 3 else self.source.len;
+                    i = scanner.findCommentClose(self.source, lt + 4).token_end;
                     continue;
                 }
 
@@ -832,6 +834,80 @@ test "streaming attribute iterator accepts framework attribute names" {
     try std.testing.expect(ctx.checked);
 }
 
+test "streaming malformed comment closes preserve payload and following tags" {
+    const Ctx = struct {
+        expected_comment: []const u8,
+        saw_comment: bool = false,
+        saw_div: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            switch (ev.kind) {
+                .comment => {
+                    try std.testing.expectEqualStrings(self.expected_comment, ev.valueSlice());
+                    self.saw_comment = true;
+                },
+                .start_tag => if (std.mem.eql(u8, ev.nameSlice(), "div")) {
+                    self.saw_div = true;
+                },
+                else => {},
+            }
+            return true;
+        }
+    };
+
+    const cases = [_]struct { source: []const u8, comment: []const u8 }{
+        .{ .source = "<!--><div></div>", .comment = "" },
+        .{ .source = "<!---><div></div>", .comment = "" },
+        .{ .source = "<!--x--!><div></div>", .comment = "x" },
+    };
+    for (cases) |case| {
+        var ctx = Ctx{ .expected_comment = case.comment };
+        try (Parser{ .options = .{ .include_comments = true } }).parse(std.testing.allocator, case.source, &ctx, Ctx.cb);
+        try std.testing.expect(ctx.saw_comment);
+        try std.testing.expect(ctx.saw_div);
+    }
+}
+
+test "streaming invalid start-tag opener reconsumes as text" {
+    const Ctx = struct {
+        text: std.ArrayList(u8) = .empty,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .text) try self.text.appendSlice(std.testing.allocator, ev.valueSlice());
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    defer ctx.text.deinit(std.testing.allocator);
+    try parse(std.testing.allocator, "< foo", &ctx, Ctx.cb);
+    try std.testing.expectEqualStrings("< foo", ctx.text.items);
+}
+
+test "streaming attribute iterator preserves parse-error name bytes" {
+    const Ctx = struct {
+        checked: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .start_tag) return true;
+            var it = ev.attributes();
+            const quoted = it.next() orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("a\"b", quoted.nameSlice());
+            try std.testing.expectEqualStrings("x", quoted.valueRaw().?);
+            const leading_equal = it.next() orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("=lead", leading_equal.nameSlice());
+            try std.testing.expectEqualStrings("y", leading_equal.valueRaw().?);
+            try std.testing.expect(it.next() == null);
+            self.checked = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<div a\"b=x =lead=y>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.checked);
+}
+
 test "streaming parser handles raw text comments and implicit closes" {
     const Ctx = struct {
         starts: usize = 0,
@@ -1089,6 +1165,23 @@ test "streaming subtree skip respects nested list scope" {
     try parse(std.testing.allocator, "<ul><li><ul><li>inner</li></ul>tail<li>next</ul>", &ctx, Ctx.cb);
     // Outer LI and its next sibling are visible; the nested LI stays skipped.
     try std.testing.expectEqual(@as(usize, 2), ctx.li_starts);
+}
+
+test "streaming skipped subtree respects malformed comment close" {
+    const Ctx = struct {
+        saw_after: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .start_tag) return true;
+            if (std.mem.eql(u8, ev.nameSlice(), "skip")) return false;
+            if (std.mem.eql(u8, ev.nameSlice(), "after")) self.saw_after = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<skip><!--x--!><i></i></skip><after></after>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.saw_after);
 }
 
 test "streaming parser skip subtree treats raw text as opaque" {

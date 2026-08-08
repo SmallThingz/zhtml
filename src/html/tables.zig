@@ -34,7 +34,7 @@ fn isTagNameChar(c: u8) bool {
 /// Returns whether byte is consumed by the HTML attribute-name state.
 /// Attribute names are blacklist-based so framework punctuation remains valid.
 fn isAttrNameChar(c: u8) bool {
-    return c >= 0x21 and c != 0x7f and c != '"' and c != '\'' and c != '>' and c != '/' and c != '=';
+    return !isWhitespace(c) and c != 0 and c != '>' and c != '/' and c != '=';
 }
 
 /// Precomputed whitespace classification table.
@@ -78,10 +78,10 @@ test "tag name state includes < and excludes delimiters" {
     try std.testing.expect(!isTagNameChar(' '));
 }
 
-test "attribute name state accepts framework punctuation and rejects delimiters" {
-    for ("@*()[]:.-_") |c| try std.testing.expect(isAttrNameChar(c));
-    for ([_]u8{ ' ', '\t', '\n', '\r', '\x0c', '"', '\'', '>', '/', '=', 0, 0x1f, 0x7f }) |c| {
+test "attribute name state accepts parse-error data and rejects tokenizer delimiters" {
+    for ("@*()[]:.-_\"'<") |c| try std.testing.expect(isAttrNameChar(c));
+    for ([_]u8{ 0x01, 0x1f, 0x7f, 0x80 }) |c| try std.testing.expect(isAttrNameChar(c));
+    for ([_]u8{ ' ', '\t', '\n', '\r', '\x0c', '>', '/', '=', 0 }) |c| {
         try std.testing.expect(!isAttrNameChar(c));
     }
-    try std.testing.expect(isAttrNameChar(0x80));
 }

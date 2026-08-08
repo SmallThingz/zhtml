@@ -132,7 +132,7 @@ All examples are verified by running `zig build examples-check`
 - non-destructive parsing avoids a full-source copy and instead moves lazy attr/text decoding out of the input buffer
 - nodes are stored in one contiguous array and linked by indexes rather than pointers to keep traversal cache-friendly and make `-Dintlen` effective
 - attribute storage stays span-based instead of building heap objects so parse cost scales with actual queries, not attribute count
-- destructive attribute lists use `name<marker>valueNUL ... >`; `=` marks an in-place decoded value, while `/`, `'`, and `"` mark raw expanding values that originally used naked, single-quoted, and double-quoted syntax; empty assignments collapse to valueless attributes
+- destructive attribute lists normally use `name<marker>valueNUL ... >`; `=` marks an in-place decoded value, while `/`, `'`, and `"` mark raw expanding values that originally used naked, single-quoted, and double-quoted syntax; empty assignments collapse to valueless attributes. A NUL where the next compact name would begin switches the malformed remainder of that tag back to raw attribute syntax when a recovered attribute name itself contains a marker byte.
 - compact values may contain whitespace, `>`, `/`, `=`, and malformed UTF-8 because only NUL terminates them
 - destructive decoding changes literal NUL bytes to spaces and numeric NUL references to U+FFFD; malformed leading UTF-8 bytes in attribute names are replaced with an internal marker
 - tag and attribute names use delimiter blacklists rather than identifier whitelists, allowing framework names such as `@click`, `*ngIf`, `(change)`, and `[value]`

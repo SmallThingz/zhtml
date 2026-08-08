@@ -1383,6 +1383,36 @@ test "non-destructive parse preserves caller bytes and formats exact original so
     try std.testing.expectEqualStrings(before[0..], rendered);
 }
 
+test "destructive attribute APIs preserve marker-colliding recovered names" {
+    const alloc = std.testing.allocator;
+    var html = "<div ok=v a\"b=x =lead='y&amp;z' tail=t></div>".*;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    try resetParsed(.{}, &doc, &html);
+
+    const node = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
+    const ok = (try node.getAttributeValue(alloc, "ok")) orelse return error.TestUnexpectedResult;
+    defer ok.free(alloc);
+    try std.testing.expectEqualStrings("v", ok.value);
+
+    const quoted = (try node.getAttributeValue(alloc, "a\"b")) orelse return error.TestUnexpectedResult;
+    defer quoted.free(alloc);
+    try std.testing.expectEqualStrings("x", quoted.value);
+
+    const leading = (try node.getAttributeValue(alloc, "=lead")) orelse return error.TestUnexpectedResult;
+    defer leading.free(alloc);
+    try std.testing.expectEqualStrings("y&z", leading.value);
+
+    const tail = (try node.getAttributeValue(alloc, "tail")) orelse return error.TestUnexpectedResult;
+    defer tail.free(alloc);
+    try std.testing.expectEqualStrings("t", tail.value);
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try node.writeHtml(&out.writer, .never);
+    try std.testing.expectEqualStrings("<div ok=\"v\" a\"b=\"x\" =lead=\"y&amp;z\" tail=\"t\"></div>", out.written());
+}
+
 test "non-destructive attribute reads do not rewrite attribute bytes" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{ .non_destructive = true }).init(alloc);

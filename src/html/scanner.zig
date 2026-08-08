@@ -19,6 +19,13 @@ pub const RawTextClose = struct {
     close_end: usize,
 };
 
+pub const CommentClose = struct {
+    /// Exclusive end of the comment payload.
+    content_end: usize,
+    /// Exclusive end of the complete comment token.
+    token_end: usize,
+};
+
 /// Scans an HTML tag name and builds its lowercase first-eight-byte key.
 /// Destructive DOM parsing specializes `normalize_first8` to true and
 /// canonicalizes the complete name; streaming parsing specializes it to false
@@ -212,6 +219,38 @@ pub fn isSelfClosingStartTag(source: []const u8, name_end: usize, tag_end: usize
     };
 }
 
+/// Finds the end of an HTML comment whose payload begins at `content_start`
+/// (immediately after `<!--`). This recognizes the tokenizer's abrupt empty
+/// closes (`<!-->` and `<!--->`), normal `-->`, and the parse-error close
+/// `--!>`. At EOF both returned positions equal `source.len`.
+pub inline fn findCommentClose(source: []const u8, content_start: usize) CommentClose {
+    if (content_start >= source.len) return .{ .content_end = source.len, .token_end = source.len };
+
+    // Comment-start and comment-start-dash states have two short malformed
+    // forms which close without contributing bytes to the comment payload.
+    if (source[content_start] == '>') {
+        return .{ .content_end = content_start, .token_end = content_start + 1 };
+    }
+    if (content_start + 1 < source.len and source[content_start] == '-' and source[content_start + 1] == '>') {
+        return .{ .content_end = content_start, .token_end = content_start + 2 };
+    }
+
+    var search = content_start;
+    while (std.mem.indexOfPos(u8, source, search, "--")) |dashes| {
+        const after = dashes + 2;
+        if (after < source.len and source[after] == '>') {
+            return .{ .content_end = dashes, .token_end = after + 1 };
+        }
+        if (after + 1 < source.len and source[after] == '!' and source[after + 1] == '>') {
+            return .{ .content_end = dashes, .token_end = after + 2 };
+        }
+        // Overlapping pairs matter for runs such as `--->`.
+        search = dashes + 1;
+    }
+
+    return .{ .content_end = source.len, .token_end = source.len };
+}
+
 /// Finds an opaque declaration's closing `>`. Unlike normal attributes,
 /// declaration syntax can contain standalone quoted spans.
 pub inline fn findDeclarationEnd(source: []const u8, start: usize) ?usize {
@@ -294,6 +333,27 @@ test "self-closing marker excludes slash inside unquoted attribute values" {
     try std.testing.expect(!isSelfClosingStartTag("<x a=b/>", 2, 7));
     try std.testing.expect(!isSelfClosingStartTag("<x a=/>", 2, 6));
     try std.testing.expect(!isSelfClosingStartTag("<x a= />", 2, 7));
+}
+
+test "shared comment scanner handles abrupt and incorrectly closed comments" {
+    const cases = [_]struct {
+        source: []const u8,
+        content: []const u8,
+        tail: []const u8,
+    }{
+        .{ .source = "<!--><p>", .content = "", .tail = "<p>" },
+        .{ .source = "<!---><p>", .content = "", .tail = "<p>" },
+        .{ .source = "<!--x--><p>", .content = "x", .tail = "<p>" },
+        .{ .source = "<!--x--!><p>", .content = "x", .tail = "<p>" },
+        .{ .source = "<!--x---><p>", .content = "x-", .tail = "<p>" },
+        .{ .source = "<!--unterminated", .content = "unterminated", .tail = "" },
+    };
+
+    for (cases) |case| {
+        const close = findCommentClose(case.source, 4);
+        try std.testing.expectEqualStrings(case.content, case.source[4..close.content_end]);
+        try std.testing.expectEqualStrings(case.tail, case.source[close.token_end..]);
+    }
 }
 
 test "shared raw text close scanner handles case and spaced attributes" {
