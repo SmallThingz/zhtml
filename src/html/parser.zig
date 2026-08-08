@@ -337,7 +337,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 self.i = self.input.len;
             }
 
-            if (close_name.len == 0 or self.parse_stack.items.len == 0) { // same behavior as browser; skip this
+            if (close_name.len == 0 or self.parse_stack.items.len <= 1) { // root-only stack means there is nothing to close
                 @branchHint(.cold);
                 return;
             }

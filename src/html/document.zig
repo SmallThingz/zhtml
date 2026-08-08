@@ -583,15 +583,7 @@ fn GetNode(comptime options: ParseOptions) type {
                 var it: attr.CompactIterator = .{ .source = source, .cursor = i };
                 while (it.next()) |item| {
                     try writeAttrName(writer, item.name);
-                    if (item.value) |value| {
-                        if (comptime entity_encoding == .force) {
-                            try writer.writeAll("=\"");
-                            try writeEscapedAttrValue(writer, value);
-                            try writeByte(writer, '"');
-                        } else {
-                            try writeAttrValue(writer, value);
-                        }
-                    }
+                    if (item.value) |value| try writeAttrValue(writer, value);
                 }
                 return;
             }
