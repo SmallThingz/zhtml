@@ -45,11 +45,24 @@ pub const Decoded = struct {
     }
 };
 
+/// Result of an in-place decode attempt. `complete == false` means at least
+/// one character reference would expand beyond its source bytes; the input is
+/// left untouched so the caller can use an allocating fallback.
+pub const InPlaceResult = struct {
+    len: usize,
+    complete: bool = true,
+};
+
 pub fn decodeInPlaceWithMode(comptime mode: EntityDecoding, comptime normalize_whitespace: bool, slice: []u8) usize {
+    return decodeInPlaceResultWithMode(mode, normalize_whitespace, slice).len;
+}
+
+pub fn decodeInPlaceResultWithMode(comptime mode: EntityDecoding, comptime normalize_whitespace: bool, slice: []u8) InPlaceResult {
+    if (expansionExtraWithMode(mode, false, slice) != 0) return .{ .len = slice.len, .complete = false };
     const first = std.mem.indexOfScalar(u8, slice, '&') orelse {
-        return if (comptime normalize_whitespace) normalizeWhitespaceInPlace(slice) else slice.len;
+        return .{ .len = if (comptime normalize_whitespace) normalizeWhitespaceInPlace(slice) else slice.len };
     };
-    return decodeInPlaceFromMode(mode, normalize_whitespace, slice, first);
+    return .{ .len = decodeInPlaceFromMode(mode, normalize_whitespace, slice, first) };
 }
 
 pub fn firstDecodableEntityWithMode(comptime mode: EntityDecoding, comptime attribute: bool, slice: []const u8, start: usize) ?usize {
@@ -66,14 +79,39 @@ pub fn firstDecodableEntityWithMode(comptime mode: EntityDecoding, comptime attr
     return null;
 }
 
+/// Total number of additional bytes needed when all decodable references are
+/// expanded. Zero means the slice is safe for forward in-place decoding.
+pub fn expansionExtraWithMode(comptime mode: EntityDecoding, comptime attribute: bool, slice: []const u8) usize {
+    if (comptime mode != .full) return 0;
+    var extra: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, slice, i, '&')) |amp| {
+        if (decodeEntityWithMode(mode, attribute, slice[amp + 1 ..])) |decoded| {
+            const produced: usize = decoded.len;
+            const consumed: usize = decoded.consumed;
+            if (produced > consumed) extra += produced - consumed;
+            i = amp + consumed;
+        } else {
+            i = amp + 1;
+        }
+    }
+    return extra;
+}
+
 fn decodeInPlaceFromMode(comptime mode: EntityDecoding, comptime normalize_whitespace: bool, slice: []u8, first: usize) usize {
     std.debug.assert(first < slice.len);
     std.debug.assert(slice[first] == '&');
+    std.debug.assert(expansionExtraWithMode(mode, false, slice) == 0);
     if (comptime normalize_whitespace) return decodeNormalizeInPlaceFrom(slice, first, mode);
     return decodePlainInPlaceFrom(slice, first, false, mode, false);
 }
 
 pub fn decodeAttributeInPlaceWithMode(comptime mode: EntityDecoding, slice: []u8, first: ?usize) usize {
+    return decodeAttributeInPlaceResultWithMode(mode, slice, first).len;
+}
+
+pub fn decodeAttributeInPlaceResultWithMode(comptime mode: EntityDecoding, slice: []u8, first: ?usize) InPlaceResult {
+    if (expansionExtraWithMode(mode, true, slice) != 0) return .{ .len = slice.len, .complete = false };
     const new_len = if (first orelse firstDecodableEntityWithMode(mode, true, slice, 0)) |amp|
         decodePlainInPlaceFrom(slice, amp, false, mode, true)
     else
@@ -81,7 +119,52 @@ pub fn decodeAttributeInPlaceWithMode(comptime mode: EntityDecoding, slice: []u8
     for (slice[0..new_len]) |*c| {
         if (c.* == 0) c.* = ' ';
     }
-    return new_len;
+    return .{ .len = new_len };
+}
+
+/// Allocating decode path used only when a reference can expand or the caller
+/// already needs owned storage.
+pub fn decodeAllocWithMode(comptime mode: EntityDecoding, comptime attribute: bool, allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    const extra = expansionExtraWithMode(mode, attribute, input);
+    const capacity = try std.math.add(usize, input.len, extra);
+    var out = try std.ArrayList(u8).initCapacity(allocator, capacity);
+    errdefer out.deinit(allocator);
+
+    appendDecodedAssumeCapacityWithMode(mode, attribute, &out, input);
+    return try out.toOwnedSlice(allocator);
+}
+
+/// Appends a fully decoded slice to an ArrayList whose spare capacity is at
+/// least `input.len + expansionExtraWithMode(...)`. This is the allocation-free
+/// fallback used by callers which already own an output buffer.
+pub fn appendDecodedAssumeCapacityWithMode(
+    comptime mode: EntityDecoding,
+    comptime attribute: bool,
+    out: *std.ArrayList(u8),
+    input: []const u8,
+) void {
+    std.debug.assert(out.capacity - out.items.len >= input.len + expansionExtraWithMode(mode, attribute, input));
+
+    var i: usize = 0;
+    while (i < input.len) {
+        const c = input[i];
+        if (c != '&') {
+            if (comptime attribute) {
+                out.appendAssumeCapacity(if (c == 0) ' ' else c);
+            } else {
+                out.appendAssumeCapacity(c);
+            }
+            i += 1;
+            continue;
+        }
+        if (decodeEntityWithMode(mode, attribute, input[i + 1 ..])) |decoded| {
+            out.appendSliceAssumeCapacity(decoded.bytes[0..decoded.len]);
+            i += decoded.consumed;
+        } else {
+            out.appendAssumeCapacity('&');
+            i += 1;
+        }
+    }
 }
 
 fn decodePlainInPlaceFrom(slice: []u8, first: usize, comptime null_as_space: bool, comptime mode: EntityDecoding, comptime attribute: bool) usize {
@@ -254,33 +337,48 @@ pub fn decodeEntityWithMode(comptime mode: EntityDecoding, comptime attribute: b
         }
         return null;
     }
-    if (rem.len < 3) return null;
-
     return switch (rem[0]) {
-        'a' => if (rem.len >= 4 and rem[1] == 'm' and rem[2] == 'p' and rem[3] == ';')
-            literalDecoded(5, '&')
-        else if (rem.len >= 5 and rem[1] == 'p' and rem[2] == 'o' and rem[3] == 's' and rem[4] == ';')
-            literalDecoded(6, '\'')
+        'a' => matchNamedLiteral(attribute, rem, "amp", "&", true) orelse
+            matchNamedLiteral(attribute, rem, "apos", "'", false),
+        'l' => matchNamedLiteral(attribute, rem, "lt", "<", true),
+        'g' => matchNamedLiteral(attribute, rem, "gt", ">", true),
+        'q' => matchNamedLiteral(attribute, rem, "quot", "\"", true),
+        'n' => if (comptime mode == .common)
+            matchNamedLiteral(attribute, rem, "nbsp", "\xc2\xa0", true) orelse
+                matchNamedLiteral(attribute, rem, "ndash", "\xe2\x80\x93", false)
         else
             null,
-        'l' => if (rem[1] == 't' and rem[2] == ';') literalDecoded(4, '<') else null,
-        'g' => if (rem[1] == 't' and rem[2] == ';') literalDecoded(4, '>') else null,
-        'q' => if (rem.len >= 5 and rem[1] == 'u' and rem[2] == 'o' and rem[3] == 't' and rem[4] == ';') literalDecoded(6, '"') else null,
-        'n' => if (comptime mode == .common) if (std.mem.startsWith(u8, rem, "nbsp;")) bytesDecoded(6, "\xc2\xa0") else if (std.mem.startsWith(u8, rem, "ndash;")) bytesDecoded(7, "\xe2\x80\x93") else null else null,
-        'c' => if (comptime mode == .common) if (std.mem.startsWith(u8, rem, "copy;")) bytesDecoded(6, "\xc2\xa9") else null else null,
-        'r' => if (comptime mode == .common) if (std.mem.startsWith(u8, rem, "reg;")) bytesDecoded(5, "\xc2\xae") else null else null,
-        'm' => if (comptime mode == .common) if (std.mem.startsWith(u8, rem, "mdash;")) bytesDecoded(7, "\xe2\x80\x94") else null else null,
-        'h' => if (comptime mode == .common) if (std.mem.startsWith(u8, rem, "hellip;")) bytesDecoded(8, "\xe2\x80\xa6") else null else null,
+        'c' => if (comptime mode == .common) matchNamedLiteral(attribute, rem, "copy", "\xc2\xa9", true) else null,
+        'r' => if (comptime mode == .common) matchNamedLiteral(attribute, rem, "reg", "\xc2\xae", true) else null,
+        'm' => if (comptime mode == .common) matchNamedLiteral(attribute, rem, "mdash", "\xe2\x80\x94", false) else null,
+        'h' => if (comptime mode == .common) matchNamedLiteral(attribute, rem, "hellip", "\xe2\x80\xa6", false) else null,
         else => null,
     };
 }
 
-fn literalDecoded(consumed: usize, c: u8) Decoded {
-    return .{
-        .consumed = @intCast(consumed),
-        .bytes = .{ c, undefined, undefined, undefined, undefined, undefined },
-        .len = 1,
-    };
+/// Matches one hardcoded named reference. The basic legacy names plus nbsp/copy/reg
+/// have no-semicolon spellings in the WHATWG table. In attributes those
+/// legacy spellings are not references when followed by ASCII alphanumeric or `=`.
+fn matchNamedLiteral(
+    comptime attribute: bool,
+    rem: []const u8,
+    comptime name: []const u8,
+    comptime value: []const u8,
+    comptime legacy_no_semicolon: bool,
+) ?Decoded {
+    if (!std.mem.startsWith(u8, rem, name)) return null;
+    if (rem.len > name.len and rem[name.len] == ';') return bytesDecoded(name.len + 2, value);
+    if (comptime !legacy_no_semicolon) return null;
+    if (comptime attribute) {
+        if (rem.len > name.len) {
+            const next = rem[name.len];
+            const ascii_alnum = (next >= '0' and next <= '9') or
+                (next >= 'A' and next <= 'Z') or
+                (next >= 'a' and next <= 'z');
+            if (next == '=' or ascii_alnum) return null;
+        }
+    }
+    return bytesDecoded(name.len + 1, value);
 }
 
 fn bytesDecoded(consumed: usize, value: []const u8) Decoded {
@@ -309,67 +407,91 @@ const NumericDigitTable = blk: {
 };
 
 fn parseNumericDecimal(rem: []const u8) ?Decoded {
-    if (rem.len == 0) return null;
-
     var i: usize = 0;
-    while (i < rem.len and rem[i] == '0') : (i += 1) {}
-
-    var semi = i;
-    while (semi < rem.len and NumericDigitTable[rem[semi]] <= 9) : (semi += 1) {}
-    if (semi >= rem.len or rem[semi] != ';') return null;
-    const semi_rel = semi - i;
-    const consumed = semi + 3;
-    if (semi_rel == 0) return if (i == 0) replacementDecoded(consumed) else numericNullDecoded(consumed);
-    if (semi_rel > 7) return replacementDecoded(consumed);
-
     var value: u32 = 0;
-    while (i < semi) : (i += 1) {
-        const digit_u8 = NumericDigitTable[rem[i]];
-        if (digit_u8 > 9) return replacementDecoded(consumed);
-        value = value * 10 + digit_u8;
+    var too_large = false;
+    while (i < rem.len and NumericDigitTable[rem[i]] <= 9) : (i += 1) {
+        if (!too_large) {
+            const digit: u32 = NumericDigitTable[rem[i]];
+            if (value > (0x10ffff - digit) / 10) {
+                too_large = true;
+            } else {
+                value = value * 10 + digit;
+            }
+        }
     }
-
+    if (i == 0) return null;
+    const has_semicolon = i < rem.len and rem[i] == ';';
+    const consumed = i + 2 + @intFromBool(has_semicolon);
+    if (too_large) return replacementDecoded(consumed);
     return finishNumeric(value, consumed);
 }
 
 fn parseNumericHex(rem: []const u8) ?Decoded {
-    if (rem.len == 0) return null;
-
     var i: usize = 0;
-    while (i < rem.len and rem[i] == '0') : (i += 1) {}
-
-    var semi = i;
-    while (semi < rem.len and NumericDigitTable[rem[semi]] != InvalidDigit) : (semi += 1) {}
-    if (semi >= rem.len or rem[semi] != ';') return null;
-    const semi_rel = semi - i;
-    const consumed = semi + 4;
-    if (semi_rel == 0) return if (i == 0) replacementDecoded(consumed) else numericNullDecoded(consumed);
-    if (semi_rel > 6) return replacementDecoded(consumed);
-
     var value: u32 = 0;
-    while (i < semi) : (i += 1) {
-        const digit_u8 = NumericDigitTable[rem[i]];
-        if (digit_u8 == InvalidDigit) return replacementDecoded(consumed);
-        value = value * 16 + digit_u8;
+    var too_large = false;
+    while (i < rem.len and NumericDigitTable[rem[i]] != InvalidDigit) : (i += 1) {
+        if (!too_large) {
+            const digit: u32 = NumericDigitTable[rem[i]];
+            if (value > (0x10ffff - digit) / 16) {
+                too_large = true;
+            } else {
+                value = value * 16 + digit;
+            }
+        }
     }
-
+    if (i == 0) return null;
+    const has_semicolon = i < rem.len and rem[i] == ';';
+    const consumed = i + 3 + @intFromBool(has_semicolon);
+    if (too_large) return replacementDecoded(consumed);
     return finishNumeric(value, consumed);
 }
 
-inline fn finishNumeric(value: u32, consumed: usize) Decoded {
-    if (value == 0) return numericNullDecoded(consumed);
+inline fn finishNumeric(input_value: u32, consumed: usize) Decoded {
+    if (input_value == 0) return numericNullDecoded(consumed);
+    const value = legacyNumericCodepoint(input_value);
+    if (value > 0x10ffff or (value >= 0xd800 and value <= 0xdfff)) return replacementDecoded(consumed);
+
     var encoded: [4]u8 = undefined;
-    const codepoint = std.math.cast(u21, value) orelse {
-        @branchHint(.unlikely);
-        return replacementDecoded(consumed);
-    };
-    const len = std.unicode.utf8Encode(codepoint, &encoded) catch {
-        @branchHint(.unlikely);
-        return replacementDecoded(consumed);
-    };
+    const codepoint: u21 = @intCast(value);
+    const len = std.unicode.utf8Encode(codepoint, &encoded) catch return replacementDecoded(consumed);
     var out: [6]u8 = undefined;
     @memcpy(out[0..len], encoded[0..len]);
     return .{ .consumed = @intCast(consumed), .bytes = out, .len = len };
+}
+
+fn legacyNumericCodepoint(value: u32) u32 {
+    return switch (value) {
+        0x80 => 0x20ac,
+        0x82 => 0x201a,
+        0x83 => 0x0192,
+        0x84 => 0x201e,
+        0x85 => 0x2026,
+        0x86 => 0x2020,
+        0x87 => 0x2021,
+        0x88 => 0x02c6,
+        0x89 => 0x2030,
+        0x8a => 0x0160,
+        0x8b => 0x2039,
+        0x8c => 0x0152,
+        0x8e => 0x017d,
+        0x91 => 0x2018,
+        0x92 => 0x2019,
+        0x93 => 0x201c,
+        0x94 => 0x201d,
+        0x95 => 0x2022,
+        0x96 => 0x2013,
+        0x97 => 0x2014,
+        0x98 => 0x02dc,
+        0x99 => 0x2122,
+        0x9a => 0x0161,
+        0x9b => 0x203a,
+        0x9c => 0x0153,
+        0x9e => 0x017e,
+        0x9f => 0x0178,
+        else => value,
+    };
 }
 
 inline fn numericNullDecoded(consumed: usize) Decoded {
@@ -503,7 +625,13 @@ test "decode oversized numeric entities beyond fast digit windows" {
 test "decode numeric entities rejects missing digits" {
     var buf = "&#;&#x;&#X;".*;
     const n = decodeInPlaceWithMode(.common, false, &buf);
-    try std.testing.expectEqualSlices(u8, &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8, buf[0..n]);
+    try std.testing.expectEqualStrings("&#;&#x;&#X;", buf[0..n]);
+}
+
+test "decode numeric entities accepts a missing semicolon and remaps C1 controls" {
+    var buf = "&#65 &#x41 &#128;".*;
+    const n = decodeInPlaceWithMode(.common, false, &buf);
+    try std.testing.expectEqualStrings("A A \xe2\x82\xac", buf[0..n]);
 }
 
 test "decode numeric entities rejects null codepoint" {
@@ -574,6 +702,16 @@ test "decode entities keeps plain text unchanged" {
     try std.testing.expectEqualStrings("plain text", buf[0..n]);
 }
 
+test "legacy named references without semicolons follow text and attribute rules" {
+    var text = "&amp &lt &gt &quot &nbsp &copy &reg &apos".*;
+    const text_len = decodeInPlaceWithMode(.common, false, &text);
+    try std.testing.expectEqualStrings("& < > \" \xc2\xa0 \xc2\xa9 \xc2\xae &apos", text[0..text_len]);
+
+    var attribute = "&ampx &amp= &amp! &copycat &copy!".*;
+    const attr_len = decodeAttributeInPlaceWithMode(.common, &attribute, null);
+    try std.testing.expectEqualStrings("&ampx &amp= &! &copycat \xc2\xa9!", attribute[0..attr_len]);
+}
+
 test "common named entities decode without full table" {
     var buf = "&nbsp;&copy;&reg;&mdash;&ndash;&hellip;".*;
     const n = decodeInPlaceWithMode(.common, false, &buf);
@@ -590,6 +728,19 @@ test "full named entity mode decodes uncommon and two-codepoint values" {
     var buf = "&eacute; &NotNestedGreaterGreater;".*;
     const n = decodeInPlaceWithMode(.full, false, &buf);
     try std.testing.expectEqualStrings("\xc3\xa9 \xe2\xaa\xa2\xcc\xb8", buf[0..n]);
+}
+
+test "expanding full entities reject in-place decode transactionally" {
+    var buf = "x&nLt;y".*;
+    const before = buf;
+    const result = decodeInPlaceResultWithMode(.full, false, &buf);
+    try std.testing.expect(!result.complete);
+    try std.testing.expectEqual(before.len, result.len);
+    try std.testing.expectEqualSlices(u8, &before, &buf);
+
+    const decoded = try decodeAllocWithMode(.full, false, std.testing.allocator, &buf);
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expect(decoded.len > buf.len);
 }
 
 test "format decoded entity" {

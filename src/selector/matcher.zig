@@ -84,7 +84,7 @@ pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: 
 pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt, workspace: *MatchWorkspace) !bool {
     if (node_index >= doc.nodes.len) return false;
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
-    workspace.prepare(selector, scope_root);
+    workspace.prepare(selector, scope_root, @intFromPtr(doc), doc.generation);
 
     var has_existential = false;
     for (selector.groups) |group| {
@@ -108,7 +108,7 @@ pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Do
 /// Used once when seeding a scoped forward query from ancestors outside its scan.
 pub fn matchesPrefixAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, prefix_len: usize, node_index: IndexInt, workspace: *MatchWorkspace) !bool {
     if (prefix_len == 0 or prefix_len > group.compound_len or node_index >= doc.nodes.len) return false;
-    workspace.prepare(selector, InvalidIndex);
+    workspace.prepare(selector, InvalidIndex, @intFromPtr(doc), doc.generation);
     const partial: ast.Group = .{
         .compound_start = group.compound_start,
         .compound_len = @intCast(prefix_len),
@@ -143,6 +143,8 @@ pub const MatchWorkspace = struct {
     prepared_source: usize = 0,
     prepared_compounds: usize = 0,
     prepared_scope: IndexInt = InvalidIndex,
+    prepared_doc: usize = 0,
+    prepared_generation: u64 = 0,
     reverse_source: usize = 0,
     reverse_compounds: usize = 0,
 
@@ -175,13 +177,19 @@ pub const MatchWorkspace = struct {
         self.reverse_cell_nodes = .empty;
     }
 
-    fn prepare(self: *@This(), selector: ast.Selector, scope_root: IndexInt) void {
+    fn prepare(self: *@This(), selector: ast.Selector, scope_root: IndexInt, doc_id: usize, generation: u64) void {
         const source_id = @intFromPtr(selector.source.ptr);
         const compounds_id = @intFromPtr(selector.compounds.ptr);
-        if (self.prepared_source == source_id and self.prepared_compounds == compounds_id and self.prepared_scope == scope_root) return;
+        if (self.prepared_source == source_id and
+            self.prepared_compounds == compounds_id and
+            self.prepared_scope == scope_root and
+            self.prepared_doc == doc_id and
+            self.prepared_generation == generation) return;
         self.prepared_source = source_id;
         self.prepared_compounds = compounds_id;
         self.prepared_scope = scope_root;
+        self.prepared_doc = doc_id;
+        self.prepared_generation = generation;
         self.topology_prev.clearRetainingCapacity();
     }
 
@@ -796,7 +804,6 @@ fn hasAllClassesOnePass(selector: ast.Selector, comp: ast.Compound, class_attr: 
             if (std.mem.eql(u8, tok, cls)) {
                 found_mask |= bit;
                 if (found_mask == target_mask) return true;
-                break;
             }
         }
     }
@@ -857,8 +864,8 @@ fn attrValueByName(doc: anytype, node: anytype, allocator: std.mem.Allocator, no
     }
 
     probe.overflow = true;
-    // Fallback for very large compounds still stays allocation-free; we simply
-    // bypass memoization once the fixed probe budget is exhausted.
+    // Fallback for very large compounds bypasses memoization once the fixed probe
+    // budget is exhausted. Rare expanding entity values may use arena scratch.
     const result = try attr.getAttrValue(doc, node, name, allocator);
     return if (result) |r| r.value else null;
 }
@@ -1012,6 +1019,22 @@ test "matcher class one-pass requires every class token exactly" {
     try std.testing.expect(hasAllClassesOnePass(selector, comp, "foo foo bazed bar"));
     try std.testing.expect(!hasAllClassesOnePass(selector, comp, "foo bar baz"));
     try std.testing.expect(!hasAllClassesOnePass(selector, comp, "foobar bazed bar"));
+
+    const duplicate_classes = [_]ast.Range{
+        ast.Range.from(0, 3),
+        ast.Range.from(4, 7),
+    };
+    const duplicate_selector: ast.Selector = .{
+        .source = "foo foo",
+        .groups = &.{},
+        .compounds = &.{},
+        .classes = &duplicate_classes,
+        .attrs = &.{},
+        .pseudos = &.{},
+        .not_items = &.{},
+    };
+    const duplicate_comp: ast.Compound = .{ .class_start = 0, .class_len = duplicate_classes.len };
+    try std.testing.expect(hasAllClassesOnePass(duplicate_selector, duplicate_comp, "foo"));
 }
 
 test "matcher pseudo classes inspect element sibling position" {

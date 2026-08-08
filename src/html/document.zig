@@ -20,6 +20,12 @@ const IndexInt = common.IndexInt;
 /// Sentinel used for missing node indexes and invalid spans.
 pub const InvalidIndex: IndexInt = common.InvalidIndex;
 
+var next_document_generation: std.atomic.Value(u64) = .init(1);
+
+fn freshDocumentGeneration() u64 {
+    return next_document_generation.fetchAdd(1, .monotonic);
+}
+
 /// Controls entity handling during HTML serialization.
 pub const EntityEncoding = enum {
     /// Serialize the currently stored bytes without additional entity work.
@@ -32,6 +38,16 @@ pub const EntityEncoding = enum {
 pub const EntityDecoding = entities.EntityDecoding;
 /// Inclusive-exclusive byte span into the document source buffer.
 pub const Span = common.Span;
+
+/// Destructive text spans use the byte immediately after the span as a lazy
+/// materialization marker. Parser text is followed by whitespace, `<`, or NUL,
+/// so these non-delimiter bytes are unambiguous after tree construction.
+const RwTextState = enum(u8) {
+    decode_failed = 1,
+    raw_normalized = 2,
+    decoded = 3,
+    raw = 0xff,
+};
 
 /// Compile-time parser options and type factory for generated public API types.
 pub const ParseOptions = struct {
@@ -285,7 +301,15 @@ fn GetNode(comptime options: ParseOptions) type {
             }
 
             if (comptime opts.unescape or opts.normalize_whitespace) {
-                materializeRwText(doc, first_idx, opts.unescape, opts.normalize_whitespace);
+                const state = materializeRwText(doc, first_idx, opts.unescape, opts.normalize_whitespace);
+                if (comptime opts.unescape) {
+                    if (state == .decode_failed) {
+                        return .{ .value = try self.innerTextOwnedFromScan(gpa, opts, .{
+                            .first_idx = first_idx,
+                            .resume_idx = first_idx + 1,
+                        }), .owned = true };
+                    }
+                }
             }
 
             return .{ .value = node.name_or_text.slice(self.doc.source) };
@@ -303,28 +327,33 @@ fn GetNode(comptime options: ParseOptions) type {
                 var idx = scan.first_idx;
                 while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
                     if (!doc.nodes[idx].isText(idx)) continue;
-                    materializeRwText(doc, idx, true, false);
+                    _ = materializeRwText(doc, idx, true, false);
                 }
             }
 
             var total: usize = 0;
-            var last_byte: u8 = 0;
+            var have_text = false;
             {
                 const first_slice = doc.nodes[scan.first_idx].name_or_text.slice(doc.source);
-                total = first_slice.len;
-                if (total > 0) last_byte = first_slice[total - 1];
+                if (first_slice.len != 0) {
+                    total = first_slice.len;
+                    if (shouldDecodeOwnedText(doc, scan.first_idx, opts)) {
+                        total = try std.math.add(usize, total, entities.expansionExtraWithMode(options.entity_decoding, false, first_slice));
+                    }
+                    have_text = true;
+                }
 
                 var idx = scan.resume_idx;
                 while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
                     if (!doc.nodeAt(idx).isText()) continue;
                     const slice = doc.nodes[idx].name_or_text.slice(doc.source);
                     if (slice.len == 0) continue;
-                    if (total != 0 and !tables.WhitespaceTable[last_byte]) {
-                        total = try std.math.add(usize, total, 1);
-                        last_byte = ' ';
-                    }
-                    last_byte = slice[slice.len - 1];
+                    if (have_text) total = try std.math.add(usize, total, 1);
                     total = try std.math.add(usize, total, slice.len);
+                    if (shouldDecodeOwnedText(doc, idx, opts)) {
+                        total = try std.math.add(usize, total, entities.expansionExtraWithMode(options.entity_decoding, false, slice));
+                    }
+                    have_text = true;
                 }
             }
 
@@ -347,14 +376,18 @@ fn GetNode(comptime options: ParseOptions) type {
             const slice = doc.nodes[idx].name_or_text.slice(doc.source);
             if (slice.len == 0) return;
             if (out.items.len != 0 and !tables.WhitespaceTable[out.items[out.items.len - 1]]) out.appendAssumeCapacity(' ');
-            const start = out.items.len;
-            out.appendSliceAssumeCapacity(slice);
-            if (comptime options.non_destructive and opts.unescape) {
-                if (!isOpaqueTextNode(doc, idx)) {
-                    const decoded_len = entities.decodeInPlaceWithMode(options.entity_decoding, false, out.items[start..]);
-                    out.items.len = start + decoded_len;
-                }
+            if (shouldDecodeOwnedText(doc, idx, opts)) {
+                entities.appendDecodedAssumeCapacityWithMode(options.entity_decoding, false, out, slice);
+            } else {
+                out.appendSliceAssumeCapacity(slice);
             }
+        }
+
+        fn shouldDecodeOwnedText(doc: anytype, idx: IndexInt, comptime opts: Self.TextOptions) bool {
+            if (comptime !opts.unescape) return false;
+            if (isOpaqueTextNode(doc, idx)) return false;
+            if (comptime options.non_destructive) return true;
+            return rwTextState(doc, idx) == .decode_failed;
         }
 
         /// Applies final text decoding/normalization and transfers buffer ownership.
@@ -380,29 +413,60 @@ fn GetNode(comptime options: ParseOptions) type {
             return try gpa.dupe(u8, result.value);
         }
 
-        /// Decodes and/or normalizes one RW text span and records decoded state
-        /// with a NUL byte immediately after the current span when space exists.
-        fn materializeRwText(doc: anytype, idx: IndexInt, comptime unescape: bool, comptime normalize: bool) void {
-            if (comptime options.non_destructive) return;
+        /// Decodes and/or normalizes one RW text span. Expanding references are
+        /// never partially written in place: they leave the raw span intact and
+        /// store `.decode_failed` after it so callers can take an owned/streaming
+        /// fallback without retrying an unsafe forward decode.
+        fn materializeRwText(doc: anytype, idx: IndexInt, comptime unescape: bool, comptime normalize: bool) RwTextState {
+            if (comptime options.non_destructive) return .raw;
             const node = &doc.nodes[idx];
-            const old_end: usize = node.name_or_text.end();
-            const was_decoded = old_end < doc.source.len and doc.source[old_end] == 0;
-            var decoded = was_decoded;
+            var state = rwTextState(doc, idx);
 
             if (comptime unescape) {
-                if (!was_decoded and !isOpaqueTextNode(doc, idx)) {
-                    const new_len = entities.decodeInPlaceWithMode(options.entity_decoding, false, node.name_or_text.sliceMut(doc.source));
-                    node.name_or_text.len = @intCast(new_len);
-                    decoded = true;
+                if (state != .decoded and !isOpaqueTextNode(doc, idx)) {
+                    if (state != .decode_failed) {
+                        const result = entities.decodeInPlaceResultWithMode(options.entity_decoding, false, node.name_or_text.sliceMut(doc.source));
+                        if (result.complete) {
+                            node.name_or_text.len = @intCast(result.len);
+                            state = .decoded;
+                        } else {
+                            state = .decode_failed;
+                        }
+                    }
                 }
             }
             if (comptime normalize) {
-                const new_len = entities.normalizeWhitespaceInPlace(node.name_or_text.sliceMut(doc.source));
-                node.name_or_text.len = @intCast(new_len);
+                // When unescape was requested and failed, normalization belongs
+                // after the allocating decode fallback, not before it.
+                if (!unescape or state != .decode_failed) {
+                    const new_len = entities.normalizeWhitespaceInPlace(node.name_or_text.sliceMut(doc.source));
+                    node.name_or_text.len = @intCast(new_len);
+                    if (state != .decoded) state = .raw_normalized;
+                }
             }
 
-            const new_end: usize = node.name_or_text.end();
-            if (decoded and new_end < doc.source.len) doc.source[new_end] = 0;
+            markRwTextState(doc, node, state);
+            return state;
+        }
+
+        fn rwTextState(doc: anytype, idx: IndexInt) RwTextState {
+            if (comptime options.non_destructive) return .raw;
+            const node = &doc.nodes[idx];
+            const end: usize = node.name_or_text.end();
+            if (end >= doc.source.len) return .raw;
+            return switch (doc.source[end]) {
+                @intFromEnum(RwTextState.decoded) => .decoded,
+                @intFromEnum(RwTextState.decode_failed) => .decode_failed,
+                @intFromEnum(RwTextState.raw_normalized) => .raw_normalized,
+                else => .raw,
+            };
+        }
+
+        fn markRwTextState(doc: anytype, node: anytype, state: RwTextState) void {
+            if (comptime options.non_destructive) return;
+            if (state == .raw) return;
+            const end: usize = node.name_or_text.end();
+            if (end < doc.source.len) doc.source[end] = @intFromEnum(state);
         }
 
         /// Opaque children preserve both markup-looking bytes and entity syntax.
@@ -538,16 +602,21 @@ fn GetNode(comptime options: ParseOptions) type {
 
         fn writeTextHtml(doc: anytype, idx: IndexInt, node_raw: anytype, writer: anytype, comptime entity_encoding: EntityEncoding) WriterError(@TypeOf(writer))!void {
             const raw_text = isOpaqueTextNode(doc, idx);
-            if (comptime entity_encoding == .force and !options.non_destructive) materializeRwText(doc, idx, true, false);
+            const state = if (comptime options.non_destructive)
+                RwTextState.raw
+            else if (comptime entity_encoding == .force)
+                materializeRwText(doc, idx, true, false)
+            else
+                rwTextState(doc, idx);
             const text_bytes = node_raw.name_or_text.slice(doc.source);
-            const decoded = !options.non_destructive and node_raw.name_or_text.end() < doc.source.len and doc.source[node_raw.name_or_text.end()] == 0;
             if (comptime entity_encoding == .force) {
                 if (raw_text) return writer.writeAll(text_bytes);
                 if (comptime options.non_destructive) return writeDecodedEscaped(writer, text_bytes, false);
+                if (state == .decode_failed) return writeDecodedEscaped(writer, text_bytes, false);
                 return writeEscapedText(writer, text_bytes);
             }
             if (comptime entity_encoding == .auto) {
-                if (!options.non_destructive and !raw_text and decoded) return writeEscapedText(writer, text_bytes);
+                if (!options.non_destructive and !raw_text and state == .decoded) return writeEscapedText(writer, text_bytes);
             }
             return writer.writeAll(text_bytes);
         }
@@ -583,7 +652,15 @@ fn GetNode(comptime options: ParseOptions) type {
                 var it: attr.CompactIterator = .{ .source = source, .cursor = i };
                 while (it.next()) |item| {
                     try writeAttrName(writer, item.name);
-                    if (item.value) |value| try writeAttrValue(writer, value);
+                    if (item.value) |value| {
+                        if (item.isDecoded()) {
+                            try writeAttrValue(writer, value);
+                        } else {
+                            try writer.writeAll("=\"");
+                            try writeDecodedEscaped(writer, value, true);
+                            try writeByte(writer, '"');
+                        }
+                    }
                 }
                 return;
             }
@@ -625,9 +702,10 @@ fn GetNode(comptime options: ParseOptions) type {
             var chunk_start: usize = 0;
             for (value, 0..) |c, i| {
                 switch (c) {
-                    '&', '<', '"' => {
+                    0, '&', '<', '"' => {
                         if (chunk_start < i) try writer.writeAll(value[chunk_start..i]);
                         switch (c) {
+                            0 => try writer.writeAll(" "),
                             '&' => try writer.writeAll("&amp;"),
                             '<' => try writer.writeAll("&lt;"),
                             '"' => try writer.writeAll("&quot;"),
@@ -767,6 +845,12 @@ fn GetQueryIter(comptime options: ParseOptions) type {
 
         /// Owning document pointer.
         doc: *const DocType,
+        /// Document generation captured when the iterator is created.
+        doc_generation: u64,
+        /// Address of the iterator value that first called `next`. Once matcher
+        /// scratch exists the iterator is address-stable; copied or moved started
+        /// iterators are rejected instead of aliasing/freed twice.
+        owner_address: usize = 0,
         /// Optional subtree root for scoped queries.
         scope_root: IndexInt = InvalidIndex,
         /// Next node index to test.
@@ -779,6 +863,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
             const use_wide = plan.stateful and selector.compounds.len > forward.MaxForwardCompounds;
             return .{
                 .doc = doc,
+                .doc_generation = doc.generation,
                 .scope_root = scope_root,
                 .next_index = next_index,
                 .end_index = end_index,
@@ -791,15 +876,27 @@ fn GetQueryIter(comptime options: ParseOptions) type {
 
         /// Releases matcher scratch if iteration stops before exhaustion.
         pub fn deinit(noalias self: *@This()) void {
+            if (self.owner_address != 0 and self.owner_address != @intFromPtr(self)) return;
             switch (self.engine) {
                 .compact => |*executor| executor.deinit(),
                 .wide => |*executor| executor.deinit(),
             }
+            self.owner_address = 0;
+        }
+
+        fn claimOwner(noalias self: *@This()) !void {
+            const address = @intFromPtr(self);
+            if (self.owner_address == 0) {
+                self.owner_address = address;
+                return;
+            }
+            if (self.owner_address != address) return error.QueryIteratorCopiedAfterStart;
         }
 
         /// Returns next matching node or `null` when exhausted.
         pub inline fn next(noalias self: *@This()) !?NodeTypeWrapper {
-            if (self.end_index > self.doc.nodes.len) {
+            try self.claimOwner();
+            if (self.doc_generation != self.doc.generation or self.end_index > self.doc.nodes.len) {
                 @branchHint(.cold);
                 self.next_index = self.end_index;
                 self.deinit();
@@ -812,8 +909,16 @@ fn GetQueryIter(comptime options: ParseOptions) type {
                     // ancestry/sibling state for a later rightmost candidate. Do not
                     // apply candidateCouldMatch here; that predicate is only safe for
                     // the final candidate in an RTL/local match.
-                    .compact => |*executor| try executor.process(self.next_index),
-                    .wide => |*executor| try executor.process(self.next_index),
+                    .compact => |*executor| executor.process(self.next_index),
+                    .wide => |*executor| executor.process(self.next_index),
+                } catch |err| {
+                    // Matcher work is not transactionally reversible after an
+                    // allocation failure: sibling/nth state may already have
+                    // advanced for this node. Make the iterator terminal rather
+                    // than allowing a retry to observe partially updated state.
+                    self.next_index = self.end_index;
+                    self.deinit();
+                    return err;
                 };
                 if (matched) {
                     defer self.next_index += 1;
@@ -924,12 +1029,16 @@ fn GetDocument(comptime options: ParseOptions) type {
 
         /// Parsed node storage.
         nodes: []RawNodeType = &[_]RawNodeType{},
+        /// Identity/version used to invalidate iterators and matcher caches after
+        /// the document value is cleared or replaced by another parse.
+        generation: u64 = 0,
 
         /// Initializes an empty document using `allocator` for internal storage.
         pub fn init(allocator: std.mem.Allocator) @This() {
             return .{
                 .allocator = allocator,
                 .source = emptySource(),
+                .generation = freshDocumentGeneration(),
             };
         }
 
@@ -944,6 +1053,7 @@ fn GetDocument(comptime options: ParseOptions) type {
         pub fn clear(noalias self: *@This()) void {
             self.source = emptySource();
             self.deinit(); // this just clears the nodes
+            self.generation = freshDocumentGeneration();
         }
 
         /// Returns an empty source slice with mutability matching parse options.
@@ -1452,6 +1562,36 @@ test "runtime query iterator is invalidated by clear and reparsing" {
     var new_it = try runtimeQuery(&doc, runtime_arena.allocator(), "span.y");
     try std.testing.expect(try new_it.next() != null);
     try std.testing.expect(try new_it.next() == null);
+
+    // Reparse before the stale iterator is touched. Length-based invalidation
+    // alone cannot detect this when the replacement document is large enough.
+    var stale = try runtimeQuery(&doc, runtime_arena.allocator(), "span.y");
+    var html_c = "<main><span class='z'></span><span></span></main>".*;
+    try resetParsed(.{}, &doc, &html_c);
+    try std.testing.expect(try stale.next() == null);
+}
+
+test "stale query iterator deinitializes with its captured allocator" {
+    const alloc = std.testing.allocator;
+    const opts: ParseOptions = .{};
+    var first_html = "<div><span></span><span></span></div>".*;
+    var doc = try opts.parse(alloc, &first_html);
+
+    var it = doc.query("div > span");
+    defer it.deinit();
+    _ = (try it.next()) orelse return error.TestUnexpectedResult;
+
+    // Replace the document value with one backed by a different allocator. A
+    // stale iterator must free its old matcher scratch through the allocator it
+    // captured at construction, not through the replacement document.
+    doc.deinit();
+    var fixed_storage: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&fixed_storage);
+    var second_html = "<main><i></i><i></i></main>".*;
+    doc = try opts.parse(fba.allocator(), &second_html);
+    defer doc.deinit();
+
+    try std.testing.expect(try it.next() == null);
 }
 
 test "query results matrix (comptime selectors)" {
@@ -1769,7 +1909,7 @@ test "innerTextOwned returns allocated output and materializes RW source text" {
 
     const text_node_after = doc.nodes[node.index + 1];
     try std.testing.expectEqualStrings("a & b", text_node_after.name_or_text.slice(doc.source));
-    try std.testing.expectEqual(@as(u8, 0), doc.source[text_node_after.name_or_text.end()]);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decoded)), doc.source[text_node_after.name_or_text.end()]);
 }
 
 test "RW text decoding stores and moves the trailing decoded marker" {
@@ -1785,13 +1925,13 @@ test "RW text decoding stores and moves the trailing decoded marker" {
     const decoded = try p.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
     try std.testing.expectEqualStrings("a&  b ", decoded.value);
     const decoded_end: usize = doc.nodes[text_idx].name_or_text.end();
-    try std.testing.expectEqual(@as(u8, 0), doc.source[decoded_end]);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decoded)), doc.source[decoded_end]);
 
     const normalized = try p.innerTextWithOptions(alloc, .{ .unescape = false, .normalize_whitespace = true });
     try std.testing.expectEqualStrings("a& b", normalized.value);
     const normalized_end: usize = doc.nodes[text_idx].name_or_text.end();
     try std.testing.expect(normalized_end < decoded_end);
-    try std.testing.expectEqual(@as(u8, 0), doc.source[normalized_end]);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decoded)), doc.source[normalized_end]);
 }
 
 test "RW terminal text marks only when decoding creates room" {
@@ -1806,7 +1946,7 @@ test "RW terminal text marks only when decoding creates room" {
     try std.testing.expectEqualStrings("x&y", decoded.value);
     const encoded_text = encoded_doc.nodes[encoded_p.index + 1];
     try std.testing.expect(encoded_text.name_or_text.end() < encoded_doc.source.len);
-    try std.testing.expectEqual(@as(u8, 0), encoded_doc.source[encoded_text.name_or_text.end()]);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decoded)), encoded_doc.source[encoded_text.name_or_text.end()]);
 
     var plain_doc = GetDocument(.{}).init(alloc);
     defer plain_doc.deinit();
@@ -1835,7 +1975,7 @@ test "RW multi-node owned text materializes each span and still normalizes after
         if (!doc.nodes[idx].isText(idx)) continue;
         const end: usize = doc.nodes[idx].name_or_text.end();
         try std.testing.expect(end < doc.source.len);
-        try std.testing.expectEqual(@as(u8, 0), doc.source[end]);
+        try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decoded)), doc.source[end]);
         try std.testing.expect(std.mem.indexOf(u8, doc.nodes[idx].name_or_text.slice(doc.source), "&amp;") == null);
     }
 }
@@ -1971,6 +2111,69 @@ test "full named entity parse option applies to text and attributes" {
     const text = try div.innerTextOwnedWithOptions(alloc, .{ .normalize_whitespace = false });
     defer alloc.free(text);
     try std.testing.expectEqualStrings("\xe2\xaa\xa2\xcc\xb8", text);
+}
+
+test "expanding full entities use marked allocating fallbacks" {
+    const alloc = std.testing.allocator;
+    const opts: ParseOptions = .{ .entity_decoding = .full };
+    var doc = opts.Document().init(alloc);
+    defer doc.deinit();
+    var html = "<div naked=&nLt; single='&nGt;' double=\"&nLt;\">&nLt;</div>".*;
+    try resetParsed(opts, &doc, &html);
+    const div = firstQuery(doc.query("div")) orelse return error.TestUnexpectedResult;
+
+    const expected_lt = try entities.decodeAllocWithMode(.full, true, alloc, "&nLt;");
+    defer alloc.free(expected_lt);
+    const expected_gt = try entities.decodeAllocWithMode(.full, true, alloc, "&nGt;");
+    defer alloc.free(expected_gt);
+
+    const naked = (try div.getAttributeValue(alloc, "naked")) orelse return error.TestUnexpectedResult;
+    defer naked.free(alloc);
+    const single = (try div.getAttributeValue(alloc, "single")) orelse return error.TestUnexpectedResult;
+    defer single.free(alloc);
+    const double = (try div.getAttributeValue(alloc, "double")) orelse return error.TestUnexpectedResult;
+    defer double.free(alloc);
+    try std.testing.expect(naked.owned and single.owned and double.owned);
+    try std.testing.expectEqualSlices(u8, expected_lt, naked.value);
+    try std.testing.expectEqualSlices(u8, expected_gt, single.value);
+    try std.testing.expectEqualSlices(u8, expected_lt, double.value);
+
+    var compact: attr.CompactIterator = .{ .source = doc.source, .cursor = div.raw().name_or_text.end() };
+    const compact_naked = compact.next() orelse return error.TestUnexpectedResult;
+    const compact_single = compact.next() orelse return error.TestUnexpectedResult;
+    const compact_double = compact.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(attr.CompactValueMarker.raw_naked, compact_naked.marker);
+    try std.testing.expectEqual(attr.CompactValueMarker.raw_single_quoted, compact_single.marker);
+    try std.testing.expectEqual(attr.CompactValueMarker.raw_double_quoted, compact_double.marker);
+
+    const text = try div.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
+    defer text.free(alloc);
+    try std.testing.expect(text.owned);
+    try std.testing.expectEqualSlices(u8, expected_lt, text.value);
+    const text_idx = div.index + 1;
+    const text_end: usize = doc.nodes[text_idx].name_or_text.end();
+    try std.testing.expect(text_end < doc.source.len);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decode_failed)), doc.source[text_end]);
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try div.writeHtml(&out.writer, .force);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "&nLt;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "&nGt;") == null);
+
+    // EOF text has no following source byte available for a persistent marker.
+    // Force serialization must still honor the transactional decode result from
+    // this call rather than rereading a marker that cannot exist.
+    var eof_doc = opts.Document().init(alloc);
+    defer eof_doc.deinit();
+    var eof_html = "<div>&nLt;".*;
+    try resetParsed(opts, &eof_doc, &eof_html);
+    const eof_div = firstQuery(eof_doc.query("div")) orelse return error.TestUnexpectedResult;
+    var eof_out: std.Io.Writer.Allocating = .init(alloc);
+    defer eof_out.deinit();
+    try eof_div.writeHtml(&eof_out.writer, .force);
+    try std.testing.expect(std.mem.indexOf(u8, eof_out.written(), "&nLt;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, eof_out.written(), "&amp;nLt;") == null);
 }
 
 test "entity serialization modes preserve auto and force contracts" {
@@ -2828,6 +3031,13 @@ test "query iterator lifecycle releases scratch and copies independently" {
     try std.testing.expectEqual(@as(usize, 2), remaining.len);
     try std.testing.expectEqualStrings("b", (try remaining[0].getAttributeValue(alloc, "id")).?.value);
     try std.testing.expectEqualStrings("c", (try remaining[1].getAttributeValue(alloc, "id")).?.value);
+
+    var started = doc.query("div > span");
+    defer started.deinit();
+    _ = (try started.next()) orelse return error.TestUnexpectedResult;
+    var copied_after_start = started;
+    defer copied_after_start.deinit();
+    try std.testing.expectError(error.QueryIteratorCopiedAfterStart, copied_after_start.next());
 }
 
 test "query iterator reports matcher allocation failure" {
@@ -2852,6 +3062,7 @@ test "query iterator reports matcher allocation failure" {
     var it = doc.queryRuntime(selector);
     defer it.deinit();
     try std.testing.expectError(error.OutOfMemory, it.next());
+    try std.testing.expect(try it.next() == null);
 }
 
 test "wide forward query processes all elements without a rightmost candidate prefilter" {
@@ -3188,6 +3399,27 @@ test "RTL descendant failure merges ambiguous states and processes each node onc
     try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(GetDocument(.{}), &doc, selector, @intCast(doc.nodes.len - 1), InvalidIndex, &workspace));
     try std.testing.expectEqual(@as(usize, 128), workspace.stats.reverse_nodes_processed);
     try std.testing.expect(workspace.stats.local_unique_predicate_evals <= 128 * 2);
+}
+
+test "RTL sibling topology cache invalidates across document generations" {
+    const alloc = std.testing.allocator;
+    var selector = try ast.Selector.compileRuntime(alloc, "i ~ b");
+    defer selector.deinit(alloc);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var workspace = matcher.MatchWorkspace.init(alloc);
+    defer workspace.deinit();
+
+    // Both documents put <b> at index 4. The first topology says its previous
+    // element is index 2; the second inserts the matching <i> at index 3.
+    var first = "<main><x></x>text<b></b></main>".*;
+    try resetParsed(.{}, &doc, &first);
+    try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(GetDocument(.{}), &doc, selector, 4, InvalidIndex, &workspace));
+
+    var second = "<main><x></x><i></i><b></b></main>".*;
+    try resetParsed(.{}, &doc, &second);
+    try std.testing.expect(try matcher.matchesSelectorAtWithWorkspace(GetDocument(.{}), &doc, selector, 4, InvalidIndex, &workspace));
 }
 
 test "RTL sibling failure merges witnesses and uses optional topology" {

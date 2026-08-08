@@ -63,7 +63,7 @@ test "basic parse + query" {
     var links = doc.query("div#app > a.nav");
     const a = (try links.next()) orelse return error.TestUnexpectedResult;
     const href = (try a.getAttributeValue(std.testing.allocator, "href")) orelse return error.TestUnexpectedResult;
-    defer href.free(&doc, std.testing.allocator);
+    defer href.free(std.testing.allocator);
     try std.testing.expectEqualStrings("/docs", href.value);
 }
 ```

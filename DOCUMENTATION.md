@@ -37,7 +37,7 @@ test "basic parse + query" {
     var links = doc.query("div#app > a.nav");
     const a = (try links.next()) orelse return error.TestUnexpectedResult;
     const href = (try a.getAttributeValue(std.testing.allocator, "href")) orelse return error.TestUnexpectedResult;
-    defer href.free(&doc, std.testing.allocator);
+    defer href.free(std.testing.allocator);
     try std.testing.expectEqualStrings("/docs", href.value);
 }
 ```
@@ -74,6 +74,12 @@ All examples are verified by running `zig build examples-check`
   - `var it = doc.queryRuntime(selector); try it.next()`
   - `doc.queryRuntime(selector)`
   - selector created via `try Selector.compileRuntime(allocator, source)`
+- Iterators may be copied before their first `next()`. After matching starts,
+  keep the iterator at one address; using a copied or moved started iterator
+  returns `error.QueryIteratorCopiedAfterStart`.
+- A matcher error terminates that iterator. The failing `next()` returns the
+  original error and later `next()` calls return `null`; create a new iterator
+  to retry.
 
 ### Node APIs
 
@@ -87,25 +93,25 @@ All examples are verified by running `zig build examples-check`
 - Text:
   - `innerTextWithOptions(gpa, TextOptions)` returns `TextResult`
   - `TextResult.value`
-  - `TextResult.free(doc, gpa)`
+  - `TextResult.free(gpa)`
   - `innerTextOwnedWithOptions(gpa, TextOptions)` always allocates
 - Attributes:
   - `getAttributeValue(gpa, name)` returns `!?AttributeValueResult`
   - `AttributeValueResult.value`
-  - `AttributeValueResult.free(doc, gpa)`
-  - `getAttributeValueRaw(name)` returns raw source bytes until a destructive tag is materialized, then returns its decoded compact value
+  - `AttributeValueResult.free(gpa)`
+  - `getAttributeValueRaw(name)` returns the currently stored payload; expanding full-table entities remain raw in destructive compact storage
 - Scoped queries:
   - same iterator-first query family as `Document` (`query` and `queryRuntime`)
 
 ### Helpers
 
 - `doc.html()`, `doc.head()`, `doc.body()`
-- `TextResult.isBorrowed(doc)` to check whether text points into document source bytes
+- `TextResult.owned` reports whether the result owns allocator-backed storage
 
 ### Parse/Text options
 
 - `ParseOptions`
-  - `drop_whitespace_text_nodes: bool = true`
+  - `drop_whitespace_text_nodes: ParseOptions.WhitespaceText = .nodes_and_preceding`
   - `non_destructive: bool = false`
 - build option:
   - `-Dintlen=u16|u32|u64|usize`
@@ -125,11 +131,12 @@ All examples are verified by running `zig build examples-check`
 - non-destructive parsing avoids a full-source copy and instead moves lazy attr/text decoding out of the input buffer
 - nodes are stored in one contiguous array and linked by indexes rather than pointers to keep traversal cache-friendly and make `-Dintlen` effective
 - attribute storage stays span-based instead of building heap objects so parse cost scales with actual queries, not attribute count
-- destructive attribute lists use `name[=decoded-value]NUL ... >`; quoted and unquoted values share one representation, and empty assignments collapse to valueless attributes
+- destructive attribute lists use `name<marker>valueNUL ... >`; `=` marks an in-place decoded value, while `/`, `'`, and `"` mark raw expanding values that originally used naked, single-quoted, and double-quoted syntax; empty assignments collapse to valueless attributes
 - compact values may contain whitespace, `>`, `/`, `=`, and malformed UTF-8 because only NUL terminates them
 - destructive decoding changes literal NUL bytes to spaces and numeric NUL references to U+FFFD; malformed leading UTF-8 bytes in attribute names are replaced with an internal marker
 - tag and attribute names use delimiter blacklists rather than identifier whitelists, allowing framework names such as `@click`, `*ngIf`, `(change)`, and `[value]`
-- destructive text spans use an in-bounds NUL byte immediately after the span to remember that entity decoding already occurred; terminal text without spare capacity may be checked again
+- destructive text spans use the byte immediately after the span as lazy state: `0x03` means decoded, `0x01` means an expanding reference requires an owned/streaming fallback, and `0x02` means raw text was normalized without decoding; terminal text without spare capacity may be checked again
+- `.full` decoding can make `TextResult` or `AttributeValueResult` owned when a named reference expands (notably `&nLt;`/`&nGt;`); always call the result's `free(gpa)` helper
 - `writeHtml(writer, comptime entities)` accepts `.never`, `.auto`, or `.force`; `.auto` re-encodes already-decoded destructive text, `.force` canonicalizes escapable text and attributes, and `format` uses `.never`
 - `.entity_decoding` selects `.minimal` (five basic names), `.common` (adds `nbsp`, `copy`, `reg`, `mdash`, `ndash`, and `hellip`), or `.full` (the complete generated WHATWG table); numeric references are always decoded
 - `script` and `style` are parsed as raw text and never entity-decoded; `title` and `textarea` are parsed opaquely as escapable raw text and do decode character references during extraction
@@ -351,11 +358,13 @@ Data model highlights:
 - use `innerTextWithOptions(..., .{ .normalize_whitespace = false })` for raw spacing
 - use `innerTextWithOptions(..., .{ .unescape = false })` to preserve entity escapes
 - use `innerTextOwnedWithOptions(...)` when output must always be allocated
-- call `TextResult.free(doc, gpa)` for non-owned text results
+- call `TextResult.free(gpa)` for every result; it frees only when `TextResult.owned` is true
 
 ### Runtime iterator invalidation
 
-Runtime selector memory must outlive any iterator returned by `queryRuntime`.
+Runtime selector memory must outlive any iterator returned by `queryRuntime`. Clearing or replacing a
+`Document` invalidates iterators created from its previous generation; an invalidated iterator returns
+`null` rather than traversing the replacement tree.
 
 ### Input buffer changed
 

@@ -84,6 +84,15 @@ const KEY = struct {
     const TH = litKey("th");
     const HEAD = litKey("head");
     const BODY = litKey("body");
+    const HTML = litKey("html");
+    const APPLET = litKey("applet");
+    const BUTTON = litKey("button");
+    const CAPTION = litKey("caption");
+    const MARQUEE = litKey("marquee");
+    const OBJECT = litKey("object");
+    const TEMPLATE = litKey("template");
+    const SELECT = litKey("select");
+    const DATALIST = litKey("datalist");
 
     const ADDRESS = litKey("address");
     const ARTICLE = litKey("article");
@@ -307,10 +316,67 @@ pub fn shouldImplicitlyCloseWithLenAndKey(open_tag_len: usize, open_key: u64, ne
     };
 }
 
+/// Scope state accumulated while scanning open elements from the current node
+/// toward the root for an optional-end-tag source. Different HTML algorithms
+/// use different scope boundaries; keeping them separate prevents, for example,
+/// a `<button>` from hiding an outer `<li>` while still hiding an outer `<p>`.
+pub const ImplicitCloseScope = struct {
+    regular: bool = false,
+    button: bool = false,
+    list_item: bool = false,
+    table: bool = false,
+    select: bool = false,
+
+    /// Returns whether an optional-close source at the current scan position is
+    /// still visible through the boundaries already encountered above it.
+    pub fn permits(self: @This(), source_tag_len: usize, source_key: u64) bool {
+        return switch (source_tag_len) {
+            1 => source_key == KEY.P and !self.regular and !self.button,
+            2 => switch (source_key) {
+                KEY.LI => !self.regular and !self.list_item,
+                KEY.DT, KEY.DD => !self.regular,
+                KEY.TR, KEY.TD, KEY.TH => !self.table,
+                else => true,
+            },
+            4 => if (source_key == KEY.HEAD) !self.regular else true,
+            6 => if (source_key == KEY.OPTION) !self.select else true,
+            else => true,
+        };
+    }
+
+    /// Adds one open element above a potential source to the accumulated scope
+    /// barriers. Call this after testing that element as a source itself.
+    pub fn observe(self: *@This(), tag_len: usize, key: u64) void {
+        if (isRegularScopeBoundary(tag_len, key)) self.regular = true;
+        if (tag_len == 6 and key == KEY.BUTTON) self.button = true;
+        if (tag_len == 2 and (key == KEY.OL or key == KEY.UL)) self.list_item = true;
+        if ((tag_len == 4 and key == KEY.HTML) or
+            (tag_len == 5 and key == KEY.TABLE) or
+            (tag_len == 8 and key == KEY.TEMPLATE)) self.table = true;
+        if ((tag_len == 6 and key == KEY.SELECT) or
+            (tag_len == 8 and key == KEY.DATALIST)) self.select = true;
+    }
+};
+
+fn isRegularScopeBoundary(tag_len: usize, key: u64) bool {
+    return switch (tag_len) {
+        2 => key == KEY.TD or key == KEY.TH,
+        4 => key == KEY.HTML,
+        5 => key == KEY.TABLE,
+        6 => key == KEY.APPLET or key == KEY.OBJECT,
+        7 => key == KEY.CAPTION or key == KEY.MARQUEE,
+        8 => key == KEY.TEMPLATE,
+        else => false,
+    };
+}
+
 fn closesPWithKey(new_tag: []const u8, new_key: u64) bool {
     return switch (new_tag.len) {
         1 => new_key == KEY.P,
         2 => switch (new_key) {
+            KEY.LI,
+            KEY.DT,
+            KEY.DD,
             KEY.HR,
             KEY.H1,
             KEY.H2,

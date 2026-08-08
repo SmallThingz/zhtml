@@ -127,6 +127,12 @@ const OpenTag = struct {
     }
 };
 
+const SkipOpenTag = struct {
+    name: []const u8,
+    key: u64,
+    foreign: bool = false,
+};
+
 fn State(comptime Ctx: type, comptime callback: anytype) type {
     return struct {
         allocator: std.mem.Allocator,
@@ -159,7 +165,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 }
             }
 
-            if (self.options.track_nesting and self.options.emit_implicit_end_tags) {
+            if (self.options.track_nesting) {
                 while (self.stack.items.len > 1) {
                     const open = self.popOpen();
                     try self.emitEnd(open, self.i, self.i, true);
@@ -216,7 +222,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     } else if (!foreign_element and tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
                         self.i = if (self.findRawTextClose(tag_name, tag.key, self.i)) |close| close.close_end else self.source.len;
                     } else if (!closes_immediately) {
-                        self.i = self.skipSubtree(tag_name, tag.key, self.i, foreign_element);
+                        self.i = try self.skipSubtree(tag_name, tag.key, self.i, foreign_element);
                     }
                     return;
                 }
@@ -377,6 +383,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
         fn emitEnd(self: *Self, open: OpenTag, token_start: usize, token_end: usize, implicit: bool) !void {
             if (!self.options.emit_end_tags) return;
+            if (implicit and !self.options.emit_implicit_end_tags) return;
             _ = try callback(self.ctx, .{
                 .source = self.source,
                 .kind = .end_tag,
@@ -389,11 +396,27 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
         fn applyImplicitClosures(self: *Self, new_tag: []const u8, new_key: u64, pos: usize) !void {
             while (self.stack.items.len > 1) {
-                const top = self.stack.items[self.stack.items.len - 1];
-                if (!tags.isImplicitCloseSourceWithLenAndKey(top.name.len, top.key)) break;
-                if (!tags.shouldImplicitlyCloseWithLenAndKey(top.name.len, top.key, new_tag, new_key)) break;
-                const popped = self.popOpen();
-                if (self.options.emit_implicit_end_tags) try self.emitEnd(popped, pos, pos, true);
+                var stack_pos = self.stack.items.len;
+                var found: ?usize = null;
+                var scope: tags.ImplicitCloseScope = .{};
+                while (stack_pos > 1) {
+                    stack_pos -= 1;
+                    const open = self.stack.items[stack_pos];
+                    if (tags.isImplicitCloseSourceWithLenAndKey(open.name.len, open.key) and
+                        tags.shouldImplicitlyCloseWithLenAndKey(open.name.len, open.key, new_tag, new_key) and
+                        scope.permits(open.name.len, open.key))
+                    {
+                        found = stack_pos;
+                        break;
+                    }
+                    scope.observe(open.name.len, open.key);
+                }
+
+                const found_pos = found orelse break;
+                while (self.stack.items.len > found_pos) {
+                    const popped = self.popOpen();
+                    try self.emitEnd(popped, pos, pos, true);
+                }
             }
         }
 
@@ -464,8 +487,26 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             return scanner.findRawTextClose(self.source, name, key, start, false);
         }
 
-        fn skipSubtree(self: *Self, name: []const u8, key: u64, start: usize, foreign_content: bool) usize {
-            var depth: usize = 1;
+        fn skipSubtree(self: *Self, name: []const u8, key: u64, start: usize, foreign_content: bool) !usize {
+            var stack: std.ArrayList(SkipOpenTag) = .empty;
+            defer stack.deinit(self.allocator);
+
+            // Seed the local scanner with the live ancestors as well as the
+            // skipped root. A start/end tag can close an ancestor and thereby
+            // end the skipped root even when the root itself has no optional
+            // end-tag rule (for example `<p><span>skip<div>keep`).
+            if (self.options.track_nesting) {
+                for (self.stack.items[1..]) |open| {
+                    try stack.append(self.allocator, .{
+                        .name = open.name.slice(self.source),
+                        .key = open.key,
+                        .foreign = open.foreign,
+                    });
+                }
+            }
+            const root_pos = stack.items.len;
+            try stack.append(self.allocator, .{ .name = name, .key = key, .foreign = foreign_content });
+
             var i = start;
             while (std.mem.indexOfScalarPos(u8, self.source, i, '<')) |lt| {
                 if (lt + 1 >= self.source.len) return self.source.len;
@@ -492,9 +533,16 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                         continue;
                     }
                     const end = if (self.findTagEnd(close.end)) |tag_end| tag_end + 1 else self.source.len;
-                    if (tags.equalByLenAndKeyIgnoreCase(self.source[close.start..close.end], close.key, name, key)) {
-                        depth -= 1;
-                        if (depth == 0) return end;
+                    const close_name = self.source[close.start..close.end];
+                    var pos = stack.items.len;
+                    while (pos > 0) {
+                        pos -= 1;
+                        const open = stack.items[pos];
+                        if (!tags.equalByLenAndKeyIgnoreCase(open.name, open.key, close_name, close.key)) continue;
+                        stack.items.len = pos;
+                        if (pos < root_pos) return lt;
+                        if (pos == root_pos) return end;
+                        break;
                     }
                     i = end;
                     continue;
@@ -503,14 +551,40 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     const end_pos = self.findTagEnd(child.end) orelse return self.source.len;
                     const child_name = self.source[child.start..child.end];
                     const self_closing = end_pos > child.end and self.source[end_pos - 1] == '/';
-                    i = end_pos + 1;
+                    const parent_foreign = skipForeignContext(stack.items);
+                    const child_foreign = parent_foreign or tags.isSvgWithKey(child_name, child.key) or tags.isMathWithKey(child_name, child.key);
 
-                    const closes_immediately = if (foreign_content) self_closing else tags.isVoidTagWithKey(child_name, child.key);
+                    if (!child_foreign and tags.mayTriggerImplicitCloseWithKey(child_name, child.key)) {
+                        while (stack.items.len != 0) {
+                            var pos = stack.items.len;
+                            var found: ?usize = null;
+                            var scope: tags.ImplicitCloseScope = .{};
+                            while (pos > 0) {
+                                pos -= 1;
+                                const open = stack.items[pos];
+                                if (tags.isImplicitCloseSourceWithLenAndKey(open.name.len, open.key) and
+                                    tags.shouldImplicitlyCloseWithLenAndKey(open.name.len, open.key, child_name, child.key) and
+                                    scope.permits(open.name.len, open.key))
+                                {
+                                    found = pos;
+                                    break;
+                                }
+                                scope.observe(open.name.len, open.key);
+                            }
+                            const found_pos = found orelse break;
+                            stack.items.len = found_pos;
+                            if (found_pos <= root_pos) return lt;
+                        }
+                    }
+
+                    i = end_pos + 1;
+                    const closes_immediately = if (child_foreign) self_closing else tags.isVoidTagWithKey(child_name, child.key);
                     if (!closes_immediately) {
-                        if (tags.equalByLenAndKeyIgnoreCase(child_name, child.key, name, key)) depth += 1;
-                        if (!foreign_content and tags.isPlainTextTagWithKey(child_name, child.key)) return self.source.len;
-                        if (!foreign_content and tags.isTextOnlyTagWithKey(child_name, child.key)) {
+                        if (!child_foreign and tags.isPlainTextTagWithKey(child_name, child.key)) return self.source.len;
+                        if (!child_foreign and tags.isTextOnlyTagWithKey(child_name, child.key)) {
                             i = if (self.findRawTextClose(child_name, child.key, i)) |raw_close| raw_close.close_end else self.source.len;
+                        } else {
+                            try stack.append(self.allocator, .{ .name = child_name, .key = child.key, .foreign = child_foreign });
                         }
                     }
                     continue;
@@ -518,6 +592,13 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 i = lt + 1;
             }
             return self.source.len;
+        }
+
+        fn skipForeignContext(stack: []const SkipOpenTag) bool {
+            if (stack.len == 0) return false;
+            const open = stack[stack.len - 1];
+            if (!open.foreign) return false;
+            return !(open.name.len == 13 and std.ascii.eqlIgnoreCase(open.name, "foreignObject"));
         }
 
         fn openMatches(self: *Self, open: OpenTag, close: TagScan) bool {
@@ -826,6 +907,71 @@ test "streaming parser callback can skip subtree" {
     try std.testing.expectEqual(@as(usize, 2), ctx.text_count);
 }
 
+test "streaming subtree skip ends at an implicit optional close" {
+    const Ctx = struct {
+        saw_div: bool = false,
+        saw_keep: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "p")) return false;
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "div")) self.saw_div = true;
+            if (ev.kind == .text and std.mem.eql(u8, ev.valueSlice(), "keep")) self.saw_keep = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<main><p>skip<span>x</span><div>keep</div></main>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.saw_div);
+    try std.testing.expect(ctx.saw_keep);
+}
+
+test "streaming subtree skip ends when an ancestor is implicitly or explicitly closed" {
+    const Ctx = struct {
+        span_starts: usize = 0,
+        div_starts: usize = 0,
+        section_ends: usize = 0,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "span")) {
+                self.span_starts += 1;
+                return false;
+            }
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "div")) self.div_starts += 1;
+            if (ev.kind == .end_tag and !ev.implicit and std.mem.eql(u8, ev.nameSlice(), "section")) self.section_ends += 1;
+            return true;
+        }
+    };
+
+    var implicit_ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<p><span>skip<div>keep</div>", &implicit_ctx, Ctx.cb);
+    try std.testing.expectEqual(@as(usize, 1), implicit_ctx.span_starts);
+    try std.testing.expectEqual(@as(usize, 1), implicit_ctx.div_starts);
+
+    var explicit_ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<section><span>skip</section><div>keep</div>", &explicit_ctx, Ctx.cb);
+    try std.testing.expectEqual(@as(usize, 1), explicit_ctx.span_starts);
+    try std.testing.expectEqual(@as(usize, 1), explicit_ctx.section_ends);
+    try std.testing.expectEqual(@as(usize, 1), explicit_ctx.div_starts);
+}
+
+test "streaming subtree skip respects nested list scope" {
+    const Ctx = struct {
+        li_starts: usize = 0,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .start_tag or !std.mem.eql(u8, ev.nameSlice(), "li")) return true;
+            self.li_starts += 1;
+            return self.li_starts != 1;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<ul><li><ul><li>inner</li></ul>tail<li>next</ul>", &ctx, Ctx.cb);
+    // Outer LI and its next sibling are visible; the nested LI stays skipped.
+    try std.testing.expectEqual(@as(usize, 2), ctx.li_starts);
+}
+
 test "streaming parser skip subtree treats raw text as opaque" {
     const Ctx = struct {
         text_count: usize = 0,
@@ -922,6 +1068,34 @@ test "streaming closing-tag index maintains previous duplicate links" {
     try parse(std.testing.allocator, "<A><b><a></A><c></A>", &ctx, Ctx.cb);
     try std.testing.expect(ctx.implicit_c);
     try std.testing.expect(ctx.closed_outer_a);
+}
+
+test "streaming implicit end option suppresses mismatched-pop and optional-close events" {
+    const Ctx = struct {
+        implicit_count: usize = 0,
+        explicit_a: usize = 0,
+        div_depth: ?u32 = null,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .end_tag) {
+                if (ev.implicit) self.implicit_count += 1;
+                if (!ev.implicit and std.mem.eql(u8, ev.nameSlice(), "a")) self.explicit_a += 1;
+            }
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "div")) self.div_depth = ev.depth;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try (Parser{ .options = .{ .emit_implicit_end_tags = false } }).parse(
+        std.testing.allocator,
+        "<a><b></a><p><span>x<div></div>",
+        &ctx,
+        Ctx.cb,
+    );
+    try std.testing.expectEqual(@as(usize, 0), ctx.implicit_count);
+    try std.testing.expectEqual(@as(usize, 1), ctx.explicit_a);
+    try std.testing.expectEqual(@as(?u32, 0), ctx.div_depth);
 }
 
 test "streaming lazy closing snapshot handles stale reuse dirty suffix and long collisions" {

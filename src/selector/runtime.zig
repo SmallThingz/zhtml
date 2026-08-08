@@ -500,8 +500,10 @@ fn parseNthExpr(expr: []const u8) ?ast.NthExpr {
     };
 
     if (n_pos) |n_idx| {
-        const a_part = tables.trimAsciiWhitespace(expr[0..n_idx]);
+        const a_raw = expr[0..n_idx];
+        const a_part = tables.trimAsciiWhitespace(a_raw);
         const b_part = tables.trimAsciiWhitespace(expr[n_idx + 1 ..]);
+        if (a_part.len != a_raw.len) return null;
 
         const a: i32 = if (a_part.len == 0 or std.mem.eql(u8, a_part, "+"))
             1
@@ -513,13 +515,29 @@ fn parseNthExpr(expr: []const u8) ?ast.NthExpr {
         const b: i32 = if (b_part.len == 0)
             0
         else
-            std.fmt.parseInt(i32, b_part, 10) catch return null;
+            parseNthOffset(b_part) orelse return null;
 
         return .{ .a = a, .b = b };
     }
 
     const only = std.fmt.parseInt(i32, expr, 10) catch return null;
     return .{ .a = 0, .b = only };
+}
+
+fn parseNthOffset(part: []const u8) ?i32 {
+    const trimmed = tables.trimAsciiWhitespace(part);
+    if (trimmed.len == 0) return null;
+    if (trimmed[0] != '+' and trimmed[0] != '-') return null;
+
+    const negative = trimmed[0] == '-';
+    const digits = tables.trimAsciiWhitespace(trimmed[1..]);
+    if (digits.len == 0) return null;
+    // Whitespace is allowed between the sign and B, but B itself is an
+    // unsigned digit sequence; a second sign (for example `n + -1`) is invalid.
+    for (digits) |digit| if (!std.ascii.isDigit(digit)) return null;
+    const magnitude = std.fmt.parseInt(i64, digits, 10) catch return null;
+    const signed = if (negative) -magnitude else magnitude;
+    return std.math.cast(i32, signed);
 }
 
 test "runtime selector parser covers all attribute operators" {
@@ -584,8 +602,12 @@ test "runtime selector parser accepts nth-child shorthand variants" {
         ":nth-child(odd)",
         ":nth-child(even)",
         ":nth-child(3n+1)",
+        ":nth-child(3n + 1)",
+        ":nth-child(3n - 2)",
         ":nth-child(+3n-2)",
+        ":nth-child(+3n - 2)",
         ":nth-child(-n+6)",
+        ":nth-child(-n + 6)",
         ":nth-child(-n+5)",
         ":nth-child(2)",
     };
@@ -609,6 +631,11 @@ test "runtime selector parser rejects invalid selectors" {
         "div:not(.a,.b)",
         "div:nth-child()",
         "div:nth-child(2n+)",
+        "div:nth-child(2n1)",
+        "div:nth-child(2n 1)",
+        "div:nth-child(2 n+1)",
+        "div:nth-child(2n + -1)",
+        "div:nth-child(2n - +1)",
         "div:unknown",
         "[attr",
         "div[attr^]",

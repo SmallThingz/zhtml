@@ -110,6 +110,7 @@ pub const Stats = struct {
 pub fn Executor(comptime Doc: type) type {
     return struct {
         doc: *const Doc,
+        allocator: std.mem.Allocator,
         selector: ast.Selector,
         plan: Plan,
         scope_root: IndexInt,
@@ -126,6 +127,7 @@ pub fn Executor(comptime Doc: type) type {
         pub fn init(doc: *const Doc, selector: ast.Selector, plan: Plan, scope_root: IndexInt) Self {
             return .{
                 .doc = doc,
+                .allocator = doc.allocator,
                 .selector = selector,
                 .plan = plan,
                 .scope_root = scope_root,
@@ -134,9 +136,9 @@ pub fn Executor(comptime Doc: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            self.stack.deinit(self.doc.allocator);
+            self.stack.deinit(self.allocator);
             self.node_ctx.deinit();
-            self.predicate_plan.deinit(self.doc.allocator);
+            self.predicate_plan.deinit(self.allocator);
             self.seed_workspace.deinit();
             self.stack = .empty;
             self.initialized = false;
@@ -163,7 +165,7 @@ pub fn Executor(comptime Doc: type) type {
             parent.any_child_matches |= matched;
             const lineage = parent.lineage_matches | matched;
             if (raw.subtree_end > idx) {
-                try self.stack.append(self.doc.allocator, .{
+                try self.stack.append(self.allocator, .{
                     .subtree_end = raw.subtree_end,
                     .node_index = idx,
                     .self_matches = matched,
@@ -179,7 +181,7 @@ pub fn Executor(comptime Doc: type) type {
             const raw = &self.doc.nodes[idx];
             if (!raw.isElement(idx)) return false;
             self.stats.nodes_processed += 1;
-            self.node_ctx.begin(self.doc.allocator, 0);
+            self.node_ctx.begin(self.allocator, 0);
             for (self.selector.groups) |group| {
                 if (group.compound_len != 1) continue;
                 const comp = self.selector.compounds[group.compound_start];
@@ -200,6 +202,7 @@ pub fn Executor(comptime Doc: type) type {
 
         fn ensureInitialized(self: *Self) !void {
             self.initialized = true;
+            errdefer self.deinit();
             self.root = .{ .node_index = self.scope_root };
             if (self.scope_root == InvalidIndex or self.scope_root == 0 or self.scope_root >= self.doc.nodes.len) return;
             self.root.self_matches = try self.seedMaskAt(self.plan.scope_self_seed_mask, self.scope_root);
@@ -254,8 +257,8 @@ pub fn Executor(comptime Doc: type) type {
 
         fn evaluateEligible(self: *Self, node_index: IndexInt, eligible_bits: u64, child_position: usize) !u64 {
             if (eligible_bits == 0) return 0;
-            if (self.predicate_plan.state_ids.len == 0) self.predicate_plan = try matcher.PredicatePlan.init(self.doc.allocator, self.selector);
-            self.node_ctx.begin(self.doc.allocator, child_position);
+            if (self.predicate_plan.state_ids.len == 0) self.predicate_plan = try matcher.PredicatePlan.init(self.allocator, self.selector);
+            self.node_ctx.begin(self.allocator, child_position);
             var pending = eligible_bits;
             var seen: u64 = 0;
             var matched: u64 = 0;
@@ -283,6 +286,7 @@ pub fn Executor(comptime Doc: type) type {
 pub fn WideExecutor(comptime Doc: type) type {
     return struct {
         doc: *const Doc,
+        allocator: std.mem.Allocator,
         selector: ast.Selector,
         plan: Plan,
         scope_root: IndexInt,
@@ -323,6 +327,7 @@ pub fn WideExecutor(comptime Doc: type) type {
         pub fn init(doc: *const Doc, selector: ast.Selector, plan: Plan, scope_root: IndexInt) Self {
             return .{
                 .doc = doc,
+                .allocator = doc.allocator,
                 .selector = selector,
                 .plan = plan,
                 .scope_root = scope_root,
@@ -332,17 +337,17 @@ pub fn WideExecutor(comptime Doc: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            if (self.masks.len != 0) self.doc.allocator.free(self.masks);
+            if (self.masks.len != 0) self.allocator.free(self.masks);
             self.masks = &.{};
-            if (self.eligible_words.len != 0) self.doc.allocator.free(self.eligible_words);
+            if (self.eligible_words.len != 0) self.allocator.free(self.eligible_words);
             self.eligible_words = &.{};
-            self.states.deinit(self.doc.allocator);
+            self.states.deinit(self.allocator);
             self.states = .empty;
-            self.stack.deinit(self.doc.allocator);
+            self.stack.deinit(self.allocator);
             self.stack = .empty;
             self.node_ctx.deinit();
-            self.predicate_plan.deinit(self.doc.allocator);
-            if (self.seen_predicates.len != 0) self.doc.allocator.free(self.seen_predicates);
+            self.predicate_plan.deinit(self.allocator);
+            if (self.seen_predicates.len != 0) self.allocator.free(self.seen_predicates);
             self.seen_predicates = &.{};
             self.seed_workspace.deinit();
             self.initialized = false;
@@ -383,7 +388,7 @@ pub fn WideExecutor(comptime Doc: type) type {
                 orInto(lineage, matched);
                 @memset(self.state(temp_slot, .prev_child), 0);
                 @memset(self.state(temp_slot, .any_child), 0);
-                try self.stack.append(self.doc.allocator, .{
+                try self.stack.append(self.allocator, .{
                     .subtree_end = raw.subtree_end,
                     .slot = temp_slot,
                 });
@@ -395,9 +400,10 @@ pub fn WideExecutor(comptime Doc: type) type {
 
         fn ensureInitialized(self: *Self) !void {
             self.initialized = true;
-            self.masks = try self.doc.allocator.alloc(u64, self.word_count * MaskCount);
+            errdefer self.deinit();
+            self.masks = try self.allocator.alloc(u64, self.word_count * MaskCount);
             @memset(self.masks, 0);
-            self.eligible_words = try self.doc.allocator.alloc(u64, self.word_count);
+            self.eligible_words = try self.allocator.alloc(u64, self.word_count);
             @memset(self.eligible_words, 0);
             try self.ensureStateSlots(2);
             @memset(self.states.items, 0);
@@ -481,11 +487,11 @@ pub fn WideExecutor(comptime Doc: type) type {
 
         fn evaluateNode(self: *Self, node_index: IndexInt, child_position: usize, matched: []u64) !void {
             if (self.predicate_plan.state_ids.len == 0) {
-                self.predicate_plan = try matcher.PredicatePlan.init(self.doc.allocator, self.selector);
-                self.seen_predicates = try self.doc.allocator.alloc(u64, (self.predicate_plan.count + 63) / 64);
+                self.predicate_plan = try matcher.PredicatePlan.init(self.allocator, self.selector);
+                self.seen_predicates = try self.allocator.alloc(u64, (self.predicate_plan.count + 63) / 64);
             }
             @memset(self.seen_predicates, 0);
-            self.node_ctx.begin(self.doc.allocator, child_position);
+            self.node_ctx.begin(self.allocator, child_position);
             for (self.eligible_words, 0..) |eligible_word, word_index| {
                 var pending = eligible_word;
                 while (pending != 0) {
@@ -514,7 +520,7 @@ pub fn WideExecutor(comptime Doc: type) type {
             const needed = slots * self.word_count * 4;
             if (self.states.items.len >= needed) return;
             const old_len = self.states.items.len;
-            try self.states.resize(self.doc.allocator, needed);
+            try self.states.resize(self.allocator, needed);
             @memset(self.states.items[old_len..], 0);
         }
 

@@ -368,15 +368,30 @@ fn ParseState(comptime opts: ParseOptions) type {
 
         inline fn applyImplicitClosures(noalias self: *Self, new_tag: []const u8, new_tag_key: u64) void {
             while (self.parse_stack.items.len > 1) {
-                const top = self.parse_stack.items[self.parse_stack.items.len - 1];
-                if (!tags.isImplicitCloseSourceWithLenAndKey(top.tag_len, top.tag_key)) break;
-                if (!tags.shouldImplicitlyCloseWithLenAndKey(top.tag_len, top.tag_key, new_tag, new_tag_key)) break;
+                var pos = self.parse_stack.items.len;
+                var found: ?usize = null;
+                var scope: tags.ImplicitCloseScope = .{};
+                while (pos > 1) {
+                    pos -= 1;
+                    const open = self.parse_stack.items[pos];
+                    if (tags.isImplicitCloseSourceWithLenAndKey(open.tag_len, open.tag_key) and
+                        tags.shouldImplicitlyCloseWithLenAndKey(open.tag_len, open.tag_key, new_tag, new_tag_key) and
+                        scope.permits(open.tag_len, open.tag_key))
+                    {
+                        found = pos;
+                        break;
+                    }
+                    scope.observe(open.tag_len, open.tag_key);
+                }
 
-                // Optional-close rules rewrite nesting into sibling structure
-                // before the incoming tag is appended.
-                _ = self.popOpen();
-                var n = &self.nodes.items[top.idx];
-                n.subtree_end = @intCast(self.nodes.items.len - 1);
+                const found_pos = found orelse break;
+                // Pop the optional-close source and every inline descendant
+                // above it, exactly as an explicit close of that source would.
+                while (self.parse_stack.items.len > found_pos) {
+                    const popped = self.popOpen();
+                    var n = &self.nodes.items[popped.idx];
+                    n.subtree_end = @intCast(self.nodes.items.len - 1);
+                }
             }
         }
 
@@ -1137,6 +1152,27 @@ test "optional-close p/li/td-th/dt-dd/head-body preserve expected query semantic
     try std.testing.expect(firstQuery(doc.query("#td1 + #th1")) != null);
     try std.testing.expect(firstQuery(doc.query("#th1 + #td2")) != null);
     try std.testing.expect(firstQuery(doc.query("head + body")) != null);
+}
+
+test "optional-close sources are found through inline descendants without crossing scope" {
+    const alloc = std.testing.allocator;
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+
+    var html = ("<p id='p'><span id='ps'>x<div id='d'></div>" ++
+        "<ul><li id='li1'><span>x<li id='li2'>y</ul>" ++
+        "<p id='p-li'>x<li id='loose-li'>y" ++
+        "<dl><dt id='dt'><span>x<dd id='dd'>y</dl>" ++
+        "<p id='scoped'><button><span>x<div id='inside-button'></div></button></p>" ++
+        "<ul><li id='outer-li'><button><span>x<li id='after-button-li'>y</ul>").*;
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    try std.testing.expect(firstQuery(doc.query("#p + #d")) != null);
+    try std.testing.expect(firstQuery(doc.query("#li1 + #li2")) != null);
+    try std.testing.expect(firstQuery(doc.query("#p-li + #loose-li")) != null);
+    try std.testing.expect(firstQuery(doc.query("#dt + #dd")) != null);
+    try std.testing.expect(firstQuery(doc.query("#scoped #inside-button")) != null);
+    try std.testing.expect(firstQuery(doc.query("#outer-li + #after-button-li")) != null);
 }
 
 test "p optional-close set includes modern block elements" {
