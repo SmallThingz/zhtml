@@ -12,17 +12,16 @@ pub fn run() !void {
 
     const gpa = std.testing.allocator;
     const normalized = try node.innerTextWithOptions(gpa, .{});
-    defer normalized.free(&doc, gpa);
+    defer normalized.free(gpa);
     try std.testing.expectEqualStrings("Hello world & team", normalized.value);
 
     const raw = try node.innerTextWithOptions(gpa, .{ .normalize_whitespace = false });
-    defer raw.free(&doc, gpa);
+    defer raw.free(gpa);
     try std.testing.expect(std.mem.indexOfScalar(u8, raw.value, '\n') != null);
 
     const owned = try node.innerTextOwnedWithOptions(gpa, .{});
     defer gpa.free(owned);
     try std.testing.expectEqualStrings("Hello world & team", owned);
-    try std.testing.expect(!doc.isOwnedSlice(owned));
 }
 
 test "innerText whitespace options" {

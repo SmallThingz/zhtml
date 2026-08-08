@@ -25,11 +25,6 @@ fn isIdentStart(c: u8) bool {
     return std.ascii.isAlphabetic(c) or c == '_' or c == ':';
 }
 
-/// CSS selector identifier continuation.
-fn isIdentChar(c: u8) bool {
-    return isIdentStart(c) or std.ascii.isDigit(c) or c == '-' or c == '.';
-}
-
 /// Returns whether byte is consumed by the HTML tag-name state.
 /// Matches the tokenizer shape: continue until whitespace, `/`, `>`, or NUL.
 fn isTagNameChar(c: u8) bool {
@@ -46,8 +41,6 @@ fn isAttrNameChar(c: u8) bool {
 pub const WhitespaceTable = makeClassTable(isWhitespace);
 /// Precomputed CSS selector identifier-start classification table.
 pub const IdentStartTable = makeClassTable(isIdentStart);
-/// Precomputed CSS selector identifier-char classification table.
-pub const IdentCharTable = makeClassTable(isIdentChar);
 /// Precomputed tag-name-char classification table.
 pub const TagNameCharTable = makeClassTable(isTagNameChar);
 /// Precomputed permissive attribute-name-char classification table.

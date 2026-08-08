@@ -34,33 +34,23 @@ inline fn bit(index: usize) u64 {
 }
 
 pub fn buildPlan(selector: ast.Selector) Plan {
-    if (selector.compounds.len > MaxForwardCompounds) {
-        // Beyond one machine word only `stateful` and child-position features
-        // matter; the wide executor compiles its own masks from the selector.
-        var plan: Plan = .{};
-        var stateful = false;
-        for (selector.groups) |group| {
-            if (group.compound_len > 1) stateful = true;
-            var rel: IndexInt = 0;
-            while (rel < group.compound_len) : (rel += 1) {
-                inspectCompoundFeatures(selector, selector.compounds[group.compound_start + rel], &plan, &stateful);
-            }
-        }
-        plan.stateful = stateful;
-        return plan;
-    }
-
     var plan: Plan = .{};
-    var stateful = false;
+    const compact = selector.compounds.len <= MaxForwardCompounds;
+
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
+        if (group.compound_len > 1) plan.stateful = true;
+
         const start: usize = @intCast(group.compound_start);
         const len: usize = @intCast(group.compound_len);
-        plan.final_mask |= bit(start + len - 1);
+        if (compact) plan.final_mask |= bit(start + len - 1);
 
         for (0..len) |relative| {
             const absolute = start + relative;
             const comp = selector.compounds[absolute];
+            inspectCompoundFeatures(selector, comp, &plan);
+            if (!compact) continue;
+
             const compound_bit = bit(absolute);
             if (relative == 0) {
                 // Leading combinators are anchored checks in processSimple, not
@@ -71,33 +61,30 @@ pub fn buildPlan(selector: ast.Selector) Plan {
                     .descendant => plan.start_descendant |= compound_bit,
                     .adjacent, .sibling => {},
                 }
-            } else {
-                stateful = true;
-                switch (comp.combinator) {
-                    .child => plan.child_targets |= compound_bit,
-                    .descendant => plan.descendant_targets |= compound_bit,
-                    .adjacent => plan.adjacent_targets |= compound_bit,
-                    .sibling => plan.sibling_targets |= compound_bit,
-                    .none => {},
-                }
+            } else switch (comp.combinator) {
+                .child => plan.child_targets |= compound_bit,
+                .descendant => plan.descendant_targets |= compound_bit,
+                .adjacent => plan.adjacent_targets |= compound_bit,
+                .sibling => plan.sibling_targets |= compound_bit,
+                .none => {},
             }
-            inspectCompoundFeatures(selector, comp, &plan, &stateful);
         }
     }
 
-    plan.scope_self_seed_mask = (plan.child_targets | plan.descendant_targets) >> 1;
-    plan.scope_lineage_seed_mask = plan.descendant_targets >> 1;
-    plan.stateful = stateful;
+    if (compact) {
+        plan.scope_self_seed_mask = (plan.child_targets | plan.descendant_targets) >> 1;
+        plan.scope_lineage_seed_mask = plan.descendant_targets >> 1;
+    }
     return plan;
 }
 
-fn inspectCompoundFeatures(selector: ast.Selector, comp: ast.Compound, plan: *Plan, stateful: *bool) void {
+fn inspectCompoundFeatures(selector: ast.Selector, comp: ast.Compound, plan: *Plan) void {
     var i: IndexInt = 0;
     while (i < comp.pseudo_len) : (i += 1) {
         switch (selector.pseudos[comp.pseudo_start + i].kind) {
             .first_child, .nth_child => {
                 plan.needs_child_position = true;
-                stateful.* = true;
+                plan.stateful = true;
             },
             .last_child => {},
         }
@@ -128,7 +115,7 @@ pub fn Executor(comptime Doc: type) type {
         scope_root: IndexInt,
         root: Frame = .{},
         stack: std.ArrayListUnmanaged(Frame) = .empty,
-        node_ctx: matcher.ForwardNodeContext = .{},
+        node_ctx: matcher.NodeContext = .{},
         predicate_plan: matcher.PredicatePlan = .{},
         seed_workspace: matcher.MatchWorkspace,
         stats: Stats = .{},
@@ -304,7 +291,7 @@ pub fn WideExecutor(comptime Doc: type) type {
         eligible_words: []u64 = &.{},
         states: std.ArrayListUnmanaged(u64) = .empty,
         stack: std.ArrayListUnmanaged(WideFrame) = .empty,
-        node_ctx: matcher.ForwardNodeContext = .{},
+        node_ctx: matcher.NodeContext = .{},
         predicate_plan: matcher.PredicatePlan = .{},
         seen_predicates: []u64 = &.{},
         seed_workspace: matcher.MatchWorkspace,

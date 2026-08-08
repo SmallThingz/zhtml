@@ -24,10 +24,6 @@ test "example parity: strictest and fastest selectors agree" {
     try examples.strict_vs_fastest_parse.run();
 }
 
-test "example parity: instrumentation hooks" {
-    try examples.instrumentation_hooks.run();
-}
-
 test "example parity: query-time decode" {
     try examples.query_time_decode.run();
 }

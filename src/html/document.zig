@@ -10,12 +10,9 @@ const tables = @import("tables.zig");
 const attr = @import("attr.zig");
 const entities = @import("entities.zig");
 const tags = @import("tags.zig");
-const runtime_selector = @import("../selector/runtime.zig");
 const ast = @import("../selector/ast.zig");
 const matcher = @import("../selector/matcher.zig");
 const forward = @import("../selector/forward.zig");
-const matcher_debug = @import("../selector/matcher_debug.zig");
-const instrumentation = @import("../debug/instrumentation.zig");
 const parser = @import("parser.zig");
 const common = @import("../common.zig");
 const IndexInt = common.IndexInt;
@@ -34,38 +31,7 @@ pub const EntityEncoding = enum {
 };
 pub const EntityDecoding = entities.EntityDecoding;
 /// Inclusive-exclusive byte span into the document source buffer.
-pub const Span = struct {
-    /// Inclusive start byte offset in the document source.
-    start: IndexInt,
-    /// Number of bytes in the span.
-    len: IndexInt,
-
-    /// Returns the exclusive end byte offset in the document source.
-    pub fn end(self: @This()) IndexInt {
-        return self.start + self.len;
-    }
-
-    /// Updates span length from an exclusive end offset.
-    pub fn setEnd(self: *@This(), end_offset: IndexInt) void {
-        std.debug.assert(end_offset >= self.start);
-        self.len = end_offset - self.start;
-    }
-
-    /// Borrows immutable bytes referenced by this span.
-    pub fn slice(self: @This(), source: []const u8) []const u8 {
-        return source[self.start..self.end()];
-    }
-
-    /// Borrows mutable bytes referenced by this span.
-    pub fn sliceMut(self: @This(), source: []u8) []u8 {
-        return source[self.start..self.end()];
-    }
-
-    /// Formats this span for human-readable output.
-    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("Span{{start={}, len={}}}", .{ self.start, self.len });
-    }
-};
+pub const Span = common.Span;
 
 /// Compile-time parser options and type factory for generated public API types.
 pub const ParseOptions = struct {
@@ -104,34 +70,9 @@ pub const ParseOptions = struct {
         return parser.parse(options, gpa, input);
     }
 
-    /// Returns the lightweight node wrapper type bound to this option set.
-    pub fn Node(options: @This()) type {
-        return GetNode(options);
-    }
-
-    /// Returns the lazy query iterator type for this option set.
-    pub fn QueryIter(options: @This()) type {
-        return GetQueryIter(options);
-    }
-
-    /// Returns the structured result type for debug query helpers.
-    pub fn QueryDebugResult(options: @This()) type {
-        return GetQueryDebugResult(options);
-    }
-
-    /// Returns direct-child iterator type for this option set.
-    pub fn ChildrenIter(options: @This()) type {
-        return GetChildrenIter(options);
-    }
-
     /// Returns the document type (parser + query surface) for this option set.
     pub fn Document(options: @This()) type {
         return GetDocument(options);
-    }
-
-    /// Returns the raw node storage type for this option set.
-    pub fn RawNode(options: @This()) type {
-        return GetRawNode(options);
     }
 
     /// Formats parse options for human-readable output.
@@ -189,11 +130,10 @@ pub fn GetRawNode(comptime options: ParseOptions) type {
 fn GetNode(comptime options: ParseOptions) type {
     return struct {
         //! Public node wrapper that carries document pointer + node index.
-        const RawNodeType = options.RawNode();
+        const RawNodeType = GetRawNode(options);
         const DocType = options.Document();
-        const ChildrenIterType = options.ChildrenIter();
-        const DebugQueryResultType = options.QueryDebugResult();
-        const QueryIterType = options.QueryIter();
+        const ChildrenIterType = GetChildrenIter(options);
+        const QueryIterType = GetQueryIter(options);
         const Self = @This();
 
         /// Controls text extraction behavior for `innerText*` APIs.
@@ -212,45 +152,19 @@ fn GetNode(comptime options: ParseOptions) type {
             }
         };
 
-        /// Text lookup result. `value` may borrow document source or point to an
-        /// allocation made with the allocator passed to `innerTextWithOptions`.
-        pub const TextResult = struct {
-            /// Text bytes for the requested subtree.
+        /// Byte-slice result that may either borrow document source or own an
+        /// allocation made by the caller-supplied allocator.
+        pub const SliceResult = struct {
             value: []const u8,
+            owned: bool = false,
 
-            /// Returns true when `value` points inside `doc` source.
-            pub fn isBorrowed(self: @This(), doc: *const DocType) bool {
-                return doc.isOwnedSlice(self.value);
-            }
-
-            /// Frees `value` only when it is not borrowed from `doc` source.
-            pub fn free(self: @This(), doc: *const DocType, gpa: std.mem.Allocator) void {
-                if (self.value.len == 0 or self.isBorrowed(doc)) return;
-                gpa.free(self.value);
+            pub fn free(self: @This(), gpa: std.mem.Allocator) void {
+                if (self.owned and self.value.len != 0) gpa.free(self.value);
             }
         };
 
-        /// Attribute lookup result. `value` may borrow document source or point
-        /// to an allocation made with the allocator passed to `getAttributeValue`.
-        pub const AttributeValueResult = struct {
-            /// Decoded attribute value bytes.
-            value: []const u8,
-
-            /// Returns true when `value` points inside `doc` source.
-            pub fn isBorrowed(self: @This(), doc: *const DocType) bool {
-                return doc.isOwnedSlice(self.value);
-            }
-
-            /// Frees `value` only when it is not borrowed from `doc` source.
-            pub fn free(self: @This(), doc: *const DocType, gpa: std.mem.Allocator) void {
-                if (self.value.len == 0 or self.isBorrowed(doc)) return;
-                if (comptime options.non_destructive) {
-                    gpa.free(self.value);
-                } else {
-                    unreachable; // Logic error in library
-                }
-            }
-        };
+        pub const TextResult = SliceResult;
+        pub const AttributeValueResult = SliceResult;
 
         /// Returns the error set exposed by a writer value or writer pointer.
         pub fn WriterError(comptime WriterType: type) type {
@@ -338,7 +252,7 @@ fn GetNode(comptime options: ParseOptions) type {
                         return .{ .value = try self.innerTextOwnedFromScan(gpa, opts, .{
                             .first_idx = first_idx,
                             .resume_idx = first_idx + 1,
-                        }) };
+                        }), .owned = true };
                     }
                     break;
                 } else {
@@ -351,7 +265,7 @@ fn GetNode(comptime options: ParseOptions) type {
                     return .{ .value = try self.innerTextOwnedFromScan(gpa, opts, .{
                         .first_idx = first_idx,
                         .resume_idx = idx,
-                    }) };
+                    }), .owned = true };
                 }
 
                 break :blk first_idx;
@@ -363,7 +277,7 @@ fn GetNode(comptime options: ParseOptions) type {
                 return .{ .value = try self.innerTextOwnedFromScan(gpa, opts, .{
                     .first_idx = first_idx,
                     .resume_idx = first_idx + 1,
-                }) };
+                }), .owned = true };
             }
 
             if (comptime opts.unescape or opts.normalize_whitespace) {
@@ -374,7 +288,7 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         /// Materializes text by scanning all text descendants from a known first text node.
-        fn innerTextOwnedFromScan(self: @This(), gpa: std.mem.Allocator, comptime opts: Self.TextOptions, scan: InnerTextProbe.Scan) ![]const u8 {
+        fn innerTextOwnedFromScan(self: @This(), gpa: std.mem.Allocator, comptime opts: Self.TextOptions, scan: TextScan) ![]const u8 {
             const doc = self.doc;
             const node_raw = self.raw();
 
@@ -456,40 +370,10 @@ fn GetNode(comptime options: ParseOptions) type {
         }
 
         /// Owned variant of `innerTextWithOptions`.
-        /// It is also valid to call this on a text node
         pub fn innerTextOwnedWithOptions(self: @This(), gpa: std.mem.Allocator, comptime opts: Self.TextOptions) ![]const u8 {
-            const node_raw = self.raw();
-            const doc = self.doc;
-
-            if (node_raw.isText(self.index)) {
-                if (comptime !options.non_destructive and opts.unescape) {
-                    materializeRwText(doc, self.index, true, false);
-                }
-                var out = std.ArrayList(u8).empty;
-                errdefer out.deinit(gpa);
-                try out.appendSlice(gpa, node_raw.name_or_text.slice(doc.source));
-                if (comptime options.non_destructive and opts.unescape) {
-                    if (!isOpaqueTextNode(doc, self.index)) out.items.len = entities.decodeInPlaceWithMode(options.entity_decoding, false, out.items);
-                }
-                return try finishInnerTextOwned(
-                    &out,
-                    gpa,
-                    opts,
-                    opts.unescape,
-                    false,
-                );
-            }
-
-            var idx = self.index + 1;
-            while (idx <= node_raw.subtree_end and idx < doc.nodes.len) : (idx += 1) {
-                if (!doc.nodes[idx].isText(idx)) continue;
-                return innerTextOwnedFromScan(self, gpa, opts, .{
-                    .first_idx = idx,
-                    .resume_idx = idx + 1,
-                });
-            }
-
-            return try gpa.alloc(u8, 0);
+            const result = try self.innerTextWithOptions(gpa, opts);
+            if (result.owned) return result.value;
+            return try gpa.dupe(u8, result.value);
         }
 
         /// Decodes and/or normalizes one RW text span and records decoded state
@@ -531,7 +415,15 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Returns decoded attribute value for `name`, if present.
         pub fn getAttributeValue(self: @This(), allocator: std.mem.Allocator, name: []const u8) !?AttributeValueResult {
             self.assertElement();
-            return .{ .value = try attr.getAttrValue(self.doc, &self.doc.nodes[self.index], name, allocator) orelse return null };
+            const value = try attr.getAttrValue(self.doc, &self.doc.nodes[self.index], name, allocator) orelse return null;
+            return .{ .value = value, .owned = value.len != 0 and !sliceBorrowed(self.doc, value) };
+        }
+
+        fn sliceBorrowed(doc: *const DocType, bytes: []const u8) bool {
+            if (doc.source.len == 0 or bytes.len == 0) return false;
+            const source_start = @intFromPtr(doc.source.ptr);
+            const bytes_start = @intFromPtr(bytes.ptr);
+            return bytes_start >= source_start and bytes_start + bytes.len <= source_start + doc.source.len;
         }
 
         /// Returns raw attribute value bytes for `name`, if present.
@@ -574,14 +466,9 @@ fn GetNode(comptime options: ParseOptions) type {
             };
         }
 
-        const InnerTextProbe = union(enum) {
-            const Scan = struct {
-                first_idx: IndexInt,
-                resume_idx: IndexInt,
-            };
-
-            borrowed: []const u8,
-            owned: Scan,
+        const TextScan = struct {
+            first_idx: IndexInt,
+            resume_idx: IndexInt,
         };
 
         /// Writes HTML serialization of this node and its subtree to `writer`.
@@ -609,23 +496,7 @@ fn GetNode(comptime options: ParseOptions) type {
             comptime entity_encoding: EntityEncoding,
         ) WriterError(@TypeOf(writer))!void {
             if (node_raw.isText(idx)) {
-                const raw_text = isOpaqueTextNode(doc, idx);
-                if (comptime entity_encoding == .force and !options.non_destructive) materializeRwText(doc, idx, true, false);
-                const text_bytes = node_raw.name_or_text.slice(doc.source);
-                const decoded = !options.non_destructive and node_raw.name_or_text.end() < doc.source.len and doc.source[node_raw.name_or_text.end()] == 0;
-                if (comptime entity_encoding == .force) {
-                    if (raw_text) {
-                        try writer.writeAll(text_bytes);
-                    } else if (comptime options.non_destructive) {
-                        try writeDecodedEscaped(writer, text_bytes, false);
-                    } else {
-                        try writeEscapedText(writer, text_bytes);
-                    }
-                } else if (comptime entity_encoding == .auto and !options.non_destructive) {
-                    if (raw_text or !decoded) try writer.writeAll(text_bytes) else try writeEscapedText(writer, text_bytes);
-                } else {
-                    try writer.writeAll(text_bytes);
-                }
+                try writeTextHtml(doc, idx, node_raw, writer, entity_encoding);
                 return;
             }
 
@@ -648,23 +519,7 @@ fn GetNode(comptime options: ParseOptions) type {
 
                 const child = &doc.nodes[next_idx];
                 if (child.isText(next_idx)) {
-                    const raw_text = isOpaqueTextNode(doc, next_idx);
-                    if (comptime entity_encoding == .force and !options.non_destructive) materializeRwText(doc, next_idx, true, false);
-                    const text_bytes = child.name_or_text.slice(doc.source);
-                    const decoded = !options.non_destructive and child.name_or_text.end() < doc.source.len and doc.source[child.name_or_text.end()] == 0;
-                    if (comptime entity_encoding == .force) {
-                        if (raw_text) {
-                            try writer.writeAll(text_bytes);
-                        } else if (comptime options.non_destructive) {
-                            try writeDecodedEscaped(writer, text_bytes, false);
-                        } else {
-                            try writeEscapedText(writer, text_bytes);
-                        }
-                    } else if (comptime entity_encoding == .auto and !options.non_destructive) {
-                        if (raw_text or !decoded) try writer.writeAll(text_bytes) else try writeEscapedText(writer, text_bytes);
-                    } else {
-                        try writer.writeAll(text_bytes);
-                    }
+                    try writeTextHtml(doc, next_idx, child, writer, entity_encoding);
                     continue;
                 }
 
@@ -683,6 +538,22 @@ fn GetNode(comptime options: ParseOptions) type {
                 const parent = doc.nodes[open_idx].parent;
                 open_idx = if (parent != InvalidIndex and parent != 0) parent else InvalidIndex;
             }
+        }
+
+        fn writeTextHtml(doc: anytype, idx: IndexInt, node_raw: anytype, writer: anytype, comptime entity_encoding: EntityEncoding) WriterError(@TypeOf(writer))!void {
+            const raw_text = isOpaqueTextNode(doc, idx);
+            if (comptime entity_encoding == .force and !options.non_destructive) materializeRwText(doc, idx, true, false);
+            const text_bytes = node_raw.name_or_text.slice(doc.source);
+            const decoded = !options.non_destructive and node_raw.name_or_text.end() < doc.source.len and doc.source[node_raw.name_or_text.end()] == 0;
+            if (comptime entity_encoding == .force) {
+                if (raw_text) return writer.writeAll(text_bytes);
+                if (comptime options.non_destructive) return writeDecodedEscaped(writer, text_bytes, false);
+                return writeEscapedText(writer, text_bytes);
+            }
+            if (comptime entity_encoding == .auto) {
+                if (!options.non_destructive and !raw_text and decoded) return writeEscapedText(writer, text_bytes);
+            }
+            return writer.writeAll(text_bytes);
         }
 
         /// Writes an element start tag and its serialized attributes.
@@ -709,73 +580,42 @@ fn GetNode(comptime options: ParseOptions) type {
 
         /// Writes serialized attributes from raw or destructively parsed attr bytes.
         fn writeAttrsHtml(doc: anytype, noalias node_raw: anytype, writer: anytype, comptime entity_encoding: EntityEncoding) WriterError(@TypeOf(writer))!void {
-            var i: usize = @intCast(node_raw.name_or_text.end());
+            const i: usize = @intCast(node_raw.name_or_text.end());
             if (comptime !options.non_destructive) {
                 attr.materializeAttributes(options.entity_decoding, doc.source, i);
                 const source: []const u8 = doc.source;
-                while (i < source.len and source[i] != '>') {
-                    const name_start = i;
-                    while (i < source.len and source[i] != '=' and source[i] != 0 and source[i] != '>') : (i += 1) {}
-                    if (i >= source.len or source[i] == '>') return;
-                    try writeAttrName(writer, source[name_start..i]);
-                    if (source[i] == '=') {
-                        const value_start = i + 1;
-                        i = value_start;
-                        while (i < source.len and source[i] != 0) : (i += 1) {}
+                var it: attr.CompactIterator = .{ .source = source, .cursor = i };
+                while (it.next()) |item| {
+                    try writeAttrName(writer, item.name);
+                    if (item.value) |value| {
                         if (comptime entity_encoding == .force) {
                             try writer.writeAll("=\"");
-                            try writeEscapedAttrValue(writer, source[value_start..i]);
+                            try writeEscapedAttrValue(writer, value);
                             try writeByte(writer, '"');
                         } else {
-                            try writeAttrValue(writer, source[value_start..i]);
+                            try writeAttrValue(writer, value);
                         }
                     }
-                    if (i < source.len) i += 1;
                 }
                 return;
             }
 
             const source: []const u8 = doc.source;
-            const end = source.len;
-
-            while (i < end) {
-                while (i < end and tables.WhitespaceTable[source[i]]) : (i += 1) {}
-                if (i >= end) return;
-
-                const name_start = i;
-                const scanned = attr.scanAttrNameOrSkip(source, end, i);
-                const name = scanned.name orelse return;
-                i = scanned.next_start;
-                if (name.len == 0) continue;
-                const delim_index = attr.valueDelimiterIndex(source, end, i);
-                if (delim_index >= end) {
-                    try writeAttrName(writer, name);
-                    return;
-                }
-
-                const delim = source[delim_index];
-                if (delim == '=') {
-                    const raw_value = attr.parseRawValue(source, end, delim_index);
-                    if (comptime entity_encoding == .force) {
-                        try writeAttrName(writer, name);
-                        try writer.writeAll("=\"");
-                        try writeDecodedEscaped(writer, source[raw_value.start..raw_value.end], true);
-                        try writeByte(writer, '"');
-                    } else {
-                        try writeByte(writer, ' ');
-                        try writer.writeAll(source[name_start..raw_value.next_start]);
-                    }
-                    i = raw_value.next_start;
+            var it: attr.RawIterator = .{ .source = source, .cursor = i, .end = source.len };
+            while (it.next()) |item| {
+                if (!item.has_value) {
+                    try writeAttrName(writer, item.name);
                     continue;
                 }
-
-                if (delim == '>' or delim == '/') {
-                    try writeAttrName(writer, name);
-                    return;
+                if (comptime entity_encoding == .force) {
+                    try writeAttrName(writer, item.name);
+                    try writer.writeAll("=\"");
+                    try writeDecodedEscaped(writer, source[item.raw.start..item.raw.end], true);
+                    try writeByte(writer, '"');
+                } else {
+                    try writeByte(writer, ' ');
+                    try writer.writeAll(source[item.name_start..item.raw.next_start]);
                 }
-
-                try writeAttrName(writer, name);
-                i = if (delim_index == i) i + 1 else delim_index;
             }
         }
 
@@ -929,7 +769,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         //! Lazy selector iterator over document or scoped subtree matches.
         //! Matcher scratch is retained across `next` calls and freed on exhaustion or `deinit`.
         const DocType = options.Document();
-        const NodeTypeWrapper = options.Node();
+        const NodeTypeWrapper = GetNode(options);
         const ForwardExecutor = forward.Executor(DocType);
         const WideForwardExecutor = forward.WideExecutor(DocType);
         const Engine = union(enum) {
@@ -1016,24 +856,12 @@ fn GetQueryIter(comptime options: ParseOptions) type {
     };
 }
 
-/// Builds the debug query result type for a parse option set.
-fn GetQueryDebugResult(comptime options: ParseOptions) type {
-    return struct {
-        /// First matching node, if any.
-        node: ?options.Node() = null,
-        /// Detailed mismatch diagnostics for the attempted query.
-        report: common.QueryDebugReport = .{},
-        /// Runtime parse error, if selector compilation failed.
-        err: ?runtime_selector.Error = null,
-    };
-}
-
 /// Builds the direct element-child iterator type for a parse option set.
 fn GetChildrenIter(comptime options: ParseOptions) type {
     return struct {
         //! Iterator over direct child nodes for a parent node.
         const DocType = options.Document();
-        const NodeTypeWrapper = options.Node();
+        const NodeTypeWrapper = GetNode(options);
 
         /// Owning document pointer.
         doc: *const DocType,
@@ -1096,11 +924,10 @@ fn GetDocument(comptime options: ParseOptions) type {
     return struct {
         //! Parsed document owner and query entrypoint container.
         pub const Options = options;
-        const RawNodeType = options.RawNode();
-        const DebugQueryResultType = options.QueryDebugResult();
-        const ChildrenIterType = options.ChildrenIter();
-        const NodeTypeWrapper = options.Node();
-        const QueryIterType = options.QueryIter();
+        const RawNodeType = GetRawNode(options);
+        const ChildrenIterType = GetChildrenIter(options);
+        const NodeTypeWrapper = GetNode(options);
+        const QueryIterType = GetQueryIter(options);
 
         /// Allocator used for node storage and caller-directed temporary work.
         allocator: std.mem.Allocator,
@@ -1139,16 +966,6 @@ fn GetDocument(comptime options: ParseOptions) type {
             return @constCast(@as([]const u8, &[_]u8{}));
         }
 
-        /// Returns whether `bytes` points inside the document's source buffer.
-        pub fn isOwnedSlice(self: *const @This(), bytes: []const u8) bool {
-            if (self.source.len == 0 or bytes.len == 0) return false;
-            const source_start = @intFromPtr(self.source.ptr);
-            const source_end = source_start + self.source.len;
-            const bytes_start = @intFromPtr(bytes.ptr);
-            const bytes_end = bytes_start + bytes.len;
-            return bytes_start >= source_start and bytes_end <= source_end;
-        }
-
         pub fn root(self: *const @This()) NodeTypeWrapper {
             return self.nodeAt(0);
         }
@@ -1163,20 +980,6 @@ fn GetDocument(comptime options: ParseOptions) type {
         /// Call iterator `deinit` when stopping before exhaustion.
         pub fn queryRuntime(self: *const @This(), sel: ast.Selector) QueryIterType {
             return self.root().queryIter(sel, forward.buildPlan(sel));
-        }
-
-        /// Runs debug selector matching from a document or node scope.
-        fn debugFirstMatchFrom(self: *const @This(), sel: ast.Selector, scope_root: IndexInt) !DebugQueryResultType {
-            var report: common.QueryDebugReport = .{};
-            var scratch = std.heap.ArenaAllocator.init(self.allocator);
-            defer scratch.deinit();
-            const idx = (try matcher_debug.explainFirstMatch(@This(), self, scratch.allocator(), sel, scope_root, &report)) orelse {
-                return .{ .report = report };
-            };
-            return .{
-                .node = .{ .doc = self, .index = idx },
-                .report = report,
-            };
         }
 
         /// Returns first `<html>` element in the document.
@@ -1432,7 +1235,7 @@ test "non-destructive parse preserves caller bytes and formats exact original so
     try std.testing.expectEqualStrings("a&b", attr_value.value);
 
     const text = try node.innerTextWithOptions(alloc, .{});
-    defer text.free(&doc, alloc);
+    defer text.free(alloc);
     try std.testing.expectEqualStrings("a & b", text.value);
 
     try std.testing.expectEqualSlices(u8, before[0..], html[0..]);
@@ -1499,13 +1302,13 @@ test "attribute value results distinguish borrowed and allocated non-destructive
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const plain = (try node.getAttributeValue(alloc, "plain")) orelse return error.TestUnexpectedResult;
-    defer plain.free(&doc, alloc);
-    try std.testing.expect(plain.isBorrowed(&doc));
+    defer plain.free(alloc);
+    try std.testing.expect(!plain.owned);
     try std.testing.expectEqualStrings("abc", plain.value);
 
     const decoded = (try node.getAttributeValue(alloc, "data-v")) orelse return error.TestUnexpectedResult;
-    defer decoded.free(&doc, alloc);
-    try std.testing.expect(!decoded.isBorrowed(&doc));
+    defer decoded.free(alloc);
+    try std.testing.expect(decoded.owned);
     try std.testing.expectEqualStrings("a&b", decoded.value);
     try std.testing.expectEqualStrings("a&amp;b", node.getAttributeValueRaw("data-v") orelse return error.TestUnexpectedResult);
 }
@@ -1521,7 +1324,7 @@ test "non-destructive attribute with undecodable ampersand does not allocate" {
     var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const value = (try node.getAttributeValue(failing.allocator(), "data-v")) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(value.isBorrowed(&doc));
+    try std.testing.expect(!value.owned);
     try std.testing.expectEqualStrings("a&bogus", value.value);
 }
 
@@ -1570,7 +1373,7 @@ test "non-destructive text reads do not rewrite text bytes" {
 
     const node = firstQuery(doc.query("p#x")) orelse return error.TestUnexpectedResult;
     const text = try node.innerTextWithOptions(alloc, .{});
-    defer text.free(&doc, alloc);
+    defer text.free(alloc);
     try std.testing.expectEqualStrings("a & b", text.value);
 
     const owned = try node.innerTextOwnedWithOptions(alloc, .{});
@@ -1595,7 +1398,7 @@ test "non-destructive innerText ignores oversized malformed entity prefixes safe
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const text = try node.innerTextWithOptions(alloc, .{});
-    defer text.free(&doc, alloc);
+    defer text.free(alloc);
     try std.testing.expectEqualStrings("&xxxxxxxxxxxxxxxxxxxx&", text.value);
     try std.testing.expectEqualSlices(u8, before[0..], html[0..]);
 }
@@ -1781,7 +1584,7 @@ test "innerText normalizes whitespace by default" {
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const text = try node.innerTextWithOptions(alloc, .{});
-    defer text.free(&doc, alloc);
+    defer text.free(alloc);
     try std.testing.expectEqualStrings("alpha beta gamma", text.value);
 }
 
@@ -1797,7 +1600,7 @@ test "innerText can return non-normalized text" {
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const text = try node.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
-    defer text.free(&doc, alloc);
+    defer text.free(alloc);
     try std.testing.expectEqualStrings("alpha \n\t beta   gamma  ", text.value);
 }
 
@@ -1813,7 +1616,7 @@ test "innerText normalization is applied across text-node boundaries" {
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const text = try node.innerTextWithOptions(alloc, .{});
-    defer text.free(&doc, alloc);
+    defer text.free(alloc);
     try std.testing.expectEqualStrings("A B", text.value);
 }
 
@@ -1827,7 +1630,7 @@ test "innerText inserts separator between text-node slices without trailing whit
 
     const node = firstQuery(doc.query("#x")) orelse return error.TestUnexpectedResult;
     const text = try node.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
-    defer text.free(&doc, alloc);
+    defer text.free(alloc);
     try std.testing.expectEqualStrings("A B", text.value);
 }
 
@@ -1847,15 +1650,15 @@ test "parse-time text whitespace trimming is on by default and query-time normal
     try std.testing.expectEqualStrings("alpha  &amp;   beta  ", text_node.name_or_text.slice(doc.source));
 
     const escaped = try node.innerTextWithOptions(alloc, .{ .normalize_whitespace = false, .unescape = false });
-    defer escaped.free(&doc, alloc);
+    defer escaped.free(alloc);
     try std.testing.expectEqualStrings("alpha  &amp;   beta  ", escaped.value);
 
     const raw = try node.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
-    defer raw.free(&doc, alloc);
+    defer raw.free(alloc);
     try std.testing.expectEqualStrings("alpha  &   beta  ", raw.value);
 
     const normalized = try node.innerTextWithOptions(alloc, .{});
-    defer normalized.free(&doc, alloc);
+    defer normalized.free(alloc);
     try std.testing.expectEqualStrings("alpha & beta", normalized.value);
 
     var escaped_doc = GetDocument(.{}).init(alloc);
@@ -1864,7 +1667,7 @@ test "parse-time text whitespace trimming is on by default and query-time normal
     try resetParsed(.{}, &escaped_doc, &escaped_html);
     const escaped_node = firstQuery(escaped_doc.query("#x")) orelse return error.TestUnexpectedResult;
     const escaped_normalized = try escaped_node.innerTextWithOptions(alloc, .{ .unescape = false });
-    defer escaped_normalized.free(&escaped_doc, alloc);
+    defer escaped_normalized.free(alloc);
     try std.testing.expectEqualStrings("alpha &amp; beta", escaped_normalized.value);
 }
 
@@ -1926,9 +1729,9 @@ test "read-only spaced attributes decode and sanitize without source mutation" {
 
     const node = firstQuery(doc.query("div#x")) orelse return error.TestUnexpectedResult;
     const data_n = (try node.getAttributeValue(alloc, "data-n")) orelse return error.TestUnexpectedResult;
-    defer data_n.free(&doc, alloc);
+    defer data_n.free(alloc);
     try std.testing.expectEqualStrings("a&b�c d", data_n.value);
-    try std.testing.expect(!data_n.isBorrowed(&doc));
+    try std.testing.expect(data_n.owned);
     try std.testing.expectEqualSlices(u8, &before, doc.source);
     try std.testing.expectEqualSlices(u8, &before, &html);
 }
@@ -1947,14 +1750,14 @@ test "isOwned distinguishes borrowed single-text and allocated multi-text innerT
     const y = firstQuery(doc.query("#y")) orelse return error.TestUnexpectedResult;
 
     const x_text = try x.innerTextWithOptions(alloc, .{});
-    defer x_text.free(&doc, alloc);
+    defer x_text.free(alloc);
     try std.testing.expectEqualStrings("single", x_text.value);
-    try std.testing.expect(x_text.isBorrowed(&doc));
+    try std.testing.expect(!x_text.owned);
 
     const y_text = try y.innerTextWithOptions(alloc, .{});
-    defer y_text.free(&doc, alloc);
+    defer y_text.free(alloc);
     try std.testing.expectEqualStrings("a b", y_text.value);
-    try std.testing.expect(!y_text.isBorrowed(&doc));
+    try std.testing.expect(y_text.owned);
 }
 
 test "innerTextOwned returns allocated output and materializes RW source text" {
@@ -1975,7 +1778,6 @@ test "innerTextOwned returns allocated output and materializes RW source text" {
     const owned = try node.innerTextOwnedWithOptions(alloc, .{});
     defer alloc.free(owned);
     try std.testing.expectEqualStrings("a & b", owned);
-    try std.testing.expect(!doc.isOwnedSlice(owned));
 
     const text_node_after = doc.nodes[node.index + 1];
     try std.testing.expectEqualStrings("a & b", text_node_after.name_or_text.slice(doc.source));
@@ -2851,12 +2653,11 @@ test "clear resets parsed state and ownership tracking" {
 
     const text_before_clear = (firstQuery(doc.query("#z")) orelse return error.TestUnexpectedResult)
         .innerTextWithOptions(alloc, .{ .normalize_whitespace = false }) catch return error.TestUnexpectedResult;
-    try std.testing.expect(text_before_clear.isBorrowed(&doc));
+    try std.testing.expect(!text_before_clear.owned);
 
     doc.clear();
     try std.testing.expectEqual(@as(usize, 0), doc.nodes.len);
     try std.testing.expectEqual(@as(usize, 0), doc.source.len);
-    try std.testing.expect(!doc.isOwnedSlice(text_before_clear.value));
 }
 
 test "writeHtml handles deep documents without recursive calls" {
@@ -2966,168 +2767,6 @@ test "bench fixture attr-heavy runtime and cached query smoke" {
         }
         try std.testing.expectEqual(0, doc.nodes[1].parent);
     }
-}
-
-test "runtime selector debug reports runtime selector parse errors" {
-    const alloc = std.testing.allocator;
-    var doc = GetDocument(.{}).init(alloc);
-    defer doc.deinit();
-
-    var html = "<div id='x'></div>".*;
-    try resetParsed(.{}, &doc, &html);
-
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    var report: common.QueryDebugReport = .{};
-    report.reset("div[", InvalidIndex, 0);
-    _ = ast.Selector.compileRuntime(arena.allocator(), "div[") catch |err| {
-        report.setRuntimeParseError();
-        const result: GetQueryDebugResult(.{}) = .{ .report = report, .err = err };
-        try std.testing.expectEqual(@as(?runtime_selector.Error, error.InvalidSelector), result.err);
-        try std.testing.expect(result.report.runtime_parse_error);
-        try std.testing.expectEqualStrings("div[", result.report.selector_source);
-        return;
-    };
-    return error.TestUnexpectedResult;
-}
-
-test "query debug reports near misses and matched index" {
-    const alloc = std.testing.allocator;
-    var doc = GetDocument(.{}).init(alloc);
-    defer doc.deinit();
-
-    var html = "<div><a id='x' class='k'></a><a id='y'></a></div>".*;
-    try resetParsed(.{}, &doc, &html);
-
-    const miss = try doc.debugFirstMatchFrom(comptime ast.Selector.compile("a[href^=https]"), InvalidIndex);
-    try std.testing.expect(miss.err == null);
-    try std.testing.expect(miss.node == null);
-    try std.testing.expect(miss.report.visited_elements > 0);
-    try std.testing.expect(miss.report.near_miss_len > 0);
-    try std.testing.expect(miss.report.near_misses[0].reason.kind != .none);
-
-    const hit = try doc.debugFirstMatchFrom(comptime ast.Selector.compile("a#x"), InvalidIndex);
-    const hit_node = hit.node orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(hit_node.index, hit.report.matched_index);
-    try std.testing.expectEqual(@as(u16, 0), hit.report.matched_group);
-}
-
-test "node-scoped runtime debug query reports scope/combinator failures" {
-    const alloc = std.testing.allocator;
-    var doc = GetDocument(.{}).init(alloc);
-    defer doc.deinit();
-
-    var html = "<root><div><span id='inside'></span></div><span id='outside'></span></root>".*;
-    try resetParsed(.{}, &doc, &html);
-
-    const root = firstQuery(doc.query("root")) orelse return error.TestUnexpectedResult;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const sel = try ast.Selector.compileRuntime(arena.allocator(), "> span#inside");
-    const found = try doc.debugFirstMatchFrom(sel, root.index);
-    try std.testing.expect(found.err == null);
-    try std.testing.expect(found.node == null);
-    try std.testing.expect(found.report.scope_root == root.index);
-    try std.testing.expect(found.report.near_miss_len > 0);
-    try std.testing.expect(found.report.near_misses[0].reason.kind != .none);
-}
-
-test "debug query propagates matcher allocation failure" {
-    const alloc = std.testing.allocator;
-    var doc = GetDocument(.{}).init(alloc);
-    defer doc.deinit();
-    var html = "<div></div>".*;
-    try resetParsed(.{}, &doc, &html);
-
-    var selector_arena = std.heap.ArenaAllocator.init(alloc);
-    defer selector_arena.deinit();
-    var selector_text = std.ArrayList(u8).empty;
-    defer selector_text.deinit(selector_arena.allocator());
-    for (0..65) |i| {
-        if (i != 0) try selector_text.append(selector_arena.allocator(), ' ');
-        try selector_text.appendSlice(selector_arena.allocator(), "div");
-    }
-    const sel = try ast.Selector.compileRuntime(selector_arena.allocator(), selector_text.items);
-
-    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
-    doc.allocator = failing.allocator();
-    defer doc.allocator = alloc;
-    try std.testing.expectError(error.OutOfMemory, doc.debugFirstMatchFrom(sel, InvalidIndex));
-}
-
-const HookProbe = struct {
-    parse_start_calls: usize = 0,
-    parse_end_calls: usize = 0,
-    query_start_calls: usize = 0,
-    query_end_calls: usize = 0,
-    last_input_len: usize = 0,
-    last_query_kind: instrumentation.QueryInstrumentationKind = .query,
-    last_selector_len: usize = 0,
-    last_parse_stats: instrumentation.ParseInstrumentationStats = .{
-        .elapsed_ns = 0,
-        .input_len = 0,
-        .node_count = 0,
-    },
-    last_query_stats: instrumentation.QueryInstrumentationStats = .{
-        .elapsed_ns = 0,
-        .selector_len = 0,
-        .kind = .query,
-        .matched = null,
-    },
-
-    /// Test hook callback for parse start.
-    pub fn onParseStart(self: *@This(), input_len: usize) void {
-        self.parse_start_calls += 1;
-        self.last_input_len = input_len;
-    }
-
-    /// Test hook callback for parse completion.
-    pub fn onParseEnd(self: *@This(), stats: instrumentation.ParseInstrumentationStats) void {
-        self.parse_end_calls += 1;
-        self.last_parse_stats = stats;
-    }
-
-    /// Test hook callback for query start.
-    pub fn onQueryStart(self: *@This(), kind: instrumentation.QueryInstrumentationKind, selector_len: usize) void {
-        self.query_start_calls += 1;
-        self.last_query_kind = kind;
-        self.last_selector_len = selector_len;
-    }
-
-    /// Test hook callback for query completion.
-    pub fn onQueryEnd(self: *@This(), stats: instrumentation.QueryInstrumentationStats) void {
-        self.query_end_calls += 1;
-        self.last_query_stats = stats;
-    }
-};
-
-test "instrumentation wrappers invoke compile-time hooks and preserve results" {
-    const alloc = std.testing.allocator;
-    var hooks: HookProbe = .{};
-
-    var html = "<div><a id='x' href='https://example'></a></div>".*;
-    var doc = try instrumentation.parseWithHooks(std.testing.io, ParseOptions{}, alloc, &html, &hooks);
-    defer doc.deinit();
-    try std.testing.expectEqual(@as(usize, 1), hooks.parse_start_calls);
-    try std.testing.expectEqual(@as(usize, 1), hooks.parse_end_calls);
-    try std.testing.expect(hooks.last_parse_stats.elapsed_ns > 0);
-    try std.testing.expectEqual(html.len, hooks.last_input_len);
-    try std.testing.expect(hooks.last_parse_stats.node_count >= 2);
-
-    var runtime_it = instrumentation.queryWithHooks(std.testing.io, &doc, "a#x", &hooks);
-    try std.testing.expect(try runtime_it.next() != null);
-    try std.testing.expectEqual(instrumentation.QueryInstrumentationKind.query, hooks.last_query_kind);
-    try std.testing.expectEqual(@as(?bool, null), hooks.last_query_stats.matched);
-
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const sel = try ast.Selector.compileRuntime(arena.allocator(), "a#x");
-
-    _ = instrumentation.queryRuntimeWithHooks(std.testing.io, &doc, sel, &hooks);
-    try std.testing.expectEqual(instrumentation.QueryInstrumentationKind.query_runtime, hooks.last_query_kind);
-    try std.testing.expectEqual(@as(?bool, null), hooks.last_query_stats.matched);
-    try std.testing.expect(hooks.query_start_calls >= 2);
-    try std.testing.expect(hooks.query_end_calls >= 2);
 }
 
 test "format document types" {

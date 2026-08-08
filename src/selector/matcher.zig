@@ -23,28 +23,7 @@ const parentElement = common.parentElement;
 const prevElementSibling = common.prevElementSibling;
 const nextElementSibling = common.nextElementSibling;
 
-pub const TraversalBounds = struct {
-    /// First node index visited by the traversal.
-    start: IndexInt,
-    /// Exclusive end index that terminates the traversal.
-    end_excl: IndexInt,
-};
-
-pub fn traversalBounds(comptime Doc: type, doc: *const Doc, scope_root: IndexInt) TraversalBounds {
-    if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) {
-        return .{ .start = 1, .end_excl = 1 };
-    }
-    // Queries walk the document's preorder node array. Scoped queries stay
-    // inside the subtree range computed during parse.
-    const start: IndexInt = if (scope_root == InvalidIndex) 1 else scope_root + 1;
-    const end_excl: IndexInt = if (scope_root == InvalidIndex)
-        @as(IndexInt, @intCast(doc.nodes.len))
-    else
-        doc.nodes[scope_root].subtree_end + 1;
-    return .{ .start = start, .end_excl = end_excl };
-}
-
-pub fn tagMatches(comptime Doc: type, selector_source: []const u8, comp: ast.Compound, node_name: []const u8) bool {
+fn tagMatches(comptime Doc: type, selector_source: []const u8, comp: ast.Compound, node_name: []const u8) bool {
     const tag = comp.tag.slice(selector_source);
     const tag_key: u64 = if (comp.tag_key != 0) comp.tag_key else tags.first8KeyWithMode(tag, false);
     const node_key = tags.first8KeyWithMode(node_name, Doc.Options.non_destructive);
@@ -93,85 +72,6 @@ fn tokenIncludesIgnoreCaseAscii(raw: []const u8, value: []const u8) bool {
     return false;
 }
 
-pub fn matchesAttrSelectorDebug(
-    doc: anytype,
-    node: anytype,
-    allocator: std.mem.Allocator,
-    selector_source: []const u8,
-    sel: ast.AttrSelector,
-) !bool {
-    const name = sel.name.slice(selector_source);
-    const raw = (try attr.getAttrValue(doc, node, name, allocator)) orelse return false;
-    const value = sel.value.slice(selector_source);
-    return evalAttrOp(raw, value, sel.op, sel.case);
-}
-
-pub fn matchesNotSimpleCommon(ctx: anytype, item: ast.NotSimple) !bool {
-    return switch (item.kind) {
-        .tag => std.ascii.eqlIgnoreCase(ctx.nodeName(), item.text.slice(ctx.selector_source)),
-        .id => blk: {
-            const id = item.text.slice(ctx.selector_source);
-            const v = (try ctx.getAttrValue("id")) orelse break :blk false;
-            break :blk std.mem.eql(u8, v, id);
-        },
-        .class => try ctx.classMatches(item.text.slice(ctx.selector_source)),
-        .attr => try ctx.attrMatches(item.attr),
-    };
-}
-
-pub fn NotSimpleCtxFast(comptime Doc: type, comptime Node: type) type {
-    return struct {
-        doc: Doc,
-        node: Node,
-        allocator: std.mem.Allocator,
-        probe: *AttrProbe,
-        collected: ?*CollectedAttrs,
-        selector_source: []const u8,
-
-        fn nodeName(self: @This()) []const u8 {
-            return self.node.name_or_text.slice(self.doc.source);
-        }
-
-        fn getAttrValue(self: @This(), name: []const u8) !?[]const u8 {
-            return attrValueByNameFrom(self.doc, self.node, self.allocator, self.probe, self.collected, name);
-        }
-
-        fn classMatches(self: @This(), class_name: []const u8) !bool {
-            return hasClass(self.doc, self.node, self.allocator, self.probe, self.collected, class_name);
-        }
-
-        fn attrMatches(self: @This(), sel: ast.AttrSelector) !bool {
-            return matchesAttrSelector(self.doc, self.node, self.allocator, self.probe, self.collected, self.selector_source, sel);
-        }
-    };
-}
-
-pub fn NotSimpleCtxDebug(comptime Doc: type, comptime Node: type) type {
-    return struct {
-        doc: Doc,
-        node: Node,
-        allocator: std.mem.Allocator,
-        selector_source: []const u8,
-
-        fn nodeName(self: @This()) []const u8 {
-            return self.node.name_or_text.slice(self.doc.source);
-        }
-
-        fn getAttrValue(self: @This(), name: []const u8) !?[]const u8 {
-            return try attr.getAttrValue(self.doc, self.node, name, self.allocator);
-        }
-
-        fn classMatches(self: @This(), class_name: []const u8) !bool {
-            const class_attr = (try attr.getAttrValue(self.doc, self.node, "class", self.allocator)) orelse return false;
-            return tables.tokenIncludesAsciiWhitespace(class_attr, class_name);
-        }
-
-        fn attrMatches(self: @This(), sel: ast.AttrSelector) !bool {
-            return matchesAttrSelectorDebug(self.doc, self.node, self.allocator, self.selector_source, sel);
-        }
-    };
-}
-
 /// Returns whether `node_index` matches any selector group within scope.
 pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt) !bool {
     if (node_index >= doc.nodes.len) return false;
@@ -184,9 +84,7 @@ pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: 
 pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt, workspace: *MatchWorkspace) !bool {
     if (node_index >= doc.nodes.len) return false;
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
-    try workspace.ensureReady(selector);
     workspace.prepare(selector, scope_root);
-    const scratch = &workspace.scratch.?;
 
     var has_existential = false;
     for (selector.groups) |group| {
@@ -198,7 +96,7 @@ pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Do
     if (!has_existential) {
         for (selector.groups) |group| {
             if (group.compound_len == 0) continue;
-            if (try matchDeterministicGroup(Doc, doc, selector, group, group.compound_len - 1, node_index, scope_root, scratch)) return true;
+            if (try matchDeterministicGroup(Doc, doc, selector, group, group.compound_len - 1, node_index, scope_root, &workspace.node_ctx)) return true;
         }
         return false;
     }
@@ -210,7 +108,6 @@ pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Do
 /// Used once when seeding a scoped forward query from ancestors outside its scan.
 pub fn matchesPrefixAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, prefix_len: usize, node_index: IndexInt, workspace: *MatchWorkspace) !bool {
     if (prefix_len == 0 or prefix_len > group.compound_len or node_index >= doc.nodes.len) return false;
-    try workspace.ensureReady(selector);
     workspace.prepare(selector, InvalidIndex);
     const partial: ast.Group = .{
         .compound_start = group.compound_start,
@@ -218,7 +115,7 @@ pub fn matchesPrefixAt(comptime Doc: type, noalias doc: *const Doc, selector: as
     };
     const rightmost: IndexInt = @intCast(prefix_len - 1);
     if (!groupHasExistential(selector, partial, rightmost)) {
-        return matchDeterministicGroup(Doc, doc, selector, partial, rightmost, node_index, InvalidIndex, &workspace.scratch.?);
+        return matchDeterministicGroup(Doc, doc, selector, partial, rightmost, node_index, InvalidIndex, &workspace.node_ctx);
     }
     try workspace.ensureReversePlan(selector);
     @memset(workspace.reverse_seed, 0);
@@ -228,10 +125,9 @@ pub fn matchesPrefixAt(comptime Doc: type, noalias doc: *const Doc, selector: as
 
 pub const MatchWorkspace = struct {
     allocator: std.mem.Allocator,
-    scratch: ?std.heap.ArenaAllocator = null,
     topology_prev: std.AutoHashMapUnmanaged(IndexInt, IndexInt) = .empty,
     predicate_plan: PredicatePlan = .{},
-    reverse_node_ctx: ForwardNodeContext = .{},
+    node_ctx: NodeContext = .{},
     reverse_masks: []u64 = &.{},
     reverse_seed: []u64 = &.{},
     reverse_current: []u64 = &.{},
@@ -254,18 +150,12 @@ pub const MatchWorkspace = struct {
         return .{ .allocator = allocator };
     }
 
-    pub fn ensureReady(self: *@This(), selector: ast.Selector) !void {
-        if (self.scratch != null) return;
-        _ = selector;
-        self.scratch = std.heap.ArenaAllocator.init(self.allocator);
-    }
 
     pub fn deinit(self: *@This()) void {
-        if (self.scratch) |*scratch| scratch.deinit();
         self.topology_prev.deinit(self.allocator);
         self.topology_prev = .empty;
         self.predicate_plan.deinit(self.allocator);
-        self.reverse_node_ctx.deinit();
+        self.node_ctx.deinit();
         if (self.reverse_masks.len != 0) self.allocator.free(self.reverse_masks);
         self.reverse_masks = &.{};
         if (self.reverse_seed.len != 0) self.allocator.free(self.reverse_seed);
@@ -284,7 +174,6 @@ pub const MatchWorkspace = struct {
         self.reverse_cells = .empty;
         self.reverse_cell_nodes.deinit(self.allocator);
         self.reverse_cell_nodes = .empty;
-        self.scratch = null;
     }
 
     fn prepare(self: *@This(), selector: ast.Selector, scope_root: IndexInt) void {
@@ -629,7 +518,7 @@ fn popHighestScheduled(workspace: *MatchWorkspace) ?IndexInt {
 fn evaluateReversePredicates(comptime Doc: type, doc: *const Doc, selector: ast.Selector, node: IndexInt, wanted: []const u64, workspace: *MatchWorkspace) !void {
     @memset(workspace.reverse_local, 0);
     @memset(workspace.reverse_seen_predicates, 0);
-    workspace.reverse_node_ctx.begin(doc.allocator, 0);
+    workspace.node_ctx.begin(doc.allocator, 0);
 
     for (wanted, 0..) |wanted_word, word_index| {
         var pending = wanted_word;
@@ -644,7 +533,7 @@ fn evaluateReversePredicates(comptime Doc: type, doc: *const Doc, selector: ast.
             workspace.reverse_seen_predicates[predicate_id / 64] |= seen_bit;
             workspace.stats.local_unique_predicate_evals += 1;
             const representative: usize = @intCast(workspace.predicate_plan.representatives[predicate_id]);
-            if (try matchesCompoundRtlCached(Doc, doc, selector, selector.compounds[representative], node, &workspace.reverse_node_ctx)) {
+            if (try matchesCompoundRtlCached(Doc, doc, selector, selector.compounds[representative], node, &workspace.node_ctx)) {
                 for (workspace.reverse_local, wanted, workspace.predicate_plan.predicateMaskConst(predicate_id)) |*dst, eligible, mask| dst.* |= eligible & mask;
             }
         }
@@ -677,15 +566,13 @@ fn prevElementSiblingAccelerated(comptime Doc: type, doc: *const Doc, node_index
                 try workspace.topology_prev.put(workspace.allocator, cursor, previous);
                 previous = cursor;
                 cursor = raw.subtree_end + 1;
-            } else {
-                cursor += 1;
+                continue;
             }
-        } else {
-            cursor += 1;
         }
+        cursor += 1;
     }
 
-    const result = workspace.topology_prev.get(node_index).?;
+    const result = workspace.topology_prev.get(node_index) orelse InvalidIndex;
     return if (result == InvalidIndex) null else result;
 }
 
@@ -698,12 +585,13 @@ fn groupHasExistential(selector: ast.Selector, group: ast.Group, rel_index: Inde
     return false;
 }
 
-fn matchDeterministicGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selector, group: ast.Group, start_rel: IndexInt, start_node: IndexInt, scope_root: IndexInt, scratch: *std.heap.ArenaAllocator) !bool {
+fn matchDeterministicGroup(comptime Doc: type, doc: *const Doc, selector: ast.Selector, group: ast.Group, start_rel: IndexInt, start_node: IndexInt, scope_root: IndexInt, ctx: *NodeContext) !bool {
     var rel = start_rel;
     var node = start_node;
     while (true) {
         const comp = selector.compounds[group.compound_start + rel];
-        if (!try matchesCompound(Doc, doc, selector, comp, node, scratch)) return false;
+        ctx.begin(doc.allocator, 0);
+        if (!try matchesCompoundRtlCached(Doc, doc, selector, comp, node, ctx)) return false;
         if (rel == 0) return comp.combinator == .none or matchesScopeAnchor(doc, comp.combinator, node, scope_root);
         node = switch (comp.combinator) {
             .child => parentElement(doc, node),
@@ -714,7 +602,7 @@ fn matchDeterministicGroup(comptime Doc: type, doc: *const Doc, selector: ast.Se
     }
 }
 
-pub const ForwardNodeContext = struct {
+pub const NodeContext = struct {
     scratch: ?std.heap.ArenaAllocator = null,
     probe: AttrProbe = .{},
     child_position: usize = 0,
@@ -736,20 +624,13 @@ pub const ForwardNodeContext = struct {
 
 const PseudoMode = enum { rtl, forward };
 
-fn matchesCompound(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, scratch: *std.heap.ArenaAllocator) !bool {
-    if (!doc.nodes[node_index].isElement(node_index)) return false;
-    _ = scratch.reset(.retain_capacity);
-    var attr_probe: AttrProbe = .{};
-    var last_child_cache: ?bool = null;
-    return matchesCompoundCore(Doc, doc, selector, comp, node_index, scratch.allocator(), &attr_probe, .rtl, 0, &last_child_cache);
-}
 
-pub fn matchesCompoundForward(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, ctx: *ForwardNodeContext) !bool {
+pub fn matchesCompoundForward(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, ctx: *NodeContext) !bool {
     std.debug.assert(ctx.scratch != null);
     return matchesCompoundCore(Doc, doc, selector, comp, node_index, ctx.scratch.?.allocator(), &ctx.probe, .forward, ctx.child_position, &ctx.last_child_cache);
 }
 
-fn matchesCompoundRtlCached(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, ctx: *ForwardNodeContext) !bool {
+fn matchesCompoundRtlCached(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, ctx: *NodeContext) !bool {
     std.debug.assert(ctx.scratch != null);
     return matchesCompoundCore(Doc, doc, selector, comp, node_index, ctx.scratch.?.allocator(), &ctx.probe, .rtl, 0, &ctx.last_child_cache);
 }
@@ -832,16 +713,15 @@ fn matchesNotSimple(
     selector_source: []const u8,
     item: ast.NotSimple,
 ) !bool {
-    const Ctx = NotSimpleCtxFast(@TypeOf(doc), @TypeOf(node));
-    const ctx = Ctx{
-        .doc = doc,
-        .node = node,
-        .allocator = allocator,
-        .probe = probe,
-        .collected = collected,
-        .selector_source = selector_source,
+    return switch (item.kind) {
+        .tag => std.ascii.eqlIgnoreCase(node.name_or_text.slice(doc.source), item.text.slice(selector_source)),
+        .id => blk: {
+            const value = (try attrValueByNameFrom(doc, node, allocator, probe, collected, "id")) orelse break :blk false;
+            break :blk std.mem.eql(u8, value, item.text.slice(selector_source));
+        },
+        .class => try hasClass(doc, node, allocator, probe, collected, item.text.slice(selector_source)),
+        .attr => try matchesAttrSelector(doc, node, allocator, probe, collected, selector_source, item.attr),
     };
-    return try matchesNotSimpleCommon(ctx, item);
 }
 
 pub fn matchesPseudo(doc: anytype, node_index: IndexInt, pseudo: ast.Pseudo) bool {

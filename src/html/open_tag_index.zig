@@ -1,19 +1,10 @@
-//! Lazy cache for malformed closing-tag recovery.
+//! Lazy live index for malformed closing-tag recovery.
 //!
-//! A backwards scan of the open-element stack is cheapest for normal HTML and
-//! for a mismatched close that successfully finds and pops a deep opener. It
-//! becomes quadratic, however, when an attacker supplies many closing tags
-//! that are absent from a deep stack. The parser therefore builds this index
-//! only after the first proven full-stack miss.
-//!
-//! The index is a historical snapshot, not a live mirror. Normal pushes never
-//! touch it, and normal pops only shorten `index_len`. Historical entries retain
-//! their own source spans so stale stack positions can be repaired safely after
-//! those live positions have been reused. A later slow close scans the newer
-//! unindexed suffix first, rewinds stale snapshot entries only if map lookup is
-//! needed, and extends the snapshot only after another complete miss. This
-//! keeps the well-formed top-match path essentially identical to a plain stack
-//! while bounding repeated absent-close recovery.
+//! Normal well-formed parsing uses only the open-element stack. After the first
+//! closing tag that misses a full backwards stack scan, callers activate this
+//! map. From then on each open entry links to the previous entry with the same
+//! first-eight-byte signature, making repeated malformed closes bounded without
+//! maintaining a second historical copy of the stack.
 
 const std = @import("std");
 const common = @import("../common.zig");
@@ -28,10 +19,6 @@ pub const TagSig = struct {
 
 pub const Map = std.AutoHashMapUnmanaged(TagSig, StackPos);
 
-pub fn BeforeEntry(comptime Span: type) type {
-    return struct {
-        name: Span,
-        sig: TagSig,
-        prev: StackPos = no_stack_pos,
-    };
+pub inline fn signature(key: u64, len: common.IndexInt) TagSig {
+    return .{ .key = key, .len = len };
 }

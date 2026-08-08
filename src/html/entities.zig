@@ -45,25 +45,11 @@ pub const Decoded = struct {
     }
 };
 
-/// Decodes entities in-place over entire slice and returns new length.
-pub fn decodeInPlace(comptime normalize_whitespace: bool, slice: []u8) usize {
-    return decodeInPlaceWithMode(.common, normalize_whitespace, slice);
-}
-
-pub fn decodeInPlaceFull(comptime normalize_whitespace: bool, slice: []u8) usize {
-    return decodeInPlaceWithMode(.full, normalize_whitespace, slice);
-}
-
 pub fn decodeInPlaceWithMode(comptime mode: EntityDecoding, comptime normalize_whitespace: bool, slice: []u8) usize {
     const first = std.mem.indexOfScalar(u8, slice, '&') orelse {
         return if (comptime normalize_whitespace) normalizeWhitespaceInPlace(slice) else slice.len;
     };
     return decodeInPlaceFromMode(mode, normalize_whitespace, slice, first);
-}
-
-/// Returns the first `&` offset that begins a decodable entity.
-pub fn firstDecodableEntity(slice: []const u8, start: usize) ?usize {
-    return firstDecodableEntityWithMode(.common, false, slice, start);
 }
 
 pub fn firstDecodableEntityWithMode(comptime mode: EntityDecoding, comptime attribute: bool, slice: []const u8, start: usize) ?usize {
@@ -80,23 +66,11 @@ pub fn firstDecodableEntityWithMode(comptime mode: EntityDecoding, comptime attr
     return null;
 }
 
-/// Decodes entities in-place starting at a known `&` offset.
-pub fn decodeInPlaceFrom(comptime normalize_whitespace: bool, slice: []u8, first: usize) usize {
-    return decodeInPlaceFromMode(.common, normalize_whitespace, slice, first);
-}
-
 fn decodeInPlaceFromMode(comptime mode: EntityDecoding, comptime normalize_whitespace: bool, slice: []u8, first: usize) usize {
     std.debug.assert(first < slice.len);
     std.debug.assert(slice[first] == '&');
     if (comptime normalize_whitespace) return decodeNormalizeInPlaceFrom(slice, first, mode);
     return decodePlainInPlaceFrom(slice, first, false, mode, false);
-}
-
-/// Decodes an attribute value, replacing numeric references to codepoint zero
-/// with U+FFFD and literal NUL bytes with ASCII spaces. `first` may be supplied by callers
-/// that already searched for a decodable entity.
-pub fn decodeAttributeInPlace(slice: []u8, first: ?usize) usize {
-    return decodeAttributeInPlaceWithMode(.common, slice, first);
 }
 
 pub fn decodeAttributeInPlaceWithMode(comptime mode: EntityDecoding, slice: []u8, first: ?usize) usize {
@@ -251,7 +225,7 @@ fn decodeReferenceAlloc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
             break;
         }
 
-        if (decodeEntity(input[i + 1 ..])) |decoded| {
+        if (decodeEntityWithMode(.common, false, input[i + 1 ..])) |decoded| {
             try out.appendSlice(alloc, decoded.bytes[0..decoded.len]);
             i += decoded.consumed;
             continue;
@@ -262,10 +236,6 @@ fn decodeReferenceAlloc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     }
 
     return try out.toOwnedSlice(alloc);
-}
-
-pub fn decodeEntity(rem: []const u8) ?Decoded {
-    return decodeEntityWithMode(.common, false, rem);
 }
 
 pub fn decodeEntityWithMode(comptime mode: EntityDecoding, comptime attribute: bool, rem: []const u8) ?Decoded {
@@ -461,84 +431,84 @@ fn expectDecodeMatchesReference(alloc: std.mem.Allocator, input: []const u8) !vo
     const buf = try alloc.dupe(u8, input);
     defer alloc.free(buf);
 
-    const actual_len = decodeInPlace(false, buf);
+    const actual_len = decodeInPlaceWithMode(.common, false, buf);
     try std.testing.expect(actual_len <= buf.len);
     try std.testing.expectEqualSlices(u8, expected, buf[0..actual_len]);
 }
 
 test "decode entities" {
     var buf = "a&amp;b&#x20;".*;
-    const n = decodeInPlace(false, &buf);
+    const n = decodeInPlaceWithMode(.common, false, &buf);
     try std.testing.expectEqualStrings("a&b ", buf[0..n]);
 }
 
 test "decode entities preserves literal run after shrinking first entity" {
     var buf = "a&amp;bc&amp;d".*;
-    const n = decodeInPlace(false, &buf);
+    const n = decodeInPlaceWithMode(.common, false, &buf);
     try std.testing.expectEqualStrings("a&bc&d", buf[0..n]);
 }
 
 test "decode from first decodable entity skips invalid ampersands" {
     var buf = "a&bogus&amp;b".*;
-    const first = firstDecodableEntity(&buf, 0) orelse return error.TestUnexpectedResult;
+    const first = firstDecodableEntityWithMode(.common, false, &buf, 0) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 7), first);
-    const n = decodeInPlaceFrom(false, &buf, first);
+    const n = decodeInPlaceFromMode(.common, false, &buf, first);
     try std.testing.expectEqualStrings("a&bogus&b", buf[0..n]);
 }
 
 test "decode and normalize whitespace in one pass" {
     var buf = "  a\t&amp;\n b  ".*;
-    const n = decodeInPlace(true, &buf);
+    const n = decodeInPlaceWithMode(.common, true, &buf);
     try std.testing.expectEqualStrings("a & b", buf[0..n]);
 }
 
 test "decode from first entity and normalize earlier literal text" {
     var buf = " a&bogus  &amp;\n b ".*;
-    const first = firstDecodableEntity(&buf, 0) orelse return error.TestUnexpectedResult;
+    const first = firstDecodableEntityWithMode(.common, false, &buf, 0) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 10), first);
-    const n = decodeInPlaceFrom(true, &buf, first);
+    const n = decodeInPlaceFromMode(.common, true, &buf, first);
     try std.testing.expectEqualStrings("a&bogus & b", buf[0..n]);
 }
 
 test "decode decimal and uppercase hex entities" {
     var buf = "&#32;&#X3E;".*;
-    const n = decodeInPlace(false, &buf);
+    const n = decodeInPlaceWithMode(.common, false, &buf);
     try std.testing.expectEqualStrings(" >", buf[0..n]);
 }
 
 test "decode two-byte numeric entity" {
     var buf = "a&#169;b".*;
-    const n = decodeInPlace(false, &buf);
+    const n = decodeInPlaceWithMode(.common, false, &buf);
     try std.testing.expectEqualStrings("a\xc2\xa9b", buf[0..n]);
 }
 
 test "decode numeric entities allows leading zeros and rejects oversized values" {
     var buf = "&#0000032;&#x00003E;&#1114112;&#x110000;".*;
-    const n = decodeInPlace(false, &buf);
+    const n = decodeInPlaceWithMode(.common, false, &buf);
     try std.testing.expectEqualSlices(u8, " >" ++ &ReplacementUtf8 ++ &ReplacementUtf8, buf[0..n]);
 }
 
 test "decode numeric entities rejects missing digits" {
     var buf = "&#;&#x;&#X;".*;
-    const n = decodeInPlace(false, &buf);
+    const n = decodeInPlaceWithMode(.common, false, &buf);
     try std.testing.expectEqualSlices(u8, &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8, buf[0..n]);
 }
 
 test "decode numeric entities rejects null codepoint" {
     var buf = "&#0;&#00;&#x0;&#X000;".*;
-    const n = decodeInPlace(false, &buf);
+    const n = decodeInPlaceWithMode(.common, false, &buf);
     try std.testing.expectEqualSlices(u8, &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8, buf[0..n]);
 }
 
 test "attribute decoding replaces numeric nulls and literal nulls" {
     var buf = "a&#0;b&#x00;c\x00d&amp;e".*;
-    const n = decodeAttributeInPlace(&buf, null);
+    const n = decodeAttributeInPlaceWithMode(.common, &buf, null);
     try std.testing.expectEqualSlices(u8, "a" ++ &ReplacementUtf8 ++ "b" ++ &ReplacementUtf8 ++ "c d&e", buf[0..n]);
 }
 
 test "decode numeric entities rejects surrogate codepoints" {
     var buf = "&#55296;&#57343;&#xD800;&#xDFFF;&#xd800;&#xdfff;".*;
-    const n = decodeInPlace(false, &buf);
+    const n = decodeInPlaceWithMode(.common, false, &buf);
     try std.testing.expectEqualSlices(
         u8,
         &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8 ++ &ReplacementUtf8,
@@ -588,13 +558,13 @@ test "fuzz decodeInPlace matches reference decoder" {
 
 test "decode entities keeps plain text unchanged" {
     var buf = "plain text".*;
-    const n = decodeInPlace(false, &buf);
+    const n = decodeInPlaceWithMode(.common, false, &buf);
     try std.testing.expectEqualStrings("plain text", buf[0..n]);
 }
 
 test "common named entities decode without full table" {
     var buf = "&nbsp;&copy;&reg;&mdash;&ndash;&hellip;".*;
-    const n = decodeInPlace(false, &buf);
+    const n = decodeInPlaceWithMode(.common, false, &buf);
     try std.testing.expectEqualStrings("\xc2\xa0\xc2\xa9\xc2\xae\xe2\x80\x94\xe2\x80\x93\xe2\x80\xa6", buf[0..n]);
 }
 
@@ -606,7 +576,7 @@ test "minimal entity mode excludes optional common names" {
 
 test "full named entity mode decodes uncommon and two-codepoint values" {
     var buf = "&eacute; &NotNestedGreaterGreater;".*;
-    const n = decodeInPlaceFull(false, &buf);
+    const n = decodeInPlaceWithMode(.full, false, &buf);
     try std.testing.expectEqualStrings("\xc3\xa9 \xe2\xaa\xa2\xcc\xb8", buf[0..n]);
 }
 

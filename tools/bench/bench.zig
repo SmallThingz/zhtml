@@ -4,7 +4,7 @@ const parse_mode = @import("parse_mode");
 const ParseMode = parse_mode.ParseMode;
 
 const StreamBenchCtx = struct {
-    fn cb(_: *@This(), _: root.StreamingEvent) !bool {
+    fn cb(_: *@This(), _: root.StreamingParser.Event) !bool {
         return true;
     }
 };

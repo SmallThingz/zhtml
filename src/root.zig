@@ -5,14 +5,13 @@ test {
     declaration_testing.refAllDeclsRecursive(@This());
 }
 const common = @import("common.zig");
-const instrumentation = @import("debug/instrumentation.zig");
 const document = @import("html/document.zig");
 const stream = @import("html/stream.zig");
 const selector_ast = @import("selector/ast.zig");
 
 pub const ParseInt = common.IndexInt;
 
-/// Parse-time configuration and type factory for `Document`, `Node`, and iterators.
+/// Parse-time configuration and generated document type.
 pub const ParseOptions = document.ParseOptions;
 /// Options controlling whitespace normalization behavior in text extraction APIs.
 pub const TextOptions = document.TextOptions;
@@ -21,30 +20,8 @@ pub const EntityEncoding = document.EntityEncoding;
 pub const EntityDecoding = document.EntityDecoding;
 /// Allocation-free event parser for streaming-style HTML scans.
 pub const StreamingParser = stream.Parser;
-pub const StreamingEvent = stream.Event;
-pub const StreamingEventKind = stream.EventKind;
-pub const StreamingAttribute = stream.Attribute;
-pub const StreamingAttributeIterator = stream.AttributeIterator;
 /// Compiled selector representation shared by comptime/runtime query paths.
 pub const Selector = selector_ast.Selector;
-/// Structured query-debug output populated by debug query internals.
-pub const QueryDebugReport = common.QueryDebugReport;
-/// Enumerates first-failure categories recorded by debug query reporting.
-pub const DebugFailureKind = common.DebugFailureKind;
-/// Single near-miss record used by query diagnostics.
-pub const NearMiss = common.NearMiss;
-/// Parse instrumentation payload emitted by hook wrappers.
-pub const ParseInstrumentationStats = instrumentation.ParseInstrumentationStats;
-/// Query instrumentation payload emitted by hook wrappers.
-pub const QueryInstrumentationStats = instrumentation.QueryInstrumentationStats;
-/// Kind of query operation measured by instrumentation wrappers.
-pub const QueryInstrumentationKind = instrumentation.QueryInstrumentationKind;
-
-/// Executes `query` and reports timing through hook callbacks.
-pub const queryWithHooks = instrumentation.queryWithHooks;
-/// Executes `queryRuntime` and reports timing through hook callbacks.
-pub const queryRuntimeWithHooks = instrumentation.queryRuntimeWithHooks;
-
 fn firstQuery(iter: anytype) @TypeOf(blk: {
     var it = iter;
     break :blk it.next() catch unreachable;
@@ -142,7 +119,7 @@ test "writeHtml reflects in-place text decoding" {
 
     const p = firstQuery(doc.query("p")) orelse return error.TestUnexpectedResult;
     const text = try p.innerTextWithOptions(alloc, .{});
-    defer text.free(&doc, alloc);
+    defer text.free(alloc);
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();

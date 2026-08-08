@@ -16,18 +16,7 @@ const RawClose = scanner.RawTextClose;
 const TagScan = scanner.TagName;
 const open_tag_index = @import("open_tag_index.zig");
 
-pub const Span = struct {
-    start: IndexInt = 0,
-    len: IndexInt = 0,
-
-    pub inline fn end(self: @This()) IndexInt {
-        return self.start + self.len;
-    }
-
-    pub inline fn slice(self: @This(), source: []const u8) []const u8 {
-        return source[self.start..self.end()];
-    }
-};
+pub const Span = common.Span;
 
 pub const EventKind = enum(u8) {
     start_tag,
@@ -51,52 +40,8 @@ pub const Options = struct {
     assume_no_gt_in_attribute_values: bool = false,
 };
 
-pub const Attribute = struct {
-    source: []const u8,
-    name: Span,
-    raw_value: Span = .{},
-    kind: attr.RawKind = .empty,
-
-    pub inline fn nameSlice(self: @This()) []const u8 {
-        return self.name.slice(self.source);
-    }
-
-    pub inline fn valueRaw(self: @This()) []const u8 {
-        return self.raw_value.slice(self.source);
-    }
-};
-
-pub const AttributeIterator = struct {
-    source: []const u8,
-    cursor: usize,
-    end: usize,
-
-    pub fn next(self: *@This()) ?Attribute {
-        while (self.cursor < self.end) {
-            const scan = attr.scanAttrNameOrSkip(self.source, self.end, self.cursor);
-            self.cursor = scan.next_start;
-            const name = scan.name orelse return null;
-            // Empty name: non-name byte skipped by the scanner (e.g. whitespace
-            // after the tag name). Not a real attribute.
-            if (name.len == 0) continue;
-            // Name at the very end of the attribute span: bare attribute with
-            // no value, e.g. `<div id>`. parseRawValue requires eq_index < end.
-            const delim_index = attr.valueDelimiterIndex(self.source, self.end, self.cursor);
-            const raw = if (delim_index < self.end and self.source[delim_index] == '=')
-                attr.parseRawValue(self.source, self.end, delim_index)
-            else
-                attr.RawValue{ .kind = .empty, .start = delim_index, .end = delim_index, .next_start = delim_index };
-            self.cursor = raw.next_start;
-            return .{
-                .source = self.source,
-                .name = makeSpan(name.ptr, name.len, self.source),
-                .raw_value = .{ .start = @intCast(raw.start), .len = @intCast(raw.end - raw.start) },
-                .kind = raw.kind,
-            };
-        }
-        return null;
-    }
-};
+pub const Attribute = attr.RawAttribute;
+pub const AttributeIterator = attr.RawIterator;
 
 pub const Event = struct {
     source: []const u8,
@@ -122,8 +67,21 @@ pub const Event = struct {
     }
 };
 
+const ParserOptions = Options;
+const ParserEvent = Event;
+const ParserEventKind = EventKind;
+const ParserAttribute = Attribute;
+const ParserAttributeIterator = AttributeIterator;
+
 pub const Parser = struct {
-    options: Options = .{},
+    /// Configuration and callback types are namespaced under the parser API.
+    pub const Options = ParserOptions;
+    pub const Event = ParserEvent;
+    pub const EventKind = ParserEventKind;
+    pub const Attribute = ParserAttribute;
+    pub const AttributeIterator = ParserAttributeIterator;
+
+    options: ParserOptions = .{},
 
     pub fn parse(self: @This(), allocator: std.mem.Allocator, source: []const u8, ctx: anytype, comptime callback: anytype) !void {
         if (!common.lenFits(source.len)) return error.InputTooLarge;
@@ -148,7 +106,6 @@ pub const Parser = struct {
         };
         if (self.options.track_nesting) try p.stack.append(allocator, .{ .name = .{}, .key = 0, .depth = 0 });
         defer p.stack.deinit(allocator);
-        defer p.before.deinit(allocator);
         defer p.tag_map.deinit(allocator);
         try p.run();
     }
@@ -163,6 +120,7 @@ const OpenTag = struct {
     key: u64,
     depth: u32,
     foreign: bool = false,
+    prev_same: open_tag_index.StackPos = open_tag_index.no_stack_pos,
 };
 
 fn State(comptime Ctx: type, comptime callback: anytype) type {
@@ -173,12 +131,10 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         options: Options,
         i: usize = 0,
         stack: std.ArrayList(OpenTag) = .empty,
-        before: std.ArrayListUnmanaged(BeforeEntry) = .empty,
         tag_map: open_tag_index.Map = .empty,
-        index_len: usize = 0,
+        index_active: bool = false,
 
         const Self = @This();
-        const BeforeEntry = open_tag_index.BeforeEntry(Span);
 
         fn run(self: *Self) !void {
             while (self.i < self.source.len) {
@@ -297,6 +253,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             self.i = tag.end;
             const token_end = if (self.findTagEnd(self.i)) |end| end + 1 else self.source.len;
             self.i = token_end;
+            const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
 
             if (!self.options.track_nesting) {
                 if (self.options.emit_end_tags and tag.end != tag.start) {
@@ -304,7 +261,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                         .source = self.source,
                         .kind = .end_tag,
                         .depth = 0,
-                        .name = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) },
+                        .name = name_span,
                         .token = .{ .start = @intCast(token_start), .len = @intCast(token_end - token_start) },
                     });
                 }
@@ -386,9 +343,10 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         fn parseRawText(self: *Self, tag: TagScan, depth: u32, open_start: usize) !void {
             _ = open_start;
             const content_start = self.i;
+            const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
             if (self.findRawTextClose(self.source[tag.start..tag.end], tag.key, self.i)) |close| {
                 if (close.content_end > content_start) try self.emitText(content_start, close.content_end);
-                const open = OpenTag{ .name = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) }, .key = tag.key, .depth = depth };
+                const open = OpenTag{ .name = name_span, .key = tag.key, .depth = depth };
                 try self.emitEnd(open, close.close_start, close.close_end, false);
                 self.i = close.close_end;
             } else {
@@ -437,109 +395,67 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn pushOpen(self: *Self, open_value: OpenTag) !void {
-            try self.stack.append(self.allocator, open_value);
+            var open = open_value;
+            if (self.index_active) {
+                const sig = open_tag_index.signature(open.key, open.name.len);
+                try self.tag_map.ensureTotalCapacity(self.allocator, self.tag_map.count() + 1);
+                open.prev_same = self.tag_map.get(sig) orelse open_tag_index.no_stack_pos;
+            }
+            try self.stack.append(self.allocator, open);
+            if (self.index_active) {
+                const sig = open_tag_index.signature(open.key, open.name.len);
+                self.tag_map.putAssumeCapacity(sig, @intCast(self.stack.items.len - 1));
+            }
         }
 
         fn popOpen(self: *Self) OpenTag {
+            const pos = self.stack.items.len - 1;
             const open = self.stack.pop().?;
             std.debug.assert(open.name.len != 0);
-            self.index_len = @min(self.index_len, self.stack.items.len);
+            if (self.index_active) {
+                const sig = open_tag_index.signature(open.key, open.name.len);
+                std.debug.assert(self.tag_map.get(sig).? == pos);
+                if (open.prev_same == open_tag_index.no_stack_pos)
+                    std.debug.assert(self.tag_map.remove(sig))
+                else
+                    self.tag_map.getPtr(sig).?.* = open.prev_same;
+            }
             return open;
         }
 
         fn findOpenForSlowClose(self: *Self, close: TagScan) !?open_tag_index.StackPos {
             const close_name = self.source[close.start..close.end];
-            if (self.index_len == 0 and self.before.items.len == 0) {
-                if (self.linearFindOpen(close_name, close.key)) |pos| return pos;
-                try self.buildIndex();
+            if (!self.index_active) {
+                var pos = self.stack.items.len - 1;
+                while (pos > 1) {
+                    pos -= 1;
+                    if (self.openMatchesName(self.stack.items[pos], close_name, close.key)) return @intCast(pos);
+                }
+                try self.activateCloseIndex();
                 return null;
             }
-            if (self.findInDirtySuffix(close_name, close.key)) |pos| return pos;
-            if (self.before.items.len > self.index_len) self.repairIndex();
-            if (self.findInIndex(close_name, close.key)) |pos| return pos;
-            try self.indexDirtySuffix();
-            return null;
-        }
 
-        fn linearFindOpen(self: *const Self, close_name: []const u8, close_key: u64) ?open_tag_index.StackPos {
-            var pos = self.stack.items.len - 1;
-            while (pos > 1) {
-                pos -= 1;
-                if (self.openMatchesName(self.stack.items[pos], close_name, close_key)) return @intCast(pos);
-            }
-            return null;
-        }
-
-        fn findInDirtySuffix(self: *const Self, close_name: []const u8, close_key: u64) ?open_tag_index.StackPos {
-            var pos = self.stack.items.len;
-            while (pos > self.index_len) {
-                pos -= 1;
-                if (self.openMatchesName(self.stack.items[pos], close_name, close_key)) return @intCast(pos);
-            }
-            return null;
-        }
-
-        fn buildIndex(self: *Self) !void {
-            std.debug.assert(self.before.items.len == 0 and self.index_len == 0);
-            const len = self.stack.items.len;
-            try self.before.ensureTotalCapacity(self.allocator, len);
-            try self.tag_map.ensureTotalCapacity(self.allocator, @intCast(len -| 1));
-            self.before.appendAssumeCapacity(.{ .name = .{}, .sig = .{ .key = 0, .len = 0 } });
-            var pos: usize = 1;
-            while (pos < len) : (pos += 1) self.indexOneAssumeCapacity(pos);
-            self.index_len = len;
-        }
-
-        fn repairIndex(self: *Self) void {
-            while (self.before.items.len > self.index_len) {
-                const stale_pos = self.before.items.len - 1;
-                const entry = self.before.items[stale_pos];
-                std.debug.assert(self.tag_map.get(entry.sig).? == stale_pos);
-                if (entry.prev == open_tag_index.no_stack_pos) {
-                    std.debug.assert(self.tag_map.remove(entry.sig));
-                } else {
-                    self.tag_map.getPtr(entry.sig).?.* = entry.prev;
-                }
-                self.before.items.len = stale_pos;
-            }
-        }
-
-        fn findInIndex(self: *const Self, close_name: []const u8, close_key: u64) ?open_tag_index.StackPos {
-            const sig: open_tag_index.TagSig = .{ .key = close_key, .len = @intCast(close_name.len) };
+            const sig = open_tag_index.signature(close.key, @intCast(close_name.len));
             var pos = self.tag_map.get(sig) orelse return null;
             while (pos != open_tag_index.no_stack_pos) {
-                const entry = self.before.items[pos];
-                if (self.beforeEntryMatchesClose(entry, close_name, close_key)) return pos;
-                pos = entry.prev;
+                const open = self.stack.items[pos];
+                if (self.openMatchesName(open, close_name, close.key)) return pos;
+                pos = open.prev_same;
             }
             return null;
         }
 
-        inline fn beforeEntryMatchesClose(self: *const Self, entry: BeforeEntry, close_name: []const u8, close_key: u64) bool {
-            if (entry.sig.len != close_name.len or entry.sig.key != close_key) return false;
-            if (close_name.len <= 8) return true;
-            const open_name = entry.name.slice(self.source);
-            return std.ascii.eqlIgnoreCase(open_name[8..], close_name[8..]);
-        }
-
-        fn indexDirtySuffix(self: *Self) !void {
-            const start = self.index_len;
-            const end = self.stack.items.len;
-            if (start == end) return;
-            std.debug.assert(self.before.items.len == start);
-            try self.before.ensureTotalCapacity(self.allocator, end);
-            try self.tag_map.ensureTotalCapacity(self.allocator, self.tag_map.count() + @as(u32, @intCast(end - start)));
-            var pos = start;
-            while (pos < end) : (pos += 1) self.indexOneAssumeCapacity(pos);
-            self.index_len = end;
-        }
-
-        fn indexOneAssumeCapacity(self: *Self, pos: usize) void {
-            const open = self.stack.items[pos];
-            const sig: open_tag_index.TagSig = .{ .key = open.key, .len = open.name.len };
-            const previous = self.tag_map.get(sig) orelse open_tag_index.no_stack_pos;
-            self.before.appendAssumeCapacity(.{ .name = open.name, .sig = sig, .prev = previous });
-            self.tag_map.putAssumeCapacity(sig, @intCast(pos));
+        fn activateCloseIndex(self: *Self) !void {
+            std.debug.assert(!self.index_active and self.tag_map.count() == 0);
+            try self.tag_map.ensureTotalCapacity(self.allocator, @intCast(self.stack.items.len -| 1));
+            var pos: usize = 1;
+            while (pos < self.stack.items.len) : (pos += 1) {
+                const open = &self.stack.items[pos];
+                const sig = open_tag_index.signature(open.key, open.name.len);
+                open.prev_same = self.tag_map.get(sig) orelse open_tag_index.no_stack_pos;
+                self.tag_map.putAssumeCapacity(sig, @intCast(pos));
+            }
+            self.index_active = true;
         }
 
         inline fn openMatchesName(self: *const Self, open: OpenTag, close_name: []const u8, close_key: u64) bool {
@@ -634,11 +550,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
     };
 }
 
-fn makeSpan(ptr: [*]const u8, len: usize, source: []const u8) Span {
-    if (len == 0) return .{};
-    const start = @intFromPtr(ptr) - @intFromPtr(source.ptr);
-    return .{ .start = @intCast(start), .len = @intCast(len) };
-}
+
 
 test "streaming parser emits element text and attrs" {
     const Ctx = struct {
@@ -675,7 +587,7 @@ test "streaming attribute iterator handles whitespace around equals and booleans
             const hidden = it.next() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualStrings("hidden", hidden.nameSlice());
             try std.testing.expectEqualStrings("", hidden.valueRaw());
-            try std.testing.expectEqual(attr.RawKind.empty, hidden.kind);
+            try std.testing.expectEqual(attr.RawKind.empty, hidden.raw.kind);
 
             const id = it.next() orelse return error.TestUnexpectedResult;
             try std.testing.expectEqualStrings("id", id.nameSlice());
