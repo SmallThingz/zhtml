@@ -4,7 +4,19 @@ const parse_mode = @import("parse_mode");
 const ParseMode = parse_mode.ParseMode;
 
 const StreamBenchCtx = struct {
-    fn cb(_: *@This(), _: root.StreamingParser.Event) !bool {
+    events: u64 = 0,
+    checksum: u64 = 0,
+
+    fn cb(self: *@This(), event: root.StreamingParser.Event) !bool {
+        self.events +%= 1;
+        self.checksum +%= @as(u64, @intFromEnum(event.kind)) + 1;
+        self.checksum +%= @as(u64, event.depth);
+        self.checksum +%= @as(u64, event.name.start) + @as(u64, event.name.len);
+        self.checksum +%= @as(u64, event.value.start) + @as(u64, event.value.len);
+        self.checksum +%= @as(u64, event.attrs.start) + @as(u64, event.attrs.len);
+        self.checksum +%= @as(u64, event.token.start) + @as(u64, event.token.len);
+        self.checksum +%= @intFromBool(event.self_closing);
+        self.checksum +%= @intFromBool(event.implicit);
         return true;
     }
 };
@@ -194,11 +206,14 @@ pub fn runStreamParseFile(io: std.Io, path: []const u8, iterations: usize) !u64 
 
     var ctx: StreamBenchCtx = .{};
     const parser: root.StreamingParser = .{ .options = .{
-        .emit_text = false,
-        .emit_start_tags = false,
-        .emit_end_tags = false,
-        .emit_implicit_end_tags = false,
-        .track_nesting = false,
+        .emit_text = true,
+        .emit_start_tags = true,
+        .emit_end_tags = true,
+        .emit_implicit_end_tags = true,
+        .include_comments = true,
+        .include_doctype = true,
+        .include_processing_instructions = true,
+        .track_nesting = true,
         .assume_no_gt_in_attribute_values = true,
     } };
 
@@ -210,6 +225,8 @@ pub fn runStreamParseFile(io: std.Io, path: []const u8, iterations: usize) !u64 
     }
     const end = nowNs(io);
 
+    std.mem.doNotOptimizeAway(ctx.events);
+    std.mem.doNotOptimizeAway(ctx.checksum);
     return elapsedNs(start, end);
 }
 
