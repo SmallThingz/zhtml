@@ -34,14 +34,17 @@ pub inline fn scanTagName(source: []const u8, start: usize, comptime normalize_f
     var i = start;
     var key: u64 = 0;
     for (0..8) |off| {
-        if (i >= source.len or !tables.TagNameCharTable[source[i]]) break;
-        const c = std.ascii.toLower(source[i]);
+        if (i >= source.len) break;
+        const c = tables.TagNameLowerTable[source[i]];
+        if (c == 0) break;
         if (comptime normalize_first8) @constCast(source)[i] = c;
         key |= @as(u64, c) << @as(u6, @intCast(off * 8));
         i += 1;
     } else {
-        while (i < source.len and tables.TagNameCharTable[source[i]]) : (i += 1) {
-            if (comptime normalize_first8) @constCast(source)[i] = std.ascii.toLower(source[i]);
+        while (i < source.len) : (i += 1) {
+            const c = tables.TagNameLowerTable[source[i]];
+            if (c == 0) break;
+            if (comptime normalize_first8) @constCast(source)[i] = c;
         }
     }
     return .{ .start = start, .end = i, .key = key };
@@ -52,13 +55,40 @@ pub inline fn scanTagName(source: []const u8, start: usize, comptime normalize_f
 /// unquoted values. The common no-quote case stays a single vectorized search.
 pub inline fn findTagEnd(source: []const u8, start: usize) ?usize {
     if (start >= source.len) return null;
-    return findTagEndNonEmpty(source, start);
+
+    // Normal HTML attributes overwhelmingly use quoted values. Keep those on
+    // vectorized searches instead of restarting a byte-wise tokenizer at the
+    // first quote. Ambiguous/malformed quote placement falls back to the exact
+    // state machine below.
+    var search = start;
+    while (std.mem.indexOfAnyPos(u8, source, search, ">\"'")) |special| {
+        const c = source[special];
+        if (c == '>') return special;
+        if (!quoteStartsAttributeValue(source, start, special)) return findTagEndSlow(source, start);
+        search = (std.mem.indexOfScalarPos(u8, source, special + 1, c) orelse return null) + 1;
+    }
+    return null;
 }
 
-fn findTagEndNonEmpty(source: []const u8, start: usize) ?usize {
-    const first_special = start + (std.mem.indexOfAny(u8, source[start..], ">\"'") orelse return null);
-    if (source[first_special] == '>') return first_special;
+inline fn quoteStartsAttributeValue(source: []const u8, start: usize, quote: usize) bool {
+    var i = quote;
+    while (i > start and tables.WhitespaceTable[source[i - 1]]) : (i -= 1) {}
+    if (i == start or source[i - 1] != '=') return false;
 
+    // Stay deliberately conservative: the fast path handles the overwhelmingly
+    // common `name="value"` shape. Whitespace before '=' and an earlier '=' in
+    // the same token are ambiguous tokenizer states and fall back to the exact
+    // scanner instead of guessing.
+    const eq = i - 1;
+    if (eq == start or tables.WhitespaceTable[source[eq - 1]] or !tables.AttrNameCharTable[source[eq - 1]]) return false;
+    i = eq - 1;
+    while (i > start and !tables.WhitespaceTable[source[i - 1]] and source[i - 1] != '/') : (i -= 1) {
+        if (source[i - 1] == '=') return false;
+    }
+    return true;
+}
+
+fn findTagEndSlow(source: []const u8, start: usize) ?usize {
     const State = enum {
         before_attribute,
         attribute_name,

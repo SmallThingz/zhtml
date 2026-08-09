@@ -43,6 +43,16 @@ pub const WhitespaceTable = makeClassTable(isWhitespace);
 pub const IdentStartTable = makeClassTable(isIdentStart);
 /// Precomputed tag-name-char classification table.
 pub const TagNameCharTable = makeClassTable(isTagNameChar);
+/// Canonical lowercase byte for tag-name bytes; zero marks a tokenizer terminator.
+pub const TagNameLowerTable = blk: {
+    @setEvalBranchQuota(10_000);
+    var table = [_]u8{0} ** 256;
+    for (0..256) |i| {
+        const c: u8 = @intCast(i);
+        if (isTagNameChar(c)) table[i] = std.ascii.toLower(c);
+    }
+    break :blk table;
+};
 /// Precomputed permissive attribute-name-char classification table.
 pub const AttrNameCharTable = makeClassTable(isAttrNameChar);
 

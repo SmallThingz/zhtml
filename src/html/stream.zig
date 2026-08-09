@@ -120,10 +120,9 @@ const OpenTag = struct {
     key: u64,
     depth: u32,
     foreign: bool = false,
-    prev_same: open_tag_index.StackPos = open_tag_index.no_stack_pos,
 
-    pub fn sig(self: *const @This()) open_tag_index.TagSig {
-        return open_tag_index.signature(self.key, self.name.len);
+    pub inline fn keyValue(self: *const @This()) u64 {
+        return self.key;
     }
 };
 
@@ -198,7 +197,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             const void_element = !foreign_element and tags.isVoidTagWithKey(tag_name, tag.key);
             const closes_immediately = void_element or (foreign_element and self_closing);
 
-            if (self.options.track_nesting and !foreign_element and self.stack.items.len > 1 and tags.mayTriggerImplicitCloseWithKey(tag_name, tag.key)) {
+            if (self.options.track_nesting and !foreign_element and self.stack.items.len > 1 and tags.implicitCloseTriggerMask(tag_name, tag.key) != 0) {
                 try self.applyImplicitClosures(tag_name, tag.key, token_start);
             }
 
@@ -468,11 +467,11 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 return null;
             }
 
-            var pos = self.tag_index.find(close.key, close_name.len) orelse return null;
+            var pos = self.tag_index.find(close.key) orelse return null;
             while (pos != open_tag_index.no_stack_pos) {
                 const open = self.stack.items[@intCast(pos)];
                 if (self.openMatchesName(open, close_name, close.key)) return pos;
-                pos = open.prev_same;
+                pos = self.tag_index.previous(pos);
             }
             return null;
         }
@@ -563,7 +562,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     const parent_foreign = skipForeignContext(root, descendants.items);
                     const child_foreign = parent_foreign or tags.isSvgWithKey(child_name, child.key) or tags.isMathWithKey(child_name, child.key);
 
-                    if (!child_foreign and tags.mayTriggerImplicitCloseWithKey(child_name, child.key)) {
+                    if (!child_foreign and tags.implicitCloseTriggerMask(child_name, child.key) != 0) {
                         while (true) {
                             var pos = ancestor_count + 1 + descendants.items.len;
                             var found: ?usize = null;

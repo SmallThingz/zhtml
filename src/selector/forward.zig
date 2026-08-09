@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const declaration_testing = @import("../testing.zig");
 const ast = @import("ast.zig");
 const matcher = @import("matcher.zig");
@@ -39,6 +40,7 @@ pub const Plan = struct {
     scope_self_seed_mask: u64 = 0,
     scope_lineage_seed_mask: u64 = 0,
     has_tag_constraints: bool = false,
+    short_tag_only_mask: u64 = 0,
 };
 
 inline fn bit(index: usize) u64 {
@@ -66,6 +68,8 @@ pub fn buildPlan(selector: ast.Selector) Plan {
             if (!compact) continue;
 
             const compound_bit = bit(absolute);
+            if (comp.hasTag() and comp.tag.len <= 8 and !comp.hasId() and comp.class_len == 0 and comp.attr_len == 0 and comp.pseudo_len == 0 and comp.not_len == 0)
+                plan.short_tag_only_mask |= compound_bit;
             if (relative + 1 < len) plan.continuation_mask |= compound_bit;
             if (relative == 0) {
                 // Leading combinators are anchored checks in processSimple, not
@@ -107,13 +111,12 @@ fn inspectCompoundFeatures(selector: ast.Selector, comp: ast.Compound, plan: *Pl
 }
 
 pub const Frame = struct {
-    subtree_end: IndexInt = 0,
-    node_index: IndexInt = InvalidIndex,
     self_matches: u64 = 0,
     lineage_matches: u64 = 0,
     prev_child_matches: u64 = 0,
     any_child_matches: u64 = 0,
-    element_child_count: usize = 0,
+    subtree_end: IndexInt = 0,
+    element_child_count: IndexInt = 0,
 };
 
 pub const Stats = struct {
@@ -168,18 +171,22 @@ pub fn Executor(comptime Doc: type) type {
         }
 
         pub fn process(self: *Self, idx: IndexInt) !bool {
-            if (!self.plan.stateful) return self.processSimple(idx);
+            if (!self.doc.nodes[idx].isElement(idx)) return false;
+            return self.processElement(idx);
+        }
+
+        pub fn processElement(self: *Self, idx: IndexInt) !bool {
+            if (!self.plan.stateful) return self.processSimpleElement(idx);
             if (!self.initialized) try self.ensureInitialized();
             self.syncStack(idx);
             const raw = &self.doc.nodes[idx];
-            if (!raw.isElement(idx)) return false;
-            self.stats.nodes_processed += 1;
+            if (comptime builtin.is_test) self.stats.nodes_processed += 1;
 
             var parent = self.currentParent();
             var child_position: usize = 0;
             if (self.plan.needs_child_position) {
                 parent.element_child_count += 1;
-                child_position = parent.element_child_count;
+                child_position = @intCast(parent.element_child_count);
             }
             var eligible_bits = self.eligibleMask(parent, raw.parent);
             if (self.plan.has_tag_constraints) eligible_bits &= self.tagAllowedMask(raw.name_or_text.slice(self.doc.source));
@@ -193,21 +200,21 @@ pub fn Executor(comptime Doc: type) type {
             if (raw.subtree_end > idx) {
                 try self.stack.append(self.allocator, .{
                     .subtree_end = raw.subtree_end,
-                    .node_index = idx,
                     .self_matches = persistent,
                     .lineage_matches = lineage,
                 });
             }
             const is_match = final_hits != 0;
-            if (is_match) self.stats.nodes_emitted += 1;
+            if (comptime builtin.is_test) {
+                if (is_match) self.stats.nodes_emitted += 1;
+            }
             return is_match;
         }
 
-        fn processSimple(self: *Self, idx: IndexInt) !bool {
+        fn processSimpleElement(self: *Self, idx: IndexInt) !bool {
             const raw = &self.doc.nodes[idx];
-            if (!raw.isElement(idx)) return false;
-            self.stats.nodes_processed += 1;
-            self.node_ctx.begin(self.allocator, 0);
+            if (comptime builtin.is_test) self.stats.nodes_processed += 1;
+            self.node_ctx.begin(0);
             const allowed = if (self.plan.has_tag_constraints) self.tagAllowedMask(raw.name_or_text.slice(self.doc.source)) else std.math.maxInt(u64);
             for (self.selector.groups) |group| {
                 if (group.compound_len != 1) continue;
@@ -219,12 +226,15 @@ pub fn Executor(comptime Doc: type) type {
                     .child => raw.parent == self.scope_root,
                     .adjacent, .sibling => false,
                 };
-                if (anchored and try matcher.matchesCompoundForward(Doc, self.doc, self.selector, comp, idx, &self.node_ctx)) {
-                    self.stats.local_unique_predicate_evals += 1;
-                    self.stats.nodes_emitted += 1;
-                    return true;
+                if (anchored) {
+                    if (comptime builtin.is_test) self.stats.local_unique_predicate_evals += 1;
+                    if ((self.plan.short_tag_only_mask & bit(absolute)) != 0 or try matcher.matchesCompoundForward(Doc, self.doc, self.selector, comp, idx, &self.node_ctx)) {
+                        if (comptime builtin.is_test) self.stats.nodes_emitted += 1;
+                        return true;
+                    }
+                } else {
+                    if (comptime builtin.is_test) self.stats.local_unique_predicate_evals += 1;
                 }
-                self.stats.local_unique_predicate_evals += 1;
             }
             return false;
         }
@@ -232,7 +242,7 @@ pub fn Executor(comptime Doc: type) type {
         fn ensureInitialized(self: *Self) !void {
             self.initialized = true;
             errdefer self.deinit();
-            self.root = .{ .node_index = self.scope_root };
+            self.root = .{};
             if (self.scope_root == InvalidIndex or self.scope_root == 0 or self.scope_root >= self.doc.nodes.len) return;
             self.root.self_matches = try self.seedMaskAt(self.plan.scope_self_seed_mask, self.scope_root);
 
@@ -288,7 +298,6 @@ pub fn Executor(comptime Doc: type) type {
 
         fn syncStack(self: *Self, idx: IndexInt) void {
             while (self.stack.items.len != 0 and idx > self.stack.items[self.stack.items.len - 1].subtree_end) _ = self.stack.pop();
-            if (self.stack.items.len != 0) std.debug.assert(self.doc.nodes[idx].parent == self.stack.items[self.stack.items.len - 1].node_index or !self.doc.nodes[idx].isElement(idx));
         }
 
         fn currentParent(self: *Self) *Frame {
@@ -309,7 +318,7 @@ pub fn Executor(comptime Doc: type) type {
         fn evaluateEligible(self: *Self, node_index: IndexInt, eligible_bits: u64, child_position: usize) !u64 {
             if (eligible_bits == 0) return 0;
             if (self.predicate_plan.state_ids.len == 0) self.predicate_plan = try matcher.PredicatePlan.init(self.allocator, self.selector);
-            self.node_ctx.begin(self.allocator, child_position);
+            self.node_ctx.begin(child_position);
             var pending = eligible_bits;
             var seen: u64 = 0;
             var matched: u64 = 0;
@@ -320,7 +329,7 @@ pub fn Executor(comptime Doc: type) type {
                 const predicate_bit = bit(predicate_id);
                 if ((seen & predicate_bit) != 0) continue;
                 seen |= predicate_bit;
-                self.stats.local_unique_predicate_evals += 1;
+                if (comptime builtin.is_test) self.stats.local_unique_predicate_evals += 1;
                 const representative: usize = @intCast(self.predicate_plan.representatives[predicate_id]);
                 if (try matcher.matchesCompoundForward(Doc, self.doc, self.selector, self.selector.compounds[representative], node_index, &self.node_ctx)) {
                     for (self.predicate_plan.usesFor(predicate_id)) |use| {
@@ -342,7 +351,6 @@ pub fn WideExecutor(comptime Doc: type) type {
         doc: *const Doc,
         allocator: std.mem.Allocator,
         selector: ast.Selector,
-        plan: Plan,
         scope_root: IndexInt,
         exec_plan: execution_plan.Plan = .{},
         owns_exec_plan: bool = true,
@@ -361,30 +369,29 @@ pub fn WideExecutor(comptime Doc: type) type {
         seed_workspace: matcher.MatchWorkspace,
         stats: Stats = .{},
         initialized: bool = false,
-        root_child_count: usize = 0,
+        root_child_count: IndexInt = 0,
 
         const Self = @This();
         const SmallPredicateWordLimit: usize = 4;
         const State = enum(usize) { self_matches, lineage, prev_child, any_child };
         const WideFrame = struct {
-            subtree_end: IndexInt,
             slot: usize,
-            element_child_count: usize = 0,
+            subtree_end: IndexInt,
+            element_child_count: IndexInt = 0,
         };
 
-        pub fn init(doc: *const Doc, selector: ast.Selector, plan: Plan, scope_root: IndexInt) Self {
+        pub fn init(doc: *const Doc, selector: ast.Selector, scope_root: IndexInt) Self {
             return .{
                 .doc = doc,
                 .allocator = doc.allocator,
                 .selector = selector,
-                .plan = plan,
                 .scope_root = scope_root,
                 .seed_workspace = matcher.MatchWorkspace.init(doc.allocator),
             };
         }
 
-        pub fn initPrepared(doc: *const Doc, selector: ast.Selector, plan: Plan, scope_root: IndexInt, prepared: *const execution_plan.Plan) Self {
-            var out = init(doc, selector, plan, scope_root);
+        pub fn initPrepared(doc: *const Doc, selector: ast.Selector, scope_root: IndexInt, prepared: *const execution_plan.Plan) Self {
+            var out = init(doc, selector, scope_root);
             out.exec_plan = prepared.*;
             out.owns_exec_plan = false;
             return out;
@@ -419,21 +426,25 @@ pub fn WideExecutor(comptime Doc: type) type {
         }
 
         pub fn process(self: *Self, idx: IndexInt) !bool {
+            if (!self.doc.nodes[idx].isElement(idx)) return false;
+            return self.processElement(idx);
+        }
+
+        pub fn processElement(self: *Self, idx: IndexInt) !bool {
             if (!self.initialized) try self.ensureInitialized();
             self.syncStack(idx);
             const raw = &self.doc.nodes[idx];
-            if (!raw.isElement(idx)) return false;
-            self.stats.nodes_processed += 1;
+            if (comptime builtin.is_test) self.stats.nodes_processed += 1;
 
             const parent_slot = if (self.stack.items.len == 0) 0 else self.stack.items[self.stack.items.len - 1].slot;
             var child_position: usize = 0;
             if (self.exec_plan.needs_child_position) {
                 if (self.stack.items.len == 0) {
                     self.root_child_count += 1;
-                    child_position = self.root_child_count;
+                    child_position = @intCast(self.root_child_count);
                 } else {
                     self.stack.items[self.stack.items.len - 1].element_child_count += 1;
-                    child_position = self.stack.items[self.stack.items.len - 1].element_child_count;
+                    child_position = @intCast(self.stack.items[self.stack.items.len - 1].element_child_count);
                 }
             }
 
@@ -464,13 +475,24 @@ pub fn WideExecutor(comptime Doc: type) type {
             }
 
             if (raw.subtree_end > idx and (self.word_count != 0 or self.exec_plan.needs_child_position)) {
-                try self.stack.append(self.allocator, .{
+                if (self.stack.items.len == self.stack.capacity) {
+                    @branchHint(.unlikely);
+                    try self.growStack();
+                }
+                self.stack.appendAssumeCapacity(.{
                     .subtree_end = raw.subtree_end,
                     .slot = temp_slot,
                 });
             }
-            if (is_match) self.stats.nodes_emitted += 1;
+            if (comptime builtin.is_test) {
+                if (is_match) self.stats.nodes_emitted += 1;
+            }
             return is_match;
+        }
+
+        noinline fn growStack(self: *Self) !void {
+            @branchHint(.cold);
+            try self.stack.ensureUnusedCapacity(self.allocator, 1);
         }
 
         fn ensureInitialized(self: *Self) !void {
@@ -604,12 +626,12 @@ pub fn WideExecutor(comptime Doc: type) type {
 
         fn beginNode(self: *Self, child_position: usize) void {
             if (self.usesDensePredicates()) {
-                self.node_ctx.begin(self.allocator, child_position);
+                self.node_ctx.begin(child_position);
                 return;
             }
             if (self.usesInlinePredicateReset()) {
                 self.clearInlineSeen();
-                self.node_ctx.begin(self.allocator, child_position);
+                self.node_ctx.begin(child_position);
                 return;
             }
 
@@ -623,7 +645,7 @@ pub fn WideExecutor(comptime Doc: type) type {
                 }
             }
             self.touched_predicates.clearRetainingCapacity();
-            self.node_ctx.begin(self.allocator, child_position);
+            self.node_ctx.begin(child_position);
         }
 
         fn predicateMatches(self: *Self, predicate_id: usize, node_index: IndexInt) !bool {
@@ -633,7 +655,7 @@ pub fn WideExecutor(comptime Doc: type) type {
             if ((self.seen_predicates[word] & bit_mask) != 0) return (self.matched_predicates[word] & bit_mask) != 0;
             try self.touched_predicates.append(self.allocator, predicate_id);
             self.seen_predicates[word] |= bit_mask;
-            self.stats.local_unique_predicate_evals += 1;
+            if (comptime builtin.is_test) self.stats.local_unique_predicate_evals += 1;
             const representative: usize = @intCast(self.exec_plan.predicates.representatives[predicate_id]);
             const result = try matcher.matchesCompoundForward(
                 Doc,
@@ -727,7 +749,7 @@ pub fn WideExecutor(comptime Doc: type) type {
                     self.state_fanned_predicates[predicate_word] |= predicate_bit;
                     if (local_match) {
                         for (self.exec_plan.predicateStateUsesFor(predicate_id)) |use| {
-                            self.stats.predicate_state_word_fanouts += 1;
+                            if (comptime builtin.is_test) self.stats.predicate_state_word_fanouts += 1;
                             const word: usize = @intCast(use.word_index);
                             matched[word] |= self.eligible_words[word] & use.mask;
                         }
@@ -763,7 +785,7 @@ pub fn WideExecutor(comptime Doc: type) type {
 
                     try self.markPredicateTouched(predicate_id);
                     seen[predicate_word] |= predicate_bit;
-                    self.stats.local_unique_predicate_evals += 1;
+                    if (comptime builtin.is_test) self.stats.local_unique_predicate_evals += 1;
                     const representative: usize = @intCast(self.exec_plan.predicates.representatives[predicate_id]);
                     if (try matcher.matchesCompoundForward(
                         Doc,
@@ -774,7 +796,7 @@ pub fn WideExecutor(comptime Doc: type) type {
                         &self.node_ctx,
                     )) {
                         for (self.exec_plan.predicateStateUsesFor(predicate_id)) |use| {
-                            self.stats.predicate_state_word_fanouts += 1;
+                            if (comptime builtin.is_test) self.stats.predicate_state_word_fanouts += 1;
                             const word: usize = @intCast(use.word_index);
                             matched[word] |= self.eligible_words[word] & use.mask;
                         }
@@ -790,7 +812,7 @@ pub fn WideExecutor(comptime Doc: type) type {
                 inline for (0..word_count) |i| applicable |= self.eligible_words[i] & predicate_mask[i];
                 if (applicable == 0) continue;
 
-                self.stats.local_unique_predicate_evals += 1;
+                if (comptime builtin.is_test) self.stats.local_unique_predicate_evals += 1;
                 const representative: usize = @intCast(self.exec_plan.predicates.representatives[predicate_id]);
                 if (!try matcher.matchesCompoundForward(
                     Doc,
@@ -802,7 +824,7 @@ pub fn WideExecutor(comptime Doc: type) type {
                 )) continue;
 
                 inline for (0..word_count) |i| {
-                    self.stats.predicate_state_word_fanouts += 1;
+                    if (comptime builtin.is_test) self.stats.predicate_state_word_fanouts += 1;
                     matched[i] |= self.eligible_words[i] & predicate_mask[i];
                 }
             }
@@ -852,12 +874,21 @@ pub fn WideExecutor(comptime Doc: type) type {
             while (self.stack.items.len != 0 and idx > self.stack.items[self.stack.items.len - 1].subtree_end) _ = self.stack.pop();
         }
 
-        fn ensureStateSlots(self: *Self, slots: usize) !void {
+        inline fn ensureStateSlots(self: *Self, slots: usize) !void {
             const needed = try checkedStateStorageWords(slots, self.word_count);
             if (self.states.items.len >= needed) return;
             const old_len = self.states.items.len;
-            try self.states.resize(self.allocator, needed);
+            if (needed > self.states.capacity) {
+                @branchHint(.unlikely);
+                try self.growStates(needed);
+            }
+            self.states.items.len = needed;
             @memset(self.states.items[old_len..], 0);
+        }
+
+        noinline fn growStates(self: *Self, needed: usize) !void {
+            @branchHint(.cold);
+            try self.states.ensureTotalCapacity(self.allocator, needed);
         }
 
         fn state(self: *Self, slot: usize, which: State) []u64 {

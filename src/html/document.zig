@@ -860,10 +860,9 @@ fn GetNode(comptime options: ParseOptions) type {
         /// Returns lazy descendant iterator for already compiled selector.
         /// Call `deinit` when stopping before exhaustion to release retained matcher scratch.
         pub fn queryRuntime(self: @This(), sel: ast.Selector) QueryIterType {
-            const plan = forward.buildPlan(sel);
-            if (self.doc.nodes.len == 0) return self.emptyQueryIter(sel, plan);
+            if (self.doc.nodes.len == 0) return QueryIterType.initRuntime(self.doc, sel, InvalidIndex, 1, 1);
             self.assertContainer();
-            return self.queryIter(sel, plan);
+            return QueryIterType.initRuntime(self.doc, sel, self.index, self.index + 1, self.raw().subtree_end + 1);
         }
 
         /// Returns a lazy descendant iterator using a reusable prepared runtime selector.
@@ -946,9 +945,24 @@ fn GetQueryIter(comptime options: ParseOptions) type {
                 .next_index = next_index,
                 .end_index = end_index,
                 .engine = if (use_wide)
-                    .{ .wide = WideForwardExecutor.init(doc, selector, plan, scope_root) }
+                    .{ .wide = WideForwardExecutor.init(doc, selector, scope_root) }
                 else
                     .{ .compact = ForwardExecutor.init(doc, selector, plan, scope_root) },
+            };
+        }
+
+        fn initRuntime(doc: *const DocType, selector: ast.Selector, scope_root: IndexInt, next_index: IndexInt, end_index: IndexInt) @This() {
+            const use_wide = selector.compounds.len > forward.MaxForwardCompounds;
+            return .{
+                .doc = doc,
+                .doc_generation = doc.generation,
+                .scope_root = scope_root,
+                .next_index = next_index,
+                .end_index = end_index,
+                .engine = if (use_wide)
+                    .{ .wide = WideForwardExecutor.init(doc, selector, scope_root) }
+                else
+                    .{ .compact = ForwardExecutor.init(doc, selector, forward.buildPlan(selector), scope_root) },
             };
         }
 
@@ -963,7 +977,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
                 .next_index = next_index,
                 .end_index = end_index,
                 .engine = if (use_wide)
-                    .{ .wide = WideForwardExecutor.initPrepared(doc, selector, plan, scope_root, &prepared.execution_plan) }
+                    .{ .wide = WideForwardExecutor.initPrepared(doc, selector, scope_root, &prepared.execution_plan) }
                 else
                     .{ .compact = ForwardExecutor.init(doc, selector, plan, scope_root) },
             };
@@ -999,13 +1013,14 @@ fn GetQueryIter(comptime options: ParseOptions) type {
             }
 
             while (self.next_index < self.end_index) : (self.next_index += 1) {
+                if (!self.doc.nodes[self.next_index].isElement(self.next_index)) continue;
                 const matched = switch (self.engine) {
                     // Wide forward matching is stateful: every element can establish
                     // ancestry/sibling state for a later rightmost candidate. Do not
                     // apply candidateCouldMatch here; that predicate is only safe for
                     // the final candidate in an RTL/local match.
-                    .compact => |*executor| executor.process(self.next_index),
-                    .wide => |*executor| executor.process(self.next_index),
+                    .compact => |*executor| executor.processElement(self.next_index),
+                    .wide => |*executor| executor.processElement(self.next_index),
                 } catch |err| {
                     // Matcher work is not transactionally reversible after an
                     // allocation failure: sibling/nth state may already have
@@ -1146,8 +1161,10 @@ fn GetDocument(comptime options: ParseOptions) type {
 
         /// Clears parsed state and releases parsed node storage.
         pub fn clear(noalias self: *@This()) void {
+            // `deinit` needs the original source length to select the same
+            // allocator that owns the node slice.
+            self.deinit();
             self.source = emptySource();
-            self.deinit(); // this just clears the nodes
             self.generation = freshDocumentGeneration();
         }
 
@@ -1175,10 +1192,13 @@ fn GetDocument(comptime options: ParseOptions) type {
         /// Returns lazy iterator over matches for already compiled selector.
         /// Call iterator `deinit` when stopping before exhaustion.
         pub fn queryRuntime(self: *const @This(), sel: ast.Selector) QueryIterType {
-            // Empty documents cannot match anything; avoid walking a potentially
-            // large runtime selector solely to build transition masks.
-            if (self.nodes.len == 0) return QueryIterType.init(self, sel, .{}, InvalidIndex, 1, 1);
-            return self.root().queryIter(sel, forward.buildPlan(sel));
+            return QueryIterType.initRuntime(
+                self,
+                sel,
+                InvalidIndex,
+                1,
+                if (self.nodes.len == 0) 1 else self.nodes[0].subtree_end + 1,
+            );
         }
 
         /// Returns lazy iterator over matches using a reusable prepared selector.
@@ -3420,7 +3440,7 @@ test "random selector differential agrees across reference forward dynamic and R
         ) !bool {
             const comp = selector.compounds[group.compound_start + relative];
             const child_position = common.elementSiblingPosition(d, node_index) orelse 0;
-            ctx.begin(d.allocator, child_position);
+            ctx.begin(child_position);
             if (!try matcher.matchesCompoundForward(D, d, selector, comp, node_index, ctx)) return false;
             if (relative == 0) return comp.combinator == .none;
 
@@ -3504,7 +3524,7 @@ test "random selector differential agrees across reference forward dynamic and R
 
         var dynamic = std.ArrayList(IndexInt).empty;
         defer dynamic.deinit(alloc);
-        var executor = forward.WideExecutor(Doc).init(&doc, selector, forward.buildPlan(selector), 0);
+        var executor = forward.WideExecutor(Doc).init(&doc, selector, 0);
         defer executor.deinit();
         idx = 1;
         while (idx < doc.nodes.len) : (idx += 1) {
@@ -4354,7 +4374,7 @@ test "dynamic forward initialization cleans up every allocation failure" {
             // executor scratch is redirected through the failing allocator.
             var local_doc = original.*;
             local_doc.allocator = allocator;
-            var executor = forward.WideExecutor(Doc).init(&local_doc, sel, forward.buildPlan(sel), 0);
+            var executor = forward.WideExecutor(Doc).init(&local_doc, sel, 0);
             defer executor.deinit();
             _ = try executor.process(1);
         }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const declaration_testing = @import("../testing.zig");
 
 test {
@@ -506,7 +507,7 @@ fn matchReverseAutomaton(
 
     while (try workspace.reverse_queue.pop(workspace.allocator)) |idx| {
         run_nodes += 1;
-        workspace.stats.reverse_nodes_processed += 1;
+        if (comptime builtin.is_test) workspace.stats.reverse_nodes_processed += 1;
         std.debug.assert(run_nodes <= doc.nodes.len);
         const index: usize = @intCast(idx);
         std.debug.assert(index < previous_index_exclusive);
@@ -516,7 +517,7 @@ fn matchReverseAutomaton(
         var meta = &workspace.reverse_cell_meta.items[slot];
         std.debug.assert(meta.scheduled);
         if (meta.processed) {
-            workspace.stats.reverse_node_duplicate_processes += 1;
+            if (comptime builtin.is_test) workspace.stats.reverse_node_duplicate_processes += 1;
             std.debug.assert(false);
             continue;
         }
@@ -572,7 +573,7 @@ fn reverseCell(workspace: *MatchWorkspace, node: IndexInt) !usize {
     try workspace.reverse_cells.appendNTimes(workspace.allocator, 0, try checkedProduct(workspace.reverse_word_count, 3));
     errdefer workspace.reverse_cells.items.len = old_cells_len;
     try workspace.reverse_node_map.put(workspace.allocator, node, slot);
-    workspace.stats.reverse_cells_created += 1;
+    if (comptime builtin.is_test) workspace.stats.reverse_cells_created += 1;
     return slot;
 }
 
@@ -591,14 +592,14 @@ fn addReverseBits(workspace: *MatchWorkspace, node: IndexInt, bits: []const u64,
 
     var meta = &workspace.reverse_cell_meta.items[slot];
     if (meta.processed) {
-        workspace.stats.reverse_node_duplicate_processes += 1;
+        if (comptime builtin.is_test) workspace.stats.reverse_node_duplicate_processes += 1;
         std.debug.assert(false);
         return;
     }
     if (!meta.scheduled) {
         try workspace.reverse_queue.push(workspace.allocator, node);
         meta.scheduled = true;
-        workspace.stats.reverse_queue_pushes += 1;
+        if (comptime builtin.is_test) workspace.stats.reverse_queue_pushes += 1;
     }
 }
 
@@ -640,7 +641,7 @@ fn evaluateReversePredicates(comptime Doc: type, doc: *const Doc, selector: ast.
         workspace.reverse_seen_predicates[predicate_id / 64] &= ~seen_bit;
     }
     workspace.reverse_touched_predicates.clearRetainingCapacity();
-    workspace.node_ctx.begin(doc.allocator, 0);
+    workspace.node_ctx.begin(0);
 
     for (wanted, 0..) |wanted_word, word_index| {
         var pending = wanted_word;
@@ -655,7 +656,7 @@ fn evaluateReversePredicates(comptime Doc: type, doc: *const Doc, selector: ast.
             if ((workspace.reverse_seen_predicates[predicate_id / 64] & seen_bit) != 0) continue;
             try workspace.reverse_touched_predicates.append(workspace.allocator, predicate_id);
             workspace.reverse_seen_predicates[predicate_id / 64] |= seen_bit;
-            workspace.stats.local_unique_predicate_evals += 1;
+            if (comptime builtin.is_test) workspace.stats.local_unique_predicate_evals += 1;
             const representative: usize = @intCast(workspace.execution_plan.predicates.representatives[predicate_id]);
             if (try matchesCompoundRtlCached(Doc, doc, selector, selector.compounds[representative], node, &workspace.node_ctx)) {
                 for (workspace.execution_plan.predicateStateUsesFor(predicate_id)) |use| {
@@ -684,14 +685,14 @@ fn prevElementSiblingAccelerated(comptime Doc: type, doc: *const Doc, node_index
     // Building it inserts every direct element child (first child included, as
     // InvalidIndex) into topology_prev, so no second lookup or marker map is
     // needed to know it was built.
-    workspace.stats.topology_parent_builds += 1;
+    if (comptime builtin.is_test) workspace.stats.topology_parent_builds += 1;
     var previous: IndexInt = InvalidIndex;
     var cursor: IndexInt = parent + 1;
     const end = doc.nodes[parent].subtree_end;
     while (cursor <= end and cursor < doc.nodes.len) {
         const raw = &doc.nodes[cursor];
         if (raw.parent == parent) {
-            workspace.stats.topology_child_visits += 1;
+            if (comptime builtin.is_test) workspace.stats.topology_child_visits += 1;
             if (raw.isElement(cursor)) {
                 try workspace.topology_prev.put(workspace.allocator, cursor, previous);
                 previous = cursor;
@@ -722,7 +723,7 @@ fn matchDeterministicGroup(comptime Doc: type, doc: *const Doc, selector: ast.Se
     var node = start_node;
     while (true) {
         const comp = selector.compounds[group.compound_start + rel];
-        ctx.begin(doc.allocator, 0);
+        ctx.begin(0);
         if (!try matchesCompoundRtlCached(Doc, doc, selector, comp, node, ctx)) return false;
         if (rel == 0) return comp.combinator == .none or matchesScopeAnchor(doc, comp.combinator, node, scope_root);
         node = switch (comp.combinator) {
@@ -740,12 +741,16 @@ pub const NodeContext = struct {
     child_position: usize = 0,
     last_child_cache: ?bool = null,
 
-    pub fn begin(self: *@This(), allocator: std.mem.Allocator, child_position: usize) void {
-        if (self.scratch == null) self.scratch = std.heap.ArenaAllocator.init(allocator);
-        _ = self.scratch.?.reset(.retain_capacity);
-        self.probe = .{};
+    pub fn begin(self: *@This(), child_position: usize) void {
+        if (self.scratch) |*scratch| _ = scratch.reset(.retain_capacity);
+        self.probe.reset();
         self.child_position = child_position;
         self.last_child_cache = null;
+    }
+
+    inline fn scratchAllocator(self: *@This(), allocator: std.mem.Allocator) std.mem.Allocator {
+        if (self.scratch == null) self.scratch = std.heap.ArenaAllocator.init(allocator);
+        return self.scratch.?.allocator();
     }
 
     pub fn deinit(self: *@This()) void {
@@ -757,21 +762,26 @@ pub const NodeContext = struct {
 const PseudoMode = enum { rtl, forward };
 
 pub fn matchesCompoundForward(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, ctx: *NodeContext) !bool {
-    std.debug.assert(ctx.scratch != null);
-    return matchesCompoundCore(Doc, doc, selector, comp, node_index, ctx.scratch.?.allocator(), &ctx.probe, .forward, ctx.child_position, &ctx.last_child_cache);
+    return matchesCompoundCore(Doc, doc, selector, comp, node_index, ctx, .forward, ctx.child_position);
 }
 
 fn matchesCompoundRtlCached(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, ctx: *NodeContext) !bool {
-    std.debug.assert(ctx.scratch != null);
-    return matchesCompoundCore(Doc, doc, selector, comp, node_index, ctx.scratch.?.allocator(), &ctx.probe, .rtl, 0, &ctx.last_child_cache);
+    return matchesCompoundCore(Doc, doc, selector, comp, node_index, ctx, .rtl, 0);
 }
 
-fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, scratch_alloc: std.mem.Allocator, attr_probe: *AttrProbe, pseudo_mode: PseudoMode, child_position: usize, last_child_cache: *?bool) !bool {
+fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, comp: ast.Compound, node_index: IndexInt, ctx: *NodeContext, pseudo_mode: PseudoMode, child_position: usize) !bool {
     if (!doc.nodes[node_index].isElement(node_index)) return false;
     const node = &doc.nodes[node_index];
-    var collected_attrs: CollectedAttrs = .{};
-    const use_collected = prepareCollectedAttrs(selector, comp, &collected_attrs);
+
+    const possible_attr_requests: usize = @as(usize, @intFromBool(comp.hasId())) + @as(usize, @intFromBool(comp.class_len != 0)) + @as(usize, @intCast(comp.attr_len)) + @as(usize, @intCast(comp.not_len));
+    var collected_attrs: CollectedAttrs = undefined;
+    const inspect_collected = possible_attr_requests >= 2 or comp.not_len != 0;
+    const use_collected = inspect_collected and prepareCollectedAttrs(selector, comp, &collected_attrs);
     const collected_ptr: ?*CollectedAttrs = if (use_collected) &collected_attrs else null;
+    const has_attr_requests = if (inspect_collected) collected_attrs.count != 0 else possible_attr_requests != 0;
+    const scratch_alloc: std.mem.Allocator = if (has_attr_requests) ctx.scratchAllocator(doc.allocator) else undefined;
+    const attr_probe = &ctx.probe;
+    const last_child_cache = &ctx.last_child_cache;
 
     if (comp.hasTag()) {
         const node_name = node.name_or_text.slice(doc.source);
@@ -999,6 +1009,11 @@ const AttrProbe = struct {
     count: usize = 0,
     overflow: bool = false,
     entries: [MaxProbeEntries]AttrProbeEntry = [_]AttrProbeEntry{.{}} ** MaxProbeEntries,
+
+    inline fn reset(self: *@This()) void {
+        self.count = 0;
+        self.overflow = false;
+    }
 };
 
 const CollectedAttrs = struct {
@@ -1011,7 +1026,9 @@ const CollectedAttrs = struct {
 };
 
 fn prepareCollectedAttrs(selector: ast.Selector, comp: ast.Compound, out: *CollectedAttrs) bool {
-    out.* = .{};
+    out.count = 0;
+    out.requested_once = false;
+    out.materialized = false;
 
     if (comp.hasId() and !pushCollectedName(out, "id")) return false;
     if (comp.class_len != 0 and !pushCollectedName(out, "class")) return false;
@@ -1045,6 +1062,7 @@ fn pushCollectedName(out: *CollectedAttrs, name: []const u8) bool {
     if (out.count >= MaxCollectedAttrs) return false;
     out.names[out.count] = name;
     out.values[out.count] = null;
+    out.looked[out.count] = false;
     out.count += 1;
     return true;
 }

@@ -54,7 +54,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    b.installArtifact(bench_exe);
+    const install_bench = b.addInstallArtifact(bench_exe, .{});
+    b.getInstallStep().dependOn(&install_bench.step);
+    const bench_only_step = b.step("bench-only", "Build benchmark binary only");
+    bench_only_step.dependOn(&install_bench.step);
     b.installArtifact(tools_exe);
 
     const tools_step = b.step("tools", "Run html-tools utility");

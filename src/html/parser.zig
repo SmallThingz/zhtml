@@ -17,9 +17,11 @@ const ParseOptions = document.ParseOptions;
 const InvalidIndex: IndexInt = common.InvalidIndex;
 const IndexInt = common.IndexInt;
 const InitialParseStackCapacity: usize = 32;
+const CloseIndexMinDepth: usize = 64;
 const SmallInitialNodeCapacity: usize = 64;
 const LargeInitialNodeCapacity: usize = 512;
 const SmallInputThreshold: usize = 4 * 1024;
+const NodeDensitySampleBytes: usize = 64 * 1024;
 
 // SAFETY: Parser builds spans into `input`; indices are stored as `IndexInt`.
 // In destructive mode tag names are normalized in-place. In non-destructive mode
@@ -32,40 +34,42 @@ pub fn parse(comptime opts: ParseOptions, allocator: std.mem.Allocator, input: o
     if (!common.lenFits(input.len)) return error.InputTooLarge;
 
     const Doc = opts.Document();
-    const RawNode = document.GetRawNode(opts);
     var doc = Doc.init(allocator);
     errdefer doc.deinit();
     doc.source = input;
 
-    var node_buf: std.ArrayListUnmanaged(RawNode) = .empty;
-    errdefer node_buf.deinit(allocator);
-
     var state = ParseState(opts){
-        .doc = &doc,
+        .allocator = allocator,
         .input = input,
         .i = 0,
-        .nodes = &node_buf,
     };
+    errdefer state.nodes.deinit(allocator);
     try state.parse();
 
-    doc.nodes = try node_buf.toOwnedSlice(allocator);
+    doc.nodes = try state.nodes.toOwnedSlice(allocator);
     return doc;
 }
 
 fn ParseState(comptime opts: ParseOptions) type {
     return struct {
-        /// Document being populated with completed parse output.
-        doc: *opts.Document(),
+        /// Allocator for the persistent node buffer and rare scratch spill.
+        allocator: std.mem.Allocator,
         /// Source bytes being tokenized for this parse pass.
         input: []const u8,
         /// Current byte cursor inside `input`.
         i: usize,
-        /// Growable node buffer owned by parser during tree construction.
-        nodes: *std.ArrayListUnmanaged(RawNode),
-        /// Open-element stack used only while building the tree.
+        /// Growable node buffer owned directly by parser during tree construction.
+        nodes: std.ArrayListUnmanaged(RawNode) = .empty,
+        /// Open-element stack used only while building the tree. Most HTML
+        /// stays in the inline buffer; unusually deep documents spill once.
         parse_stack: std.ArrayListUnmanaged(OpenElem) = .empty,
-        /// Lazily activated malformed-close index. Normal parsing touches only the stack.
-        tag_index: open_tag_index.LiveIndex(OpenElem) = .{},
+        parse_stack_inline: [InitialParseStackCapacity]OpenElem = undefined,
+        parse_stack_heap_owned: bool = false,
+        /// Optional-end-tag source classes currently present on the open stack.
+        implicit_source_mask: u8 = 0,
+        implicit_source_duplicates: u8 = 0,
+        /// Malformed-close index exists only after a deep full-stack miss.
+        tag_index: ?*open_tag_index.LiveIndex(OpenElem) = null,
 
         const Self = @This();
         const RawNode = document.GetRawNode(opts);
@@ -74,25 +78,30 @@ fn ParseState(comptime opts: ParseOptions) type {
             tag_key: u64 = 0,
             /// Node index of the open element.
             idx: IndexInt,
-            /// Original tag-name length for close matching and optional-close logic.
-            tag_len: IndexInt = 0,
-            /// Last direct element child seen while this element is open.
-            last_child: IndexInt = InvalidIndex,
-            /// Previous open stack entry with the same close-tag signature.
-            prev_same: open_tag_index.StackPos = open_tag_index.no_stack_pos,
+            /// Last direct element child only when sibling/child links are persisted.
+            last_child: if (opts.store_last_child or opts.store_prev_sibling) IndexInt else void = if (opts.store_last_child or opts.store_prev_sibling) InvalidIndex else {},
+            /// Optional-close source class cached in struct padding.
+            implicit_source: u8 = 0,
 
-            pub fn sig(self: *const @This()) open_tag_index.TagSig {
-                return open_tag_index.signature(self.tag_key, self.tag_len);
+            pub inline fn keyValue(self: *const @This()) u64 {
+                return self.tag_key;
             }
         };
         const TagNameScan = scanner.TagName;
 
         /// Reserve capacities + add initial values to containers
         inline fn initContainers(noalias self: *Self) !void {
-            const alloc = self.doc.allocator;
-            const initial_nodes = if (self.input.len <= SmallInputThreshold) SmallInitialNodeCapacity else LargeInitialNodeCapacity;
-            try self.nodes.ensureTotalCapacity(alloc, initial_nodes);
-            try self.parse_stack.ensureTotalCapacity(alloc, InitialParseStackCapacity);
+            const initial_nodes = if (self.input.len <= SmallInputThreshold)
+                SmallInitialNodeCapacity
+            else blk: {
+                const sample_len = @min(self.input.len, NodeDensitySampleBytes);
+                const lt_count = std.mem.countScalar(u8, self.input[0..sample_len], '<');
+                const projected_tags = std.math.mul(usize, lt_count, self.input.len) catch self.input.len;
+                const density_estimate = projected_tags / sample_len;
+                break :blk @max(LargeInitialNodeCapacity, density_estimate + density_estimate / 8 + 1);
+            };
+            try self.nodes.ensureTotalCapacity(self.allocator, initial_nodes);
+            self.parse_stack = .initBuffer(&self.parse_stack_inline);
 
             // Seed the synthetic document root so every parsed node has a stable
             // parent chain and the open-element stack always has a sentinel.
@@ -106,14 +115,13 @@ fn ParseState(comptime opts: ParseOptions) type {
             self.parse_stack.appendAssumeCapacity(.{
                 .idx = 0,
                 .tag_key = 0,
-                .tag_len = 0,
-                .last_child = InvalidIndex,
+                .last_child = if (comptime opts.store_last_child or opts.store_prev_sibling) InvalidIndex else {},
             });
         }
 
         inline fn parse(noalias self: *Self) !void {
-            defer self.parse_stack.deinit(self.doc.allocator);
-            defer self.tag_index.deinit(self.doc.allocator);
+            defer self.deinitParseStack();
+            defer self.deinitTagIndex();
             try self.initContainers();
 
             // Main tokenization loop. Text spans and tags are dispatched here,
@@ -122,7 +130,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 if (self.input[self.i] != '<') {
                     try self.handleText();
                 } else switch (self.input[self.i + 1]) {
-                    '/' => try self.parseClosingTag(),
+                    '/' => try self.parseClosingTag(false),
                     '?' => {
                         @branchHint(.cold);
                         self.skipPi();
@@ -136,7 +144,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                             self.skipBangNode();
                         }
                     },
-                    else => try self.parseOpeningTag(),
+                    else => try self.parseOpeningTag(false),
                 }
             }
 
@@ -163,6 +171,26 @@ fn ParseState(comptime opts: ParseOptions) type {
             self.parse_stack.clearRetainingCapacity();
         }
 
+        noinline fn parseIndexedRemainder(noalias self: *Self) !void {
+            @branchHint(.cold);
+            std.debug.assert(self.tag_index != null);
+            while (self.i + 1 < self.input.len) {
+                if (self.input[self.i] != '<') {
+                    try self.handleText();
+                } else switch (self.input[self.i + 1]) {
+                    '/' => try self.parseClosingTag(true),
+                    '?' => self.skipPi(),
+                    '!' => {
+                        if (self.i + 3 < self.input.len and self.input[self.i + 2] == '-' and self.input[self.i + 3] == '-')
+                            self.skipComment()
+                        else
+                            self.skipBangNode();
+                    },
+                    else => try self.parseOpeningTag(true),
+                }
+            }
+        }
+
         inline fn handleText(noalias self: *Self) !void {
             std.debug.assert(self.input[self.i] != '<');
             std.debug.assert(self.i < self.input.len - 1);
@@ -185,7 +213,7 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         /// Intended to be called from inside of parseOpeningTag to parse the remaining contents as text
-        inline fn handleInvalidOpeningTag(noalias self: *Self, start: IndexInt) !void {
+        noinline fn handleInvalidOpeningTag(noalias self: *Self, start: IndexInt) !void {
             const parent_idx = self.currentParent();
             const last = &self.nodes.items[self.nodes.items.len - 1];
             self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '<') orelse self.input.len;
@@ -201,7 +229,7 @@ fn ParseState(comptime opts: ParseOptions) type {
         /// Intended to be called from inside of parseOpeningTag to parse the remaining contents as text
         /// Skip SVG subtrees entirely to keep parse work focused on primary HTML content.
         /// Nested <svg> blocks are counted; `<svg` in quoted attributes is ignored by quote-aware tag-end scanning.
-        inline fn handleSvgTag(
+        noinline fn handleSvgTag(
             noalias self: *Self,
             name_start: usize,
             name_end: usize,
@@ -223,7 +251,41 @@ fn ParseState(comptime opts: ParseOptions) type {
             }
         }
 
-        inline fn parseOpeningTag(noalias self: *Self) !void {
+        noinline fn handlePlaintextTag(noalias self: *Self, name_start: usize, name_end: usize) !void {
+            const parent_idx: IndexInt = @intCast(self.nodes.items.len);
+            try self.addNode(.{ name_start, name_end }, true, .{});
+            if (self.i < self.input.len) {
+                self.nodes.items[parent_idx].subtree_end = @intCast(self.nodes.items.len);
+                try self.addNode(.{ self.i, self.input.len }, false, .{ .parent = parent_idx });
+            }
+            self.i = self.input.len;
+        }
+
+        noinline fn handleTextOnlyTag(
+            noalias self: *Self,
+            name_start: usize,
+            name_end: usize,
+            tag_name_key: u64,
+        ) !void {
+            const parent_idx: IndexInt = @intCast(self.nodes.items.len);
+            try self.addNode(.{ name_start, name_end }, true, .{});
+            const tag_name = self.input[name_start..name_end];
+            const content_start = self.i;
+            const content_end = blk: {
+                if (self.findRawTextClose(tag_name, tag_name_key, self.i)) |close| {
+                    self.i = close.close_end;
+                    break :blk close.content_end;
+                }
+                self.i = self.input.len;
+                break :blk self.i;
+            };
+            if (content_start < content_end) {
+                self.nodes.items[parent_idx].subtree_end = @intCast(self.nodes.items.len);
+                try self.addNode(.{ content_start, content_end }, false, .{ .parent = parent_idx });
+            }
+        }
+
+        inline fn parseOpeningTag(noalias self: *Self, comptime indexed: bool) !void {
             self.i += 1; // <
             // no whitespace after `<` is allowed, same behavior as browser
 
@@ -261,66 +323,45 @@ fn ParseState(comptime opts: ParseOptions) type {
 
             // Resolve optional-close HTML elements before any special-content
             // branch so tags such as <plaintext> cannot remain nested in an open <p>.
-            if (self.parse_stack.items.len > 1 and tags.mayTriggerImplicitCloseWithKey(tag_name, tag_name_key)) {
-                self.applyImplicitClosures(tag_name, tag_name_key);
+            if (self.implicit_source_mask != 0 and self.parse_stack.items.len > 1) {
+                const trigger_mask = tags.implicitCloseTriggerMask(tag_name, tag_name_key);
+                if (self.implicit_source_mask & trigger_mask != 0) {
+                    const top = self.parse_stack.items[self.parse_stack.items.len - 1];
+                    if (top.implicit_source & trigger_mask != 0) {
+                        const popped = self.popOpen(indexed);
+                        self.nodes.items[popped.idx].subtree_end = @intCast(self.nodes.items.len - 1);
+                        if (self.implicit_source_mask & trigger_mask != 0) self.applyImplicitClosures(trigger_mask, indexed);
+                    } else {
+                        self.applyImplicitClosures(trigger_mask, indexed);
+                    }
+                }
             }
 
-            // In case this is an svg tag: Note: we still treat svg's attribute like we do html attributes which is not 100% correct
-            // This is preferred over the complications that arise from parsing as xml tho
-            if (isSvgTagKey(tag_name_key)) {
-                return self.handleSvgTag(name_start, name_end, attr_end);
-            } else if (tags.isPlainTextTagWithKey(tag_name, tag_name_key)) {
-                // Plaintext tags consume the rest of the document as one text child.
-                const parent_idx: IndexInt = @intCast(self.nodes.items.len);
-                try self.addNode(.{ name_start, name_end }, true, .{});
-                if (self.i < self.input.len) {
-                    @branchHint(.likely);
-                    self.nodes.items[parent_idx].subtree_end = @intCast(self.nodes.items.len);
-                    try self.addNode(.{ self.i, self.input.len }, false, .{ .parent = parent_idx });
-                }
-                self.i = self.input.len;
-                return;
-            } else if (tags.isTextOnlyTagWithKey(tag_name, tag_name_key)) {
-                // Raw-text tags stay structured as elements, but their contents are
-                // copied as one opaque text child up to the matching close tag.
-                const parent_idx: IndexInt = @intCast(self.nodes.items.len);
-                try self.addNode(.{ name_start, name_end }, true, .{});
-
-                const content_start = self.i;
-                const content_end = blk: {
-                    if (self.findRawTextClose(tag_name, tag_name_key, self.i)) |close| {
-                        self.i = close.close_end;
-                        break :blk close.content_end;
-                    } else {
-                        self.i = self.input.len;
-                        break :blk self.i;
-                    }
-                };
-
-                if (content_start < content_end) {
-                    @branchHint(.likely);
-                    self.nodes.items[parent_idx].subtree_end = @intCast(self.nodes.items.len);
-                    try self.addNode(.{ content_start, content_end }, false, .{ .parent = parent_idx });
-                }
-                return;
+            switch (tags.classifyOpenTag(tag_name, tag_name_key)) {
+                .svg => return self.handleSvgTag(name_start, name_end, attr_end),
+                .plaintext => return self.handlePlaintextTag(name_start, name_end),
+                .text_only => return self.handleTextOnlyTag(name_start, name_end, tag_name_key),
+                .void => {
+                    try self.addNode(.{ name_start, name_end }, true, .{});
+                    return;
+                },
+                .normal => {},
             }
 
             const node_idx = self.nodes.items.len;
             try self.addNode(.{ name_start, name_end }, true, .{});
 
-            if (tags.isVoidTagWithKey(tag_name, tag_name_key)) return;
-
             // Non-void, non-raw elements stay on the open stack until an
             // explicit close, an optional-close rule, or EOF pops them.
-            try self.pushOpen(.{
+            try self.pushOpen(indexed, .{
                 .idx = @intCast(node_idx),
                 .tag_key = tag_name_key,
-                .tag_len = @intCast(tag_name.len),
-                .last_child = InvalidIndex,
+                .last_child = if (comptime opts.store_last_child or opts.store_prev_sibling) InvalidIndex else {},
+                .implicit_source = tags.implicitCloseSourceMask(tag_name.len, tag_name_key),
             });
         }
 
-        inline fn parseClosingTag(noalias self: *Self) !void {
+        inline fn parseClosingTag(noalias self: *Self, comptime indexed: bool) !void {
             self.i += 2; // </
             // no whitespace after `<` is allowed, same behavior as browser
 
@@ -348,27 +389,30 @@ fn ParseState(comptime opts: ParseOptions) type {
             // Fast path: most closing tags match the current open element.
             if (self.openElemMatchesClose(top, close_name, close_key)) {
                 @branchHint(.likely);
-                _ = self.popOpen();
+                _ = self.popOpen(indexed);
                 var node = &self.nodes.items[top.idx];
                 node.subtree_end = @intCast(self.nodes.items.len - 1);
                 return;
             }
 
-            if (try self.findOpenForSlowClose(close_name, close_key)) |found_pos| {
+            if (try self.findOpenForSlowClose(indexed, close_name, close_key)) |found_pos| {
                 @branchHint(.likely);
                 const pos: usize = @intCast(found_pos);
                 // Permissive recovery: pop everything above the matched opener.
                 while (self.parse_stack.items.len > pos) {
-                    const open = self.popOpen();
+                    const open = self.popOpen(indexed);
                     var node = &self.nodes.items[open.idx];
                     node.subtree_end = @intCast(self.nodes.items.len - 1);
                 }
             } else {
                 @branchHint(.unlikely);
+                if (comptime !indexed) {
+                    if (self.tag_index != null) try self.parseIndexedRemainder();
+                }
             }
         }
 
-        inline fn applyImplicitClosures(noalias self: *Self, new_tag: []const u8, new_tag_key: u64) void {
+        noinline fn applyImplicitClosures(noalias self: *Self, trigger_mask: u8, comptime indexed: bool) void {
             while (self.parse_stack.items.len > 1) {
                 var pos = self.parse_stack.items.len;
                 var found: ?usize = null;
@@ -376,63 +420,151 @@ fn ParseState(comptime opts: ParseOptions) type {
                 while (pos > 1) {
                     pos -= 1;
                     const open = self.parse_stack.items[pos];
-                    if (tags.isImplicitCloseSourceWithLenAndKey(open.tag_len, open.tag_key) and
-                        tags.shouldImplicitlyCloseWithLenAndKey(open.tag_len, open.tag_key, new_tag, new_tag_key) and
-                        scope.permits(open.tag_len, open.tag_key))
-                    {
+                    const open_len = self.nodes.items[open.idx].name_or_text.len;
+                    if (open.implicit_source & trigger_mask != 0 and scope.permits(open_len, open.tag_key)) {
                         found = pos;
                         break;
                     }
-                    scope.observe(open.tag_len, open.tag_key);
+                    scope.observe(open_len, open.tag_key);
                 }
 
                 const found_pos = found orelse break;
                 // Pop the optional-close source and every inline descendant
                 // above it, exactly as an explicit close of that source would.
                 while (self.parse_stack.items.len > found_pos) {
-                    const popped = self.popOpen();
+                    const popped = self.popOpen(indexed);
                     var n = &self.nodes.items[popped.idx];
                     n.subtree_end = @intCast(self.nodes.items.len - 1);
                 }
             }
         }
 
-        fn pushOpen(noalias self: *Self, open_value: OpenElem) !void {
-            var open = open_value;
-            try self.tag_index.preparePush(self.doc.allocator, &open);
-            try self.parse_stack.append(self.doc.allocator, open);
-            self.tag_index.commitPush(&self.parse_stack.items[self.parse_stack.items.len - 1], self.parse_stack.items.len);
+        inline fn deinitParseStack(noalias self: *Self) void {
+            if (self.parse_stack_heap_owned) self.parse_stack.deinit(self.allocator);
         }
 
-        fn popOpen(noalias self: *Self) OpenElem {
-            const pos = self.parse_stack.items.len - 1;
+        inline fn addImplicitSource(noalias self: *Self, open: OpenElem) void {
+            const source = open.implicit_source;
+            if (source == 0) return;
+            if (self.implicit_source_mask & source != 0) self.implicit_source_duplicates |= source;
+            self.implicit_source_mask |= source;
+        }
+
+        inline fn removeImplicitSource(noalias self: *Self, open: OpenElem) void {
+            const source = open.implicit_source;
+            if (source == 0) return;
+            if (self.implicit_source_duplicates & source == 0) {
+                self.implicit_source_mask &= ~source;
+                return;
+            }
+            self.recountImplicitSource(source);
+        }
+
+        noinline fn recountImplicitSource(noalias self: *Self, source: u8) void {
+            @branchHint(.cold);
+            var seen: u2 = 0;
+            for (self.parse_stack.items[1..]) |item| {
+                if (item.implicit_source & source == 0) continue;
+                seen += 1;
+                if (seen == 2) return;
+            }
+            self.implicit_source_duplicates &= ~source;
+            if (seen == 0) self.implicit_source_mask &= ~source;
+        }
+
+        noinline fn growParseStack(noalias self: *Self) !void {
+            @branchHint(.cold);
+            if (!self.parse_stack_heap_owned) {
+                var heap = try std.ArrayListUnmanaged(OpenElem).initCapacity(
+                    self.allocator,
+                    self.parse_stack.capacity * 2,
+                );
+                heap.appendSliceAssumeCapacity(self.parse_stack.items);
+                self.parse_stack = heap;
+                self.parse_stack_heap_owned = true;
+                return;
+            }
+            try self.parse_stack.ensureUnusedCapacity(self.allocator, 1);
+        }
+
+        inline fn pushOpen(noalias self: *Self, comptime indexed: bool, open: OpenElem) !void {
+            if (comptime indexed) return self.pushOpenIndexed(open);
+            if (self.parse_stack.items.len == self.parse_stack.capacity) {
+                @branchHint(.unlikely);
+                try self.growParseStack();
+            }
+            self.parse_stack.appendAssumeCapacity(open);
+            self.addImplicitSource(open);
+        }
+
+        noinline fn pushOpenIndexed(noalias self: *Self, open: OpenElem) !void {
+            @branchHint(.cold);
+            if (self.parse_stack.items.len == self.parse_stack.capacity) try self.growParseStack();
+            const index = self.tag_index.?;
+            try index.preparePush(self.allocator, &open);
+            self.parse_stack.appendAssumeCapacity(open);
+            index.commitPush(&open, self.parse_stack.items.len);
+            self.addImplicitSource(open);
+        }
+
+        inline fn popOpen(noalias self: *Self, comptime indexed: bool) OpenElem {
+            if (comptime indexed) return self.popOpenIndexed();
             const open = self.parse_stack.pop().?;
             std.debug.assert(open.idx != 0);
-            self.tag_index.pop(&open, pos + 1);
-            self.tag_index.maybeDeactivate(self.doc.allocator, self.parse_stack.items.len);
+            self.removeImplicitSource(open);
             return open;
         }
 
-        fn findOpenForSlowClose(noalias self: *Self, close_name: []const u8, close_key: u64) !?open_tag_index.StackPos {
-            if (!self.tag_index.active) {
-                // Covers the top of the stack (index len-1) down to index 1;
-                // index 0 is the document root and is never matched.
-                var pos = self.parse_stack.items.len - 1;
-                while (pos >= 1) {
-                    if (self.openElemMatchesClose(self.parse_stack.items[pos], close_name, close_key)) return @intCast(pos);
-                    pos -= 1;
+        noinline fn popOpenIndexed(noalias self: *Self) OpenElem {
+            @branchHint(.cold);
+            const stack_len = self.parse_stack.items.len;
+            const open = self.parse_stack.pop().?;
+            std.debug.assert(open.idx != 0);
+            self.removeImplicitSource(open);
+            self.tag_index.?.pop(&open, stack_len);
+            return open;
+        }
+
+        fn findOpenForSlowClose(noalias self: *Self, comptime indexed: bool, close_name: []const u8, close_key: u64) !?open_tag_index.StackPos {
+            if (comptime indexed) {
+                const index = self.tag_index.?;
+                var pos = index.find(close_key) orelse return null;
+                while (pos != open_tag_index.no_stack_pos) {
+                    const p: usize = @intCast(pos);
+                    if (self.openElemMatchesClose(self.parse_stack.items[p], close_name, close_key)) return pos;
+                    pos = index.previous(pos);
                 }
-                try self.tag_index.activate(self.doc.allocator, self.parse_stack.items);
                 return null;
             }
 
-            var pos = self.tag_index.find(close_key, close_name.len) orelse return null;
-            while (pos != open_tag_index.no_stack_pos) {
-                const open = self.parse_stack.items[@intCast(pos)];
-                if (self.openElemMatchesClose(open, close_name, close_key)) return pos;
-                pos = open.prev_same;
+            var pos = self.parse_stack.items.len;
+            while (pos > 1) {
+                pos -= 1;
+                if (self.openElemMatchesClose(self.parse_stack.items[pos], close_name, close_key)) return @intCast(pos);
             }
+
+            // Only a deep full miss transfers parsing into indexed recovery.
+            if (self.parse_stack.items.len < CloseIndexMinDepth) return null;
+            const index = try self.allocator.create(open_tag_index.LiveIndex(OpenElem));
+            errdefer self.allocator.destroy(index);
+            index.* = .{};
+            errdefer index.deinit(self.allocator);
+            try index.activate(self.allocator, self.parse_stack.items);
+            self.tag_index = index;
             return null;
+        }
+
+        noinline fn deinitTagIndex(noalias self: *Self) void {
+            if (self.tag_index) |index| {
+                index.deinit(self.allocator);
+                self.allocator.destroy(index);
+                self.tag_index = null;
+            }
+        }
+
+        noinline fn growNodes(noalias self: *Self) !void {
+            @branchHint(.cold);
+            try self.nodes.ensureUnusedCapacity(self.allocator, 1);
         }
 
         inline fn addNode(noalias self: *Self, name_or_text: anytype, is_element: bool, overrides: anytype) !void {
@@ -446,10 +578,14 @@ fn ParseState(comptime opts: ParseOptions) type {
             var prev_element = InvalidIndex;
             if (is_element) {
                 std.debug.assert(parent_idx == self.currentParent());
-                prev_element = self.parse_stack.items[parent_stack_idx].last_child;
+                if (comptime opts.store_last_child or opts.store_prev_sibling) prev_element = self.parse_stack.items[parent_stack_idx].last_child;
             }
 
-            try self.nodes.append(self.doc.allocator, .{
+            if (self.nodes.items.len == self.nodes.capacity) {
+                @branchHint(.unlikely);
+                try self.growNodes();
+            }
+            self.nodes.appendAssumeCapacity(.{
                 .name_or_text = .{
                     .start = @intCast(name_or_text[0]),
                     .len = @intCast(name_or_text[1] - name_or_text[0]),
@@ -460,7 +596,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 .subtree_end = if (is_element) idx else 0,
             });
             if (is_element) {
-                self.parse_stack.items[parent_stack_idx].last_child = idx;
+                if (comptime opts.store_last_child or opts.store_prev_sibling) self.parse_stack.items[parent_stack_idx].last_child = idx;
                 if (comptime opts.store_last_child) self.nodes.items[parent_idx].last_child = idx;
             }
         }
@@ -471,11 +607,10 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         inline fn openElemMatchesClose(noalias self: *const Self, open: OpenElem, close_name: []const u8, close_key: u64) bool {
-            // Length + key rejects the common non-match case without touching
-            // the stored tag bytes. Long names only compare the tail on a hit.
-            if (open.tag_len != close_name.len or open.tag_key != close_key) return false;
+            const open_span = self.nodes.items[open.idx].name_or_text;
+            if (open_span.len != close_name.len or open.tag_key != close_key) return false;
             if (close_name.len <= 8) return true;
-            const open_name = self.nodes.items[open.idx].name_or_text.slice(self.input);
+            const open_name = open_span.slice(self.input);
             return std.ascii.eqlIgnoreCase(open_name[8..], close_name[8..]);
         }
 
@@ -1494,58 +1629,58 @@ test "closing-tag index tracks duplicate names and rejects unmatched tags" {
     try std.testing.expectEqualStrings("b", parent.tagName());
 }
 
-test "lazy closing-tag index activates only after full miss and stays live" {
+test "lazy closing-tag index activates only for deep misses and stays live" {
     const alloc = std.testing.allocator;
     const TestOptions: ParseOptions = .{};
-    const Doc = TestOptions.Document();
-    const RawNode = document.GetRawNode(TestOptions);
-    var doc = Doc.init(alloc);
-    defer doc.deinit();
-    var nodes: std.ArrayListUnmanaged(RawNode) = .empty;
-    defer nodes.deinit(alloc);
     const input = "abcdefghX1 abcdefghY1 a b c x y";
-    var state = ParseState(TestOptions){ .doc = &doc, .input = @constCast(input), .i = 0, .nodes = &nodes };
-    defer state.parse_stack.deinit(alloc);
-    defer state.tag_index.deinit(alloc);
+    var state = ParseState(TestOptions){ .allocator = alloc, .input = @constCast(input), .i = 0 };
+    defer state.nodes.deinit(alloc);
+    defer state.deinitParseStack();
+    defer state.deinitTagIndex();
     try state.initContainers();
 
     const Push = struct {
-        fn one(s: anytype, start: usize, end: usize) !void {
-            const name = s.input[start..end];
+        fn one(s: anytype, comptime indexed: bool, start: usize, end_: usize) !void {
+            const name = s.input[start..end_];
             const node_idx = s.nodes.items.len;
-            try s.addNode(.{ start, end }, true, .{});
-            try s.pushOpen(.{
+            try s.addNode(.{ start, end_ }, true, .{});
+            try s.pushOpen(indexed, .{
                 .idx = @intCast(node_idx),
                 .tag_key = tags.first8KeyWithMode(name, false),
-                .tag_len = @intCast(name.len),
-                .last_child = InvalidIndex,
+                .last_child = if (comptime TestOptions.store_last_child or TestOptions.store_prev_sibling) InvalidIndex else {},
             });
         }
     };
 
-    try Push.one(&state, 22, 23); // a
-    try Push.one(&state, 24, 25); // b
-    try Push.one(&state, 26, 27); // c
-    try std.testing.expectEqual(@as(usize, 1), (try state.findOpenForSlowClose("a", tags.first8KeyWithMode("a", false))).?);
-    try std.testing.expect(!state.tag_index.active);
+    try Push.one(&state, false, 22, 23); // a
+    try Push.one(&state, false, 24, 25); // b
+    try Push.one(&state, false, 26, 27); // c
+    try std.testing.expectEqual(@as(usize, 1), (try state.findOpenForSlowClose(false, "a", tags.first8KeyWithMode("a", false))).?);
 
-    try std.testing.expect(try state.findOpenForSlowClose("missing", tags.first8KeyWithMode("missing", false)) == null);
-    try std.testing.expect(state.tag_index.active);
+    // Shallow malformed closes stay on the allocation-free backwards scan path.
+    try std.testing.expect(try state.findOpenForSlowClose(false, "missing", tags.first8KeyWithMode("missing", false)) == null);
+    try std.testing.expect(state.tag_index == null);
 
-    _ = state.popOpen();
-    _ = state.popOpen();
-    try Push.one(&state, 28, 29); // x
-    try Push.one(&state, 30, 31); // y
-    try std.testing.expectEqual(@as(usize, 2), (try state.findOpenForSlowClose("x", tags.first8KeyWithMode("x", false))).?);
-    try std.testing.expectEqual(@as(usize, 1), (try state.findOpenForSlowClose("a", tags.first8KeyWithMode("a", false))).?);
-    try std.testing.expect(try state.findOpenForSlowClose("still-missing", tags.first8KeyWithMode("still-missing", false)) == null);
+    // A deep miss activates the recovery index exactly once.
+    while (state.parse_stack.items.len < CloseIndexMinDepth) try Push.one(&state, false, 28, 29); // x
+    try std.testing.expect(try state.findOpenForSlowClose(false, "missing", tags.first8KeyWithMode("missing", false)) == null);
+    try std.testing.expect(state.tag_index != null);
+    try std.testing.expectEqual(state.parse_stack.items.len - 1, (try state.findOpenForSlowClose(true, "x", tags.first8KeyWithMode("x", false))).?);
+    try std.testing.expectEqual(@as(usize, 1), (try state.findOpenForSlowClose(true, "a", tags.first8KeyWithMode("a", false))).?);
 
-    while (state.parse_stack.items.len > 1) _ = state.popOpen();
-    try Push.one(&state, 0, 10);
-    try Push.one(&state, 11, 21);
+    _ = state.popOpen(true);
+    try Push.one(&state, true, 30, 31); // y
+    try std.testing.expectEqual(state.parse_stack.items.len - 1, (try state.findOpenForSlowClose(true, "y", tags.first8KeyWithMode("y", false))).?);
+    try std.testing.expect(try state.findOpenForSlowClose(true, "still-missing", tags.first8KeyWithMode("still-missing", false)) == null);
+
+    // First-eight-byte collisions still walk the secondary link chain and verify
+    // the complete tag name against the source span.
+    while (state.parse_stack.items.len > 1) _ = state.popOpen(true);
+    try Push.one(&state, true, 0, 10);
+    try Push.one(&state, true, 11, 21);
     const first_long = input[0..10];
-    try std.testing.expectEqual(@as(usize, 1), (try state.findOpenForSlowClose(first_long, tags.first8KeyWithMode(first_long, false))).?);
-    try std.testing.expectEqual(@as(usize, 2), (try state.findOpenForSlowClose("abcdefghy1", tags.first8KeyWithMode("abcdefghy1", false))).?);
+    try std.testing.expectEqual(@as(usize, 1), (try state.findOpenForSlowClose(true, first_long, tags.first8KeyWithMode(first_long, false))).?);
+    try std.testing.expectEqual(@as(usize, 2), (try state.findOpenForSlowClose(true, "abcdefghy1", tags.first8KeyWithMode("abcdefghy1", false))).?);
 }
 
 fn runStreamPropertyCase(alloc: std.mem.Allocator, input: []const u8) !void {
