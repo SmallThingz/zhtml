@@ -288,6 +288,51 @@ pub fn runQueryMatch(io: std.Io, path: []const u8, selector: []const u8, iterati
     };
 }
 
+/// Benchmarks point matching with a parsed selector over one preselected node.
+pub fn runPointMatchesCached(io: std.Io, path: []const u8, target_selector: []const u8, selector: []const u8, iterations: usize) !u64 {
+    const alloc = std.heap.smp_allocator;
+    const input = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .unlimited);
+    defer alloc.free(input);
+    const working = try alloc.dupe(u8, input);
+    defer alloc.free(working);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const target_sel = try root.Selector.compileRuntime(arena.allocator(), target_selector);
+    const sel = try root.Selector.compileRuntime(arena.allocator(), selector);
+    const options: root.ParseOptions = .{};
+    var doc = try options.parse(alloc, working);
+    defer doc.deinit();
+    const target = firstQuery(doc.queryRuntime(target_sel)) orelse return error.BenchTargetNotFound;
+
+    const start = nowNs(io);
+    for (0..iterations) |_| std.mem.doNotOptimizeAway(try target.matchesRuntime(sel));
+    return elapsedNs(start, nowNs(io));
+}
+
+/// Benchmarks point matching while borrowing a prepared immutable selector program.
+pub fn runPointMatchesPrepared(io: std.Io, path: []const u8, target_selector: []const u8, selector: []const u8, iterations: usize) !u64 {
+    const alloc = std.heap.smp_allocator;
+    const input = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .unlimited);
+    defer alloc.free(input);
+    const working = try alloc.dupe(u8, input);
+    defer alloc.free(working);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const target_sel = try root.Selector.compileRuntime(arena.allocator(), target_selector);
+    var prepared = try root.PreparedSelector.compile(alloc, selector);
+    defer prepared.deinit();
+    const options: root.ParseOptions = .{};
+    var doc = try options.parse(alloc, working);
+    defer doc.deinit();
+    const target = firstQuery(doc.queryRuntime(target_sel)) orelse return error.BenchTargetNotFound;
+
+    const start = nowNs(io);
+    for (0..iterations) |_| std.mem.doNotOptimizeAway(try target.matchesPrepared(&prepared));
+    return elapsedNs(start, nowNs(io));
+}
+
 /// Benchmarks cached-selector query execution over a pre-parsed document.
 pub fn runQueryCached(io: std.Io, path: []const u8, selector: []const u8, iterations: usize, mode: ParseMode) !u64 {
     const alloc = std.heap.smp_allocator;
@@ -346,6 +391,50 @@ pub fn runQueryCached(io: std.Io, path: []const u8, selector: []const u8, iterat
     };
 }
 
+/// Benchmarks a fully prepared runtime selector over a pre-parsed document.
+pub fn runQueryPrepared(io: std.Io, path: []const u8, selector: []const u8, iterations: usize, mode: ParseMode) !u64 {
+    const alloc = std.heap.smp_allocator;
+
+    const input = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .unlimited);
+    defer alloc.free(input);
+
+    const working = try alloc.dupe(u8, input);
+    defer alloc.free(working);
+
+    var prepared = try root.PreparedSelector.compile(alloc, selector);
+    defer prepared.deinit();
+
+    return switch (mode) {
+        .strictest => blk: {
+            const options: root.ParseOptions = .{ .drop_whitespace_text_nodes = .none };
+            var doc = try options.parse(alloc, working);
+            defer doc.deinit();
+            const start = nowNs(io);
+            for (0..iterations) |_| _ = firstQuery(doc.queryPrepared(&prepared));
+            break :blk elapsedNs(start, nowNs(io));
+        },
+        .fastest => blk: {
+            const options: root.ParseOptions = .{};
+            var doc = try options.parse(alloc, working);
+            defer doc.deinit();
+            const start = nowNs(io);
+            for (0..iterations) |_| _ = firstQuery(doc.queryPrepared(&prepared));
+            break :blk elapsedNs(start, nowNs(io));
+        },
+        .full => blk: {
+            const options: root.ParseOptions = .{
+                .store_last_child = true,
+                .store_prev_sibling = true,
+            };
+            var doc = try options.parse(alloc, working);
+            defer doc.deinit();
+            const start = nowNs(io);
+            for (0..iterations) |_| _ = firstQuery(doc.queryPrepared(&prepared));
+            break :blk elapsedNs(start, nowNs(io));
+        },
+    };
+}
+
 /// CLI entrypoint for parser/query benchmarking utilities.
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -399,9 +488,30 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (args.len == 6 and std.mem.eql(u8, args[1], "point-cached")) {
+        const iterations = try std.fmt.parseInt(usize, args[5], 10);
+        const total_ns = try runPointMatchesCached(io, args[2], args[3], args[4], iterations);
+        std.debug.print("{d}\n", .{total_ns});
+        return;
+    }
+
+    if (args.len == 6 and std.mem.eql(u8, args[1], "point-prepared")) {
+        const iterations = try std.fmt.parseInt(usize, args[5], 10);
+        const total_ns = try runPointMatchesPrepared(io, args[2], args[3], args[4], iterations);
+        std.debug.print("{d}\n", .{total_ns});
+        return;
+    }
+
     if (args.len == 5 and std.mem.eql(u8, args[1], "query-cached")) {
         const iterations = try std.fmt.parseInt(usize, args[4], 10);
         const total_ns = try runQueryCached(io, args[2], args[3], iterations, .fastest);
+        std.debug.print("{d}\n", .{total_ns});
+        return;
+    }
+
+    if (args.len == 5 and std.mem.eql(u8, args[1], "query-prepared")) {
+        const iterations = try std.fmt.parseInt(usize, args[4], 10);
+        const total_ns = try runQueryPrepared(io, args[2], args[3], iterations, .fastest);
         std.debug.print("{d}\n", .{total_ns});
         return;
     }
@@ -430,8 +540,8 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len != 3) {
         std.debug.print(
-            "usage:\n  {s} protocol\n  {s} forward-query <siblings> <iterations>\n  {s} close-index <valid|recover|miss> <depth> <misses> <iterations>\n  {s} <html-file> <iterations>\n  {s} parse <strictest|fastest|full|stream> <html-file> <iterations>\n  {s} query-parse <selector> <iterations>\n  {s} query-match <html-file> <selector> <iterations>\n  {s} query-match <strictest|fastest|full> <html-file> <selector> <iterations>\n  {s} query-cached <html-file> <selector> <iterations>\n  {s} query-cached <strictest|fastest|full> <html-file> <selector> <iterations>\n",
-            .{ args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0] },
+            "usage:\n  {s} protocol\n  {s} forward-query <siblings> <iterations>\n  {s} close-index <valid|recover|miss> <depth> <misses> <iterations>\n  {s} <html-file> <iterations>\n  {s} parse <strictest|fastest|full|stream> <html-file> <iterations>\n  {s} query-parse <selector> <iterations>\n  {s} query-match <html-file> <selector> <iterations>\n  {s} query-match <strictest|fastest|full> <html-file> <selector> <iterations>\n  {s} query-cached <html-file> <selector> <iterations>\n  {s} query-prepared <html-file> <selector> <iterations>\n  {s} point-cached <html-file> <target-selector> <selector> <iterations>\n  {s} point-prepared <html-file> <target-selector> <selector> <iterations>\n  {s} query-cached <strictest|fastest|full> <html-file> <selector> <iterations>\n",
+            .{ args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0] },
         );
         std.process.exit(2);
     }

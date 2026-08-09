@@ -42,6 +42,7 @@ pub const SimpleGroup = struct {
 
 pub const StateMeta = struct {
     compound: IndexInt,
+    predicate: IndexInt,
     group_index: IndexInt,
     relative: IndexInt,
 };
@@ -109,6 +110,7 @@ pub const Plan = struct {
     masks: []u64 = &.{},
     predicate_state_ranges: []predicate_plan.UseRange = &.{},
     predicate_state_uses: []predicate_plan.WordUse = &.{},
+    dense_predicate_state_masks: []u64 = &.{},
     tag_dispatch: TagDispatch = .{},
     state_count: usize = 0,
     word_count: usize = 0,
@@ -116,6 +118,7 @@ pub const Plan = struct {
     needs_last_child: bool = false,
     needs_attributes: bool = false,
     has_tag_constraints: bool = false,
+    filter_state_tags: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, selector: ast.Selector) !@This() {
         var out: @This() = .{};
@@ -146,6 +149,7 @@ pub const Plan = struct {
         out.compileGroups(selector);
         try out.compilePredicateStateUses(allocator);
         try out.compileTagDispatch(allocator, selector);
+        out.filter_state_tags = out.shouldFilterStateTags();
         return out;
     }
 
@@ -157,6 +161,7 @@ pub const Plan = struct {
         if (self.masks.len != 0) allocator.free(self.masks);
         if (self.predicate_state_ranges.len != 0) allocator.free(self.predicate_state_ranges);
         if (self.predicate_state_uses.len != 0) allocator.free(self.predicate_state_uses);
+        if (self.dense_predicate_state_masks.len != 0) allocator.free(self.dense_predicate_state_masks);
         self.tag_dispatch.deinit(allocator);
         self.* = .{};
     }
@@ -174,6 +179,28 @@ pub const Plan = struct {
     pub fn predicateStateUsesFor(self: *const @This(), predicate_id: usize) []const predicate_plan.WordUse {
         const range = self.predicate_state_ranges[predicate_id];
         return self.predicate_state_uses[range.start .. range.start + range.len];
+    }
+
+    pub fn densePredicateStateMask(self: *const @This(), predicate_id: usize) []const u64 {
+        std.debug.assert(self.dense_predicate_state_masks.len != 0);
+        const start = predicate_id * self.word_count;
+        return self.dense_predicate_state_masks[start .. start + self.word_count];
+    }
+
+    fn shouldFilterStateTags(self: *const @This()) bool {
+        if (self.state_count == 0 or !self.has_tag_constraints) return false;
+
+        // A single tag bucket covering every state is not a useful prefilter:
+        // matching nodes pay a tag-signature lookup plus a full-width mask pass
+        // only to preserve every eligible bit, while mismatching nodes would
+        // have needed just one interned local tag predicate evaluation. Keep
+        // tag filtering for mixed/wildcard or multi-tag state machines where it
+        // can actually reduce the eligible state set.
+        if (self.tag_dispatch.entries.len != 1) return true;
+        for (self.tag_dispatch.wildcard_state_words) |word| {
+            if (word != 0) return true;
+        }
+        return false;
     }
 
     pub fn stateIndexForCompound(self: *const @This(), absolute: usize) ?usize {
@@ -222,6 +249,7 @@ pub const Plan = struct {
                 next_state += 1;
                 self.states[state] = .{
                     .compound = absolute,
+                    .predicate = self.predicates.state_ids[absolute],
                     .group_index = @intCast(group_index),
                     .relative = rel,
                 };
@@ -314,6 +342,25 @@ pub const Plan = struct {
             }
         }
         std.debug.assert(self.predicate_state_uses.len <= self.state_count);
+
+        // Dense predicate masks are a hot-path specialization, not the general
+        // representation. Build them only for state-only machines of at most
+        // four words when the dense table is no larger than the state count.
+        // This captures repeated chains such as `div div ...` without bringing
+        // back the O(predicate_count * state_width) blow-up for large lists of
+        // distinct predicates.
+        if (self.simple_groups.len == 0 and self.word_count <= 4) {
+            const dense_words = std.math.mul(usize, predicate_count, self.word_count) catch return error.OutOfMemory;
+            if (dense_words != 0 and dense_words <= self.state_count) {
+                self.dense_predicate_state_masks = try allocator.alloc(u64, dense_words);
+                @memset(self.dense_predicate_state_masks, 0);
+                for (self.states, 0..) |meta, state| {
+                    const predicate_id: usize = @intCast(meta.predicate);
+                    self.dense_predicate_state_masks[predicate_id * self.word_count + state / 64] |=
+                        @as(u64, 1) << @intCast(state % 64);
+                }
+            }
+        }
     }
 
     fn compileTagDispatch(self: *@This(), allocator: std.mem.Allocator, selector: ast.Selector) !void {
@@ -497,6 +544,36 @@ fn shiftRightUnion(dst: []u64, a: []const u64, b: []const u64) void {
         dst[i] = (source >> 1) | carry;
         carry = next_carry;
     }
+}
+
+test "dense predicate masks are limited to small reused state-only plans" {
+    const alloc = std.testing.allocator;
+
+    var repeated = try ast.Selector.compileRuntime(alloc, "div div div div div div div div div div");
+    defer repeated.deinit(alloc);
+    var repeated_plan = try Plan.init(alloc, repeated);
+    defer repeated_plan.deinit(alloc);
+    try std.testing.expect(repeated_plan.dense_predicate_state_masks.len != 0);
+    try std.testing.expect(!repeated_plan.filter_state_tags);
+
+    var mixed_tags = try ast.Selector.compileRuntime(alloc, "div span div span div span div span");
+    defer mixed_tags.deinit(alloc);
+    var mixed_tag_plan = try Plan.init(alloc, mixed_tags);
+    defer mixed_tag_plan.deinit(alloc);
+    try std.testing.expect(mixed_tag_plan.filter_state_tags);
+
+    var unique_source = std.ArrayList(u8).empty;
+    defer unique_source.deinit(alloc);
+    for (0..80) |i| {
+        if (i != 0) try unique_source.appendSlice(alloc, " > ");
+        var buf: [24]u8 = undefined;
+        try unique_source.appendSlice(alloc, try std.fmt.bufPrint(&buf, ".c{}", .{i}));
+    }
+    var unique = try ast.Selector.compileRuntime(alloc, unique_source.items);
+    defer unique.deinit(alloc);
+    var unique_plan = try Plan.init(alloc, unique);
+    defer unique_plan.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), unique_plan.dense_predicate_state_masks.len);
 }
 
 test "compact plan excludes one-compound groups from persistent state" {

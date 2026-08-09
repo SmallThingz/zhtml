@@ -8,6 +8,7 @@ const common = @import("common.zig");
 const document = @import("html/document.zig");
 const stream = @import("html/stream.zig");
 const selector_ast = @import("selector/ast.zig");
+const selector_prepared = @import("selector/prepared.zig");
 
 pub const ParseInt = common.IndexInt;
 
@@ -22,6 +23,8 @@ pub const EntityDecoding = document.EntityDecoding;
 pub const StreamingParser = stream.Parser;
 /// Compiled selector representation shared by comptime/runtime query paths.
 pub const Selector = selector_ast.Selector;
+/// Runtime selector with reusable immutable execution metadata.
+pub const PreparedSelector = selector_prepared.PreparedSelector;
 fn firstQuery(iter: anytype) @TypeOf(blk: {
     var it = iter;
     break :blk it.next() catch unreachable;

@@ -13,6 +13,7 @@ const tags = @import("tags.zig");
 const ast = @import("../selector/ast.zig");
 const matcher = @import("../selector/matcher.zig");
 const forward = @import("../selector/forward.zig");
+const prepared_selector = @import("../selector/prepared.zig");
 const parser = @import("parser.zig");
 const common = @import("../common.zig");
 const IndexInt = common.IndexInt;
@@ -823,6 +824,21 @@ fn GetNode(comptime options: ParseOptions) type {
             return matcher.matchesSelectorAt(DocType, self.doc, sel, self.index, InvalidIndex);
         }
 
+        /// Prepared-program equivalent of `matchesRuntime`.
+        pub fn matchesPrepared(self: @This(), prepared: *const prepared_selector.PreparedSelector) !bool {
+            const sel = prepared.selector;
+            if (hasLeadingCombinator(sel)) return error.InvalidSelector;
+            if (!self.isElement()) return false;
+            return matcher.matchesSelectorAtPrepared(
+                DocType,
+                self.doc,
+                sel,
+                &prepared.execution_plan,
+                self.index,
+                InvalidIndex,
+            );
+        }
+
         fn hasLeadingCombinator(sel: ast.Selector) bool {
             for (sel.groups) |group| {
                 if (group.compound_len == 0) continue;
@@ -848,6 +864,14 @@ fn GetNode(comptime options: ParseOptions) type {
             if (self.doc.nodes.len == 0) return self.emptyQueryIter(sel, plan);
             self.assertContainer();
             return self.queryIter(sel, plan);
+        }
+
+        /// Returns a lazy descendant iterator using a reusable prepared runtime selector.
+        /// `prepared` must outlive the iterator.
+        pub fn queryPrepared(self: @This(), prepared: *const prepared_selector.PreparedSelector) QueryIterType {
+            if (self.doc.nodes.len == 0) return QueryIterType.initPrepared(self.doc, prepared, InvalidIndex, 1, 1);
+            self.assertContainer();
+            return QueryIterType.initPrepared(self.doc, prepared, self.index, self.index + 1, self.raw().subtree_end + 1);
         }
 
         /// Creates an exhausted iterator for empty documents.
@@ -923,6 +947,23 @@ fn GetQueryIter(comptime options: ParseOptions) type {
                 .end_index = end_index,
                 .engine = if (use_wide)
                     .{ .wide = WideForwardExecutor.init(doc, selector, plan, scope_root) }
+                else
+                    .{ .compact = ForwardExecutor.init(doc, selector, plan, scope_root) },
+            };
+        }
+
+        fn initPrepared(doc: *const DocType, prepared: *const prepared_selector.PreparedSelector, scope_root: IndexInt, next_index: IndexInt, end_index: IndexInt) @This() {
+            const selector = prepared.selector;
+            const plan = prepared.compact_plan;
+            const use_wide = selector.compounds.len > forward.MaxForwardCompounds;
+            return .{
+                .doc = doc,
+                .doc_generation = doc.generation,
+                .scope_root = scope_root,
+                .next_index = next_index,
+                .end_index = end_index,
+                .engine = if (use_wide)
+                    .{ .wide = WideForwardExecutor.initPrepared(doc, selector, plan, scope_root, &prepared.execution_plan) }
                 else
                     .{ .compact = ForwardExecutor.init(doc, selector, plan, scope_root) },
             };
@@ -1138,6 +1179,13 @@ fn GetDocument(comptime options: ParseOptions) type {
             // large runtime selector solely to build transition masks.
             if (self.nodes.len == 0) return QueryIterType.init(self, sel, .{}, InvalidIndex, 1, 1);
             return self.root().queryIter(sel, forward.buildPlan(sel));
+        }
+
+        /// Returns lazy iterator over matches using a reusable prepared selector.
+        /// `prepared` must outlive the iterator.
+        pub fn queryPrepared(self: *const @This(), prepared: *const prepared_selector.PreparedSelector) QueryIterType {
+            if (self.nodes.len == 0) return QueryIterType.initPrepared(self, prepared, InvalidIndex, 1, 1);
+            return QueryIterType.initPrepared(self, prepared, InvalidIndex, 1, self.nodes[0].subtree_end + 1);
         }
 
         /// Returns first `<html>` element in the document.
@@ -4339,6 +4387,9 @@ test "node matches uses candidate-centric point matching" {
     var runtime = try ast.Selector.compileRuntime(alloc, "#p > span.x");
     defer runtime.deinit(alloc);
     try std.testing.expect(try span.matchesRuntime(runtime));
+    var prepared = try prepared_selector.PreparedSelector.compile(alloc, "main #p > span.x");
+    defer prepared.deinit();
+    try std.testing.expect(try span.matchesPrepared(&prepared));
     var relative = try ast.Selector.compileRuntime(alloc, "+ span");
     defer relative.deinit(alloc);
     try std.testing.expectError(error.InvalidSelector, span.matchesRuntime(relative));
@@ -4451,4 +4502,46 @@ test "chunked escaping preserves large sparse attribute and text spans" {
     try doc.writeHtml(&counter, .force);
     try std.testing.expectEqual(expected.len, counter.bytes);
     try std.testing.expect(counter.calls < 64);
+}
+
+test "prepared wide selector matches runtime query for document and scope" {
+    const alloc = std.testing.allocator;
+    var source_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer source_writer.deinit();
+    try source_writer.writer.writeAll("<main><section>");
+    for (0..72) |_| try source_writer.writer.writeAll("<div>");
+    try source_writer.writer.writeAll("<span id=target></span>");
+    for (0..72) |_| try source_writer.writer.writeAll("</div>");
+    try source_writer.writer.writeAll("</section></main>");
+    const source = try source_writer.toOwnedSlice();
+    defer alloc.free(source);
+
+    var selector_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer selector_writer.deinit();
+    for (0..72) |_| try selector_writer.writer.writeAll("div ");
+    try selector_writer.writer.writeAll("span#target");
+    const selector_source = try selector_writer.toOwnedSlice();
+    defer alloc.free(selector_source);
+
+    const opts: ParseOptions = .{};
+    var doc = try opts.parse(alloc, source);
+    defer doc.deinit();
+    var prepared = try prepared_selector.PreparedSelector.compile(alloc, selector_source);
+    defer prepared.deinit();
+
+    var runtime_it = doc.queryRuntime(prepared.selector);
+    defer runtime_it.deinit();
+    var prepared_it = doc.queryPrepared(&prepared);
+    defer prepared_it.deinit();
+    const runtime_match = (try runtime_it.next()) orelse return error.TestUnexpectedResult;
+    const prepared_match = (try prepared_it.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(runtime_match.index, prepared_match.index);
+    try std.testing.expect((try runtime_it.next()) == null);
+    try std.testing.expect((try prepared_it.next()) == null);
+
+    const section = firstQuery(doc.query("section")) orelse return error.TestUnexpectedResult;
+    var scoped = section.queryPrepared(&prepared);
+    defer scoped.deinit();
+    const scoped_match = (try scoped.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(prepared_match.index, scoped_match.index);
 }

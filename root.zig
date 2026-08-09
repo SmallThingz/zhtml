@@ -15,6 +15,7 @@ pub const StreamingEventKind = impl.StreamingEventKind;
 pub const StreamingAttribute = impl.StreamingAttribute;
 pub const StreamingAttributeIterator = impl.StreamingAttributeIterator;
 pub const Selector = impl.Selector;
+pub const PreparedSelector = impl.PreparedSelector;
 pub const QueryDebugReport = impl.QueryDebugReport;
 pub const DebugFailureKind = impl.DebugFailureKind;
 pub const NearMiss = impl.NearMiss;

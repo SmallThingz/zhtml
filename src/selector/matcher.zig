@@ -91,6 +91,23 @@ pub fn matchesSelectorAt(comptime Doc: type, noalias doc: *const Doc, selector: 
     return try matchesSelectorAtWithWorkspace(Doc, doc, selector, node_index, scope_root, &workspace);
 }
 
+/// Prepared-program equivalent of `matchesSelectorAt`. The immutable execution
+/// plan is borrowed; only mutable RTL scratch is allocated for this call.
+pub fn matchesSelectorAtPrepared(
+    comptime Doc: type,
+    noalias doc: *const Doc,
+    selector: ast.Selector,
+    plan: *const execution_plan.Plan,
+    node_index: IndexInt,
+    scope_root: IndexInt,
+) !bool {
+    if (node_index >= doc.nodes.len) return false;
+    if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
+    var workspace = try MatchWorkspace.initPrepared(doc.allocator, selector, plan);
+    defer workspace.deinit();
+    return try matchesSelectorAtWithWorkspace(Doc, doc, selector, node_index, scope_root, &workspace);
+}
+
 pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, node_index: IndexInt, scope_root: IndexInt, workspace: *MatchWorkspace) !bool {
     if (node_index >= doc.nodes.len) return false;
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
@@ -305,6 +322,7 @@ pub const MatchWorkspace = struct {
     allocator: std.mem.Allocator,
     topology_prev: std.AutoHashMapUnmanaged(IndexInt, IndexInt) = .empty,
     execution_plan: execution_plan.Plan = .{},
+    owns_execution_plan: bool = true,
     node_ctx: NodeContext = .{},
     reverse_seed: []u64 = &.{},
     reverse_current: []u64 = &.{},
@@ -316,6 +334,7 @@ pub const MatchWorkspace = struct {
     reverse_cell_meta: std.ArrayListUnmanaged(ReverseCellMeta) = .empty,
     reverse_cells: std.ArrayListUnmanaged(u64) = .empty,
     reverse_word_count: usize = 0,
+    reverse_scratch_ready: bool = false,
     stats: MatchStats = .{},
     prepared_scope: IndexInt = InvalidIndex,
     prepared_doc: usize = 0,
@@ -328,10 +347,20 @@ pub const MatchWorkspace = struct {
         return .{ .allocator = allocator };
     }
 
+    pub fn initPrepared(allocator: std.mem.Allocator, selector: ast.Selector, plan: *const execution_plan.Plan) !@This() {
+        var self = init(allocator);
+        errdefer self.deinit();
+        self.execution_plan = plan.*;
+        self.owns_execution_plan = false;
+        self.setReverseSelectorIdentity(selector);
+        return self;
+    }
+
     pub fn deinit(self: *@This()) void {
         self.topology_prev.deinit(self.allocator);
         self.topology_prev = .empty;
-        self.execution_plan.deinit(self.allocator);
+        if (self.owns_execution_plan) self.execution_plan.deinit(self.allocator);
+        self.execution_plan = .{};
         self.node_ctx.deinit();
         if (self.reverse_seed.len != 0) self.allocator.free(self.reverse_seed);
         self.reverse_seed = &.{};
@@ -368,15 +397,22 @@ pub const MatchWorkspace = struct {
             self.reverse_selector_id == selector.cache_id
         else
             self.reverse_selector_id == 0 and self.reverse_source == source_id and self.reverse_compounds == compounds_id;
-        if (same_selector) return;
+        if (same_selector) {
+            if (!self.reverse_scratch_ready) try self.configureReverseScratch();
+            return;
+        }
 
         self.reverse_selector_id = 0;
         self.reverse_source = 0;
         self.reverse_compounds = 0;
         try self.compileReversePlan(selector);
+        self.setReverseSelectorIdentity(selector);
+    }
+
+    fn setReverseSelectorIdentity(self: *@This(), selector: ast.Selector) void {
         self.reverse_selector_id = selector.cache_id;
-        self.reverse_source = source_id;
-        self.reverse_compounds = compounds_id;
+        self.reverse_source = @intFromPtr(selector.source.ptr);
+        self.reverse_compounds = @intFromPtr(selector.compounds.ptr);
     }
 
     fn reverseMask(self: *const @This(), which: execution_plan.Mask) []const u64 {
@@ -385,8 +421,19 @@ pub const MatchWorkspace = struct {
 
     fn compileReversePlan(self: *@This(), selector: ast.Selector) !void {
         self.reverse_touched_predicates.clearRetainingCapacity();
-        self.execution_plan.deinit(self.allocator);
+        if (self.owns_execution_plan) {
+            self.execution_plan.deinit(self.allocator);
+        } else {
+            // Drop the borrowed view without touching its backing allocations.
+            self.execution_plan = .{};
+            self.owns_execution_plan = true;
+        }
         self.execution_plan = try execution_plan.Plan.init(self.allocator, selector);
+        try self.configureReverseScratch();
+    }
+
+    fn configureReverseScratch(self: *@This()) !void {
+        self.reverse_scratch_ready = false;
         self.reverse_word_count = self.execution_plan.word_count;
         const words = self.reverse_word_count;
 
@@ -413,6 +460,7 @@ pub const MatchWorkspace = struct {
                 @min(self.execution_plan.predicates.count, 64),
             );
         }
+        self.reverse_scratch_ready = true;
     }
 };
 

@@ -345,12 +345,15 @@ pub fn WideExecutor(comptime Doc: type) type {
         plan: Plan,
         scope_root: IndexInt,
         exec_plan: execution_plan.Plan = .{},
+        owns_exec_plan: bool = true,
         word_count: usize = 0,
         eligible_words: []u64 = &.{},
         tag_allowed: []u64 = &.{},
         states: std.ArrayListUnmanaged(u64) = .empty,
         stack: std.ArrayListUnmanaged(WideFrame) = .empty,
         node_ctx: matcher.NodeContext = .{},
+        predicate_word_count: usize = 0,
+        small_seen_predicates: [SmallPredicateWordLimit]u64 = [_]u64{0} ** SmallPredicateWordLimit,
         seen_predicates: []u64 = &.{},
         matched_predicates: []u64 = &.{},
         state_fanned_predicates: []u64 = &.{},
@@ -361,6 +364,7 @@ pub fn WideExecutor(comptime Doc: type) type {
         root_child_count: usize = 0,
 
         const Self = @This();
+        const SmallPredicateWordLimit: usize = 4;
         const State = enum(usize) { self_matches, lineage, prev_child, any_child };
         const WideFrame = struct {
             subtree_end: IndexInt,
@@ -379,8 +383,16 @@ pub fn WideExecutor(comptime Doc: type) type {
             };
         }
 
+        pub fn initPrepared(doc: *const Doc, selector: ast.Selector, plan: Plan, scope_root: IndexInt, prepared: *const execution_plan.Plan) Self {
+            var out = init(doc, selector, plan, scope_root);
+            out.exec_plan = prepared.*;
+            out.owns_exec_plan = false;
+            return out;
+        }
+
         pub fn deinit(self: *Self) void {
-            self.exec_plan.deinit(self.allocator);
+            if (self.owns_exec_plan) self.exec_plan.deinit(self.allocator);
+            self.exec_plan = .{};
             if (self.eligible_words.len != 0) self.allocator.free(self.eligible_words);
             self.eligible_words = &.{};
             if (self.tag_allowed.len != 0) self.allocator.free(self.tag_allowed);
@@ -400,6 +412,8 @@ pub fn WideExecutor(comptime Doc: type) type {
             self.touched_predicates = .empty;
             self.seed_workspace.deinit();
             self.word_count = 0;
+            self.predicate_word_count = 0;
+            self.owns_exec_plan = true;
             self.initialized = false;
             self.root_child_count = 0;
         }
@@ -431,7 +445,7 @@ pub fn WideExecutor(comptime Doc: type) type {
                 const matched = self.state(temp_slot, .self_matches);
                 @memset(matched, 0);
                 self.buildEligible(parent_slot, raw.parent);
-                if (self.exec_plan.has_tag_constraints) self.filterEligibleByTag(raw.name_or_text.slice(self.doc.source));
+                if (self.exec_plan.filter_state_tags) self.filterEligibleByTag(raw.name_or_text.slice(self.doc.source));
                 try self.evaluateStates(idx, matched);
                 is_match = is_match or intersects(matched, self.exec_plan.mask(.final));
 
@@ -462,26 +476,28 @@ pub fn WideExecutor(comptime Doc: type) type {
         fn ensureInitialized(self: *Self) !void {
             self.initialized = true;
             errdefer self.deinit();
-            self.exec_plan = try execution_plan.Plan.init(self.allocator, self.selector);
+            if (self.owns_exec_plan) self.exec_plan = try execution_plan.Plan.init(self.allocator, self.selector);
             self.word_count = self.exec_plan.word_count;
             if (self.word_count != 0) {
                 self.eligible_words = try self.allocator.alloc(u64, self.word_count);
                 @memset(self.eligible_words, 0);
-                if (self.exec_plan.has_tag_constraints) {
+                if (self.exec_plan.filter_state_tags) {
                     self.tag_allowed = try self.allocator.alloc(u64, self.word_count);
                     @memset(self.tag_allowed, 0);
                 }
                 try self.ensureStateSlots(2);
                 @memset(self.states.items, 0);
             }
-            const predicate_words = bitWordCount(self.exec_plan.predicates.count);
-            if (predicate_words != 0) {
-                self.seen_predicates = try self.allocator.alloc(u64, predicate_words);
+            self.predicate_word_count = bitWordCount(self.exec_plan.predicates.count);
+            if (self.predicate_word_count != 0 and !self.usesDensePredicates() and !self.usesInlinePredicateReset()) {
+                self.seen_predicates = try self.allocator.alloc(u64, self.predicate_word_count);
                 @memset(self.seen_predicates, 0);
-                self.matched_predicates = try self.allocator.alloc(u64, predicate_words);
-                @memset(self.matched_predicates, 0);
-                self.state_fanned_predicates = try self.allocator.alloc(u64, predicate_words);
-                @memset(self.state_fanned_predicates, 0);
+                if (self.exec_plan.simple_groups.len != 0) {
+                    self.matched_predicates = try self.allocator.alloc(u64, self.predicate_word_count);
+                    @memset(self.matched_predicates, 0);
+                    self.state_fanned_predicates = try self.allocator.alloc(u64, self.predicate_word_count);
+                    @memset(self.state_fanned_predicates, 0);
+                }
                 try self.touched_predicates.ensureTotalCapacity(
                     self.allocator,
                     @min(self.exec_plan.predicates.count, 64),
@@ -534,6 +550,13 @@ pub fn WideExecutor(comptime Doc: type) type {
         }
 
         fn buildEligible(self: *Self, parent_slot: usize, raw_parent: IndexInt) void {
+            switch (self.word_count) {
+                1 => return self.buildEligibleFixed(1, parent_slot, raw_parent),
+                2 => return self.buildEligibleFixed(2, parent_slot, raw_parent),
+                3 => return self.buildEligibleFixed(3, parent_slot, raw_parent),
+                4 => return self.buildEligibleFixed(4, parent_slot, raw_parent),
+                else => {},
+            }
             for (self.eligible_words, self.exec_plan.mask(.start_none), self.exec_plan.mask(.start_descendant)) |*dst, none, descendant| dst.* = none | descendant;
             if (raw_parent == self.scope_root) orInto(self.eligible_words, self.exec_plan.mask(.start_child));
             shiftOneAndOr(self.eligible_words, self.state(parent_slot, .self_matches), self.exec_plan.mask(.child_targets));
@@ -542,13 +565,62 @@ pub fn WideExecutor(comptime Doc: type) type {
             shiftOneAndOr(self.eligible_words, self.state(parent_slot, .any_child), self.exec_plan.mask(.sibling_targets));
         }
 
+        fn buildEligibleFixed(self: *Self, comptime word_count: usize, parent_slot: usize, raw_parent: IndexInt) void {
+            const self_matches = self.state(parent_slot, .self_matches);
+            const lineage = self.state(parent_slot, .lineage);
+            const prev_child = self.state(parent_slot, .prev_child);
+            const any_child = self.state(parent_slot, .any_child);
+            const start_none = self.exec_plan.mask(.start_none);
+            const start_descendant = self.exec_plan.mask(.start_descendant);
+            const start_child = self.exec_plan.mask(.start_child);
+            const child_targets = self.exec_plan.mask(.child_targets);
+            const descendant_targets = self.exec_plan.mask(.descendant_targets);
+            const adjacent_targets = self.exec_plan.mask(.adjacent_targets);
+            const sibling_targets = self.exec_plan.mask(.sibling_targets);
+            const scope_child = raw_parent == self.scope_root;
+
+            var self_carry: u64 = 0;
+            var lineage_carry: u64 = 0;
+            var prev_carry: u64 = 0;
+            var any_carry: u64 = 0;
+            inline for (0..word_count) |i| {
+                const self_word = self_matches[i];
+                const lineage_word = lineage[i];
+                const prev_word = prev_child[i];
+                const any_word = any_child[i];
+                var eligible = start_none[i] | start_descendant[i];
+                if (scope_child) eligible |= start_child[i];
+                eligible |= ((self_word << 1) | self_carry) & child_targets[i];
+                eligible |= ((lineage_word << 1) | lineage_carry) & descendant_targets[i];
+                eligible |= ((prev_word << 1) | prev_carry) & adjacent_targets[i];
+                eligible |= ((any_word << 1) | any_carry) & sibling_targets[i];
+                self.eligible_words[i] = eligible;
+                self_carry = self_word >> 63;
+                lineage_carry = lineage_word >> 63;
+                prev_carry = prev_word >> 63;
+                any_carry = any_word >> 63;
+            }
+        }
+
         fn beginNode(self: *Self, child_position: usize) void {
+            if (self.usesDensePredicates()) {
+                self.node_ctx.begin(self.allocator, child_position);
+                return;
+            }
+            if (self.usesInlinePredicateReset()) {
+                self.clearInlineSeen();
+                self.node_ctx.begin(self.allocator, child_position);
+                return;
+            }
+
             for (self.touched_predicates.items) |predicate_id| {
                 const bit_mask = @as(u64, 1) << @intCast(predicate_id % 64);
                 const word = predicate_id / 64;
                 self.seen_predicates[word] &= ~bit_mask;
-                self.matched_predicates[word] &= ~bit_mask;
-                self.state_fanned_predicates[word] &= ~bit_mask;
+                if (self.exec_plan.simple_groups.len != 0) {
+                    self.matched_predicates[word] &= ~bit_mask;
+                    self.state_fanned_predicates[word] &= ~bit_mask;
+                }
             }
             self.touched_predicates.clearRetainingCapacity();
             self.node_ctx.begin(self.allocator, child_position);
@@ -557,6 +629,7 @@ pub fn WideExecutor(comptime Doc: type) type {
         fn predicateMatches(self: *Self, predicate_id: usize, node_index: IndexInt) !bool {
             const bit_mask = @as(u64, 1) << @intCast(predicate_id % 64);
             const word = predicate_id / 64;
+            std.debug.assert(self.exec_plan.simple_groups.len != 0);
             if ((self.seen_predicates[word] & bit_mask) != 0) return (self.matched_predicates[word] & bit_mask) != 0;
             try self.touched_predicates.append(self.allocator, predicate_id);
             self.seen_predicates[word] |= bit_mask;
@@ -636,6 +709,8 @@ pub fn WideExecutor(comptime Doc: type) type {
         }
 
         fn evaluateStates(self: *Self, node_index: IndexInt, matched: []u64) !void {
+            if (self.exec_plan.simple_groups.len == 0) return self.evaluateStatesOnly(node_index, matched);
+
             for (self.eligible_words, 0..) |eligible_word, word_index| {
                 var pending = eligible_word;
                 while (pending != 0) {
@@ -644,7 +719,7 @@ pub fn WideExecutor(comptime Doc: type) type {
                     const state_index = word_index * 64 + bit_index;
                     if (state_index >= self.exec_plan.state_count) continue;
                     const meta = self.exec_plan.states[state_index];
-                    const predicate_id: usize = @intCast(self.exec_plan.predicates.state_ids[meta.compound]);
+                    const predicate_id: usize = @intCast(meta.predicate);
                     const predicate_bit = @as(u64, 1) << @intCast(predicate_id % 64);
                     const predicate_word = predicate_id / 64;
                     if ((self.state_fanned_predicates[predicate_word] & predicate_bit) != 0) continue;
@@ -658,6 +733,118 @@ pub fn WideExecutor(comptime Doc: type) type {
                         }
                     }
                 }
+            }
+        }
+
+        fn evaluateStatesOnly(self: *Self, node_index: IndexInt, matched: []u64) !void {
+            if (self.usesDensePredicates()) {
+                return switch (self.word_count) {
+                    1 => self.evaluateDensePredicatesFixed(1, node_index, matched),
+                    2 => self.evaluateDensePredicatesFixed(2, node_index, matched),
+                    3 => self.evaluateDensePredicatesFixed(3, node_index, matched),
+                    4 => self.evaluateDensePredicatesFixed(4, node_index, matched),
+                    else => unreachable,
+                };
+            }
+
+            const seen = self.seenWords();
+            for (self.eligible_words, 0..) |eligible_word, word_index| {
+                var pending = eligible_word;
+                while (pending != 0) {
+                    const bit_index: usize = @intCast(@ctz(pending));
+                    pending &= pending - 1;
+                    const state_index = word_index * 64 + bit_index;
+                    if (state_index >= self.exec_plan.state_count) continue;
+                    const meta = self.exec_plan.states[state_index];
+                    const predicate_id: usize = @intCast(meta.predicate);
+                    const predicate_bit = @as(u64, 1) << @intCast(predicate_id % 64);
+                    const predicate_word = predicate_id / 64;
+                    if ((seen[predicate_word] & predicate_bit) != 0) continue;
+
+                    try self.markPredicateTouched(predicate_id);
+                    seen[predicate_word] |= predicate_bit;
+                    self.stats.local_unique_predicate_evals += 1;
+                    const representative: usize = @intCast(self.exec_plan.predicates.representatives[predicate_id]);
+                    if (try matcher.matchesCompoundForward(
+                        Doc,
+                        self.doc,
+                        self.selector,
+                        self.selector.compounds[representative],
+                        node_index,
+                        &self.node_ctx,
+                    )) {
+                        for (self.exec_plan.predicateStateUsesFor(predicate_id)) |use| {
+                            self.stats.predicate_state_word_fanouts += 1;
+                            const word: usize = @intCast(use.word_index);
+                            matched[word] |= self.eligible_words[word] & use.mask;
+                        }
+                    }
+                }
+            }
+        }
+
+        fn evaluateDensePredicatesFixed(self: *Self, comptime word_count: usize, node_index: IndexInt, matched: []u64) !void {
+            for (0..self.exec_plan.predicates.count) |predicate_id| {
+                const predicate_mask = self.exec_plan.densePredicateStateMask(predicate_id);
+                var applicable: u64 = 0;
+                inline for (0..word_count) |i| applicable |= self.eligible_words[i] & predicate_mask[i];
+                if (applicable == 0) continue;
+
+                self.stats.local_unique_predicate_evals += 1;
+                const representative: usize = @intCast(self.exec_plan.predicates.representatives[predicate_id]);
+                if (!try matcher.matchesCompoundForward(
+                    Doc,
+                    self.doc,
+                    self.selector,
+                    self.selector.compounds[representative],
+                    node_index,
+                    &self.node_ctx,
+                )) continue;
+
+                inline for (0..word_count) |i| {
+                    self.stats.predicate_state_word_fanouts += 1;
+                    matched[i] |= self.eligible_words[i] & predicate_mask[i];
+                }
+            }
+        }
+
+        inline fn usesDensePredicates(self: *const Self) bool {
+            return self.exec_plan.dense_predicate_state_masks.len != 0;
+        }
+
+        inline fn seenWords(self: *Self) []u64 {
+            if (self.usesInlinePredicateReset()) return self.small_seen_predicates[0..self.predicate_word_count];
+            return self.seen_predicates;
+        }
+
+        inline fn markPredicateTouched(self: *Self, predicate_id: usize) !void {
+            if (!self.usesInlinePredicateReset()) try self.touched_predicates.append(self.allocator, predicate_id);
+        }
+
+        inline fn usesInlinePredicateReset(self: *const Self) bool {
+            return self.exec_plan.simple_groups.len == 0 and self.predicate_word_count <= SmallPredicateWordLimit;
+        }
+
+        inline fn clearInlineSeen(self: *Self) void {
+            switch (self.predicate_word_count) {
+                0 => {},
+                1 => self.small_seen_predicates[0] = 0,
+                2 => {
+                    self.small_seen_predicates[0] = 0;
+                    self.small_seen_predicates[1] = 0;
+                },
+                3 => {
+                    self.small_seen_predicates[0] = 0;
+                    self.small_seen_predicates[1] = 0;
+                    self.small_seen_predicates[2] = 0;
+                },
+                4 => {
+                    self.small_seen_predicates[0] = 0;
+                    self.small_seen_predicates[1] = 0;
+                    self.small_seen_predicates[2] = 0;
+                    self.small_seen_predicates[3] = 0;
+                },
+                else => unreachable,
             }
         }
 
