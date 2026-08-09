@@ -21,9 +21,29 @@ const IndexInt = common.IndexInt;
 pub const InvalidIndex: IndexInt = common.InvalidIndex;
 
 var next_document_generation: std.atomic.Value(u64) = .init(1);
+var next_document_generation_32: u64 = 1;
+var document_generation_lock: std.atomic.Mutex = .unlocked;
 
 fn freshDocumentGeneration() u64 {
-    return next_document_generation.fetchAdd(1, .monotonic);
+    if (comptime @sizeOf(usize) >= @sizeOf(u64)) {
+        var generation = next_document_generation.fetchAdd(1, .monotonic);
+        if (generation == 0) generation = next_document_generation.fetchAdd(1, .monotonic);
+        return generation;
+    }
+
+    // 32-bit targets cannot issue a native 64-bit atomic RMW in Zig. Document
+    // creation/clear is cold compared with parsing and matching, so preserve the
+    // full 64-bit generation space behind a tiny lock instead of narrowing the
+    // public invalidation token.
+    while (!document_generation_lock.tryLock()) std.atomic.spinLoopHint();
+    defer document_generation_lock.unlock();
+    var generation = next_document_generation_32;
+    next_document_generation_32 +%= 1;
+    if (generation == 0) {
+        generation = next_document_generation_32;
+        next_document_generation_32 +%= 1;
+    }
+    return generation;
 }
 
 /// Controls entity handling during HTML serialization.
@@ -785,6 +805,32 @@ fn GetNode(comptime options: ParseOptions) type {
             try std.testing.expectEqualStrings("TextOptions{normalize_whitespace=false, unescape=true}", rendered);
         }
 
+        /// Returns whether this element itself matches `selector`.
+        /// Unlike scoped `query`, `matches` accepts complete selectors only;
+        /// leading relative combinators are rejected rather than reinterpreted
+        /// as a relation to an implicit scope node.
+        pub fn matches(self: @This(), comptime selector: []const u8) !bool {
+            const sel = comptime ast.Selector.compile(selector);
+            if (comptime hasLeadingCombinator(sel)) return error.InvalidSelector;
+            if (!self.isElement()) return false;
+            return matcher.matchesSelectorAt(DocType, self.doc, sel, self.index, InvalidIndex);
+        }
+
+        /// Runtime-compiled equivalent of `matches`.
+        pub fn matchesRuntime(self: @This(), sel: ast.Selector) !bool {
+            if (hasLeadingCombinator(sel)) return error.InvalidSelector;
+            if (!self.isElement()) return false;
+            return matcher.matchesSelectorAt(DocType, self.doc, sel, self.index, InvalidIndex);
+        }
+
+        fn hasLeadingCombinator(sel: ast.Selector) bool {
+            for (sel.groups) |group| {
+                if (group.compound_len == 0) continue;
+                if (sel.compounds[group.compound_start].combinator != .none) return true;
+            }
+            return false;
+        }
+
         /// Compiles selector at comptime and returns lazy descendant iterator.
         /// Call `deinit` when stopping before exhaustion to release retained matcher scratch.
         pub fn query(self: @This(), comptime selector: []const u8) QueryIterType {
@@ -868,7 +914,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
         engine: Engine,
 
         fn init(doc: *const DocType, selector: ast.Selector, plan: forward.Plan, scope_root: IndexInt, next_index: IndexInt, end_index: IndexInt) @This() {
-            const use_wide = plan.stateful and selector.compounds.len > forward.MaxForwardCompounds;
+            const use_wide = selector.compounds.len > forward.MaxForwardCompounds;
             return .{
                 .doc = doc,
                 .doc_generation = doc.generation,
@@ -1655,7 +1701,10 @@ test "stale query iterator deinitializes with its captured allocator" {
     // stale iterator must free its old matcher scratch through the allocator it
     // captured at construction, not through the replacement document.
     doc.deinit();
-    var fixed_storage: [4096]u8 = undefined;
+    // Keep the alternate allocator comfortably above representation-size
+    // differences between u16/u32/u64 index configurations. This test is about
+    // allocator identity, not a fixed-buffer capacity boundary.
+    var fixed_storage: [32 * 1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&fixed_storage);
     var second_html = "<main><i></i><i></i></main>".*;
     doc = try opts.parse(fba.allocator(), &second_html);
@@ -3227,7 +3276,7 @@ test "deep-selector workspace frame allocation is reused across candidates" {
     defer it.deinit();
     try std.testing.expect(try it.next() != null);
     try std.testing.expectEqual(@as(usize, 2), it.engine.wide.word_count);
-    try std.testing.expect(it.engine.wide.masks.len != 0);
+    try std.testing.expect(it.engine.wide.exec_plan.masks.len != 0);
 }
 
 test "forward query results agree with RTL matching across combinators and structural pseudos" {
@@ -3281,6 +3330,139 @@ test "forward query results agree with RTL matching across combinators and struc
         defer actual.deinit(alloc);
         while (try it.next()) |node| try actual.append(alloc, node.index);
         try std.testing.expectEqualSlices(IndexInt, expected.items, actual.items);
+    }
+}
+
+test "random selector differential agrees across reference forward dynamic and RTL" {
+    const alloc = std.testing.allocator;
+    const Doc = GetDocument(.{});
+
+    var doc = Doc.init(alloc);
+    defer doc.deinit();
+    var src = ("<main id=root class=a data-x><div class=a><span data-x></span><i class=b></i><b></b></div>" ++
+        "<div class=b data-k=v><span class=a></span><em data-x></em><i></i></div>" ++
+        "<section><div class=a data-k=v><b class=b></b><span></span></div><em class=a></em></section></main>").*;
+    try resetParsed(.{}, &doc, &src);
+    try std.testing.expect(doc.nodes.len <= 20);
+
+    const Reference = struct {
+        fn matches(
+            comptime D: type,
+            d: *const D,
+            selector: ast.Selector,
+            node_index: IndexInt,
+            ctx: *matcher.NodeContext,
+        ) !bool {
+            if (node_index >= d.nodes.len or !d.nodes[node_index].isElement(node_index)) return false;
+            for (selector.groups) |group| {
+                if (group.compound_len == 0) continue;
+                if (try matchGroup(D, d, selector, group, group.compound_len - 1, node_index, ctx)) return true;
+            }
+            return false;
+        }
+
+        fn matchGroup(
+            comptime D: type,
+            d: *const D,
+            selector: ast.Selector,
+            group: ast.Group,
+            relative: IndexInt,
+            node_index: IndexInt,
+            ctx: *matcher.NodeContext,
+        ) !bool {
+            const comp = selector.compounds[group.compound_start + relative];
+            const child_position = common.elementSiblingPosition(d, node_index) orelse 0;
+            ctx.begin(d.allocator, child_position);
+            if (!try matcher.matchesCompoundForward(D, d, selector, comp, node_index, ctx)) return false;
+            if (relative == 0) return comp.combinator == .none;
+
+            const previous = relative - 1;
+            return switch (comp.combinator) {
+                .child => blk: {
+                    const parent = d.nodes[node_index].parent;
+                    if (parent == InvalidIndex or parent >= d.nodes.len or !d.nodes[parent].isElement(parent)) break :blk false;
+                    break :blk try matchGroup(D, d, selector, group, previous, parent, ctx);
+                },
+                .descendant => blk: {
+                    var parent = d.nodes[node_index].parent;
+                    while (parent != InvalidIndex and parent < d.nodes.len) {
+                        if (d.nodes[parent].isElement(parent) and try matchGroup(D, d, selector, group, previous, parent, ctx)) break :blk true;
+                        parent = d.nodes[parent].parent;
+                    }
+                    break :blk false;
+                },
+                .adjacent => blk: {
+                    const sibling = common.prevElementSibling(d, node_index) orelse break :blk false;
+                    break :blk try matchGroup(D, d, selector, group, previous, sibling, ctx);
+                },
+                .sibling => blk: {
+                    var sibling = common.prevElementSibling(d, node_index);
+                    while (sibling) |candidate| {
+                        if (try matchGroup(D, d, selector, group, previous, candidate, ctx)) break :blk true;
+                        sibling = common.prevElementSibling(d, candidate);
+                    }
+                    break :blk false;
+                },
+                .none => false,
+            };
+        }
+    };
+
+    const atoms = [_][]const u8{
+        "main",     "div",            "span",  "i",            "b",            "em",          ".a",               ".b",
+        "[data-x]", "[data-k=v]",     "div.a", "span[data-x]", ":first-child", ":last-child", ":nth-child(2n+1)", ":nth-child(2)",
+        ":not(.a)", ":not([data-x])",
+    };
+    const combinators = [_][]const u8{ " ", " > ", " + ", " ~ " };
+
+    var prng = std.Random.DefaultPrng.init(0x51e6_40d1_ffe2_cafe);
+    const random = prng.random();
+    for (0..320) |_| {
+        var source = std.ArrayList(u8).empty;
+        defer source.deinit(alloc);
+        const group_count = 1 + random.uintLessThan(usize, 3);
+        for (0..group_count) |group_index| {
+            if (group_index != 0) try source.appendSlice(alloc, ", ");
+            const compound_count = 1 + random.uintLessThan(usize, 6);
+            for (0..compound_count) |compound_index| {
+                if (compound_index != 0) try source.appendSlice(alloc, combinators[random.uintLessThan(usize, combinators.len)]);
+                try source.appendSlice(alloc, atoms[random.uintLessThan(usize, atoms.len)]);
+            }
+        }
+
+        var selector = try ast.Selector.compileRuntime(alloc, source.items);
+        defer selector.deinit(alloc);
+
+        var reference_ctx: matcher.NodeContext = .{};
+        defer reference_ctx.deinit();
+        var expected = std.ArrayList(IndexInt).empty;
+        defer expected.deinit(alloc);
+        var rtl = std.ArrayList(IndexInt).empty;
+        defer rtl.deinit(alloc);
+
+        var idx: IndexInt = 1;
+        while (idx < doc.nodes.len) : (idx += 1) {
+            if (try Reference.matches(Doc, &doc, selector, idx, &reference_ctx)) try expected.append(alloc, idx);
+            if (try matcher.matchesSelectorAt(Doc, &doc, selector, idx, 0)) try rtl.append(alloc, idx);
+        }
+        try std.testing.expectEqualSlices(IndexInt, expected.items, rtl.items);
+
+        var normal = std.ArrayList(IndexInt).empty;
+        defer normal.deinit(alloc);
+        var it = doc.queryRuntime(selector);
+        defer it.deinit();
+        while (try it.next()) |node| try normal.append(alloc, node.index);
+        try std.testing.expectEqualSlices(IndexInt, expected.items, normal.items);
+
+        var dynamic = std.ArrayList(IndexInt).empty;
+        defer dynamic.deinit(alloc);
+        var executor = forward.WideExecutor(Doc).init(&doc, selector, forward.buildPlan(selector), 0);
+        defer executor.deinit();
+        idx = 1;
+        while (idx < doc.nodes.len) : (idx += 1) {
+            if (try executor.process(idx)) try dynamic.append(alloc, idx);
+        }
+        try std.testing.expectEqualSlices(IndexInt, expected.items, dynamic.items);
     }
 }
 
@@ -3436,6 +3618,108 @@ test "forward automaton processes and emits nested matches exactly once" {
     try std.testing.expectEqual(@as(usize, 128), it.engine.compact.stats.local_unique_predicate_evals);
 }
 
+test "dynamic forward fans a repeated predicate out once per node" {
+    const alloc = std.testing.allocator;
+    var html_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer html_writer.deinit();
+    for (0..128) |_| try html_writer.writer.writeAll("<div>");
+    for (0..128) |_| try html_writer.writer.writeAll("</div>");
+    const html = try html_writer.toOwnedSlice();
+    defer alloc.free(html);
+
+    var selector_source = std.ArrayList(u8).empty;
+    defer selector_source.deinit(alloc);
+    for (0..128) |i| {
+        if (i != 0) try selector_source.append(alloc, ' ');
+        try selector_source.appendSlice(alloc, "div");
+    }
+    var selector = try ast.Selector.compileRuntime(alloc, selector_source.items);
+    defer selector.deinit(alloc);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    try resetParsed(.{}, &doc, html);
+
+    var it = doc.queryRuntime(selector);
+    defer it.deinit();
+    try std.testing.expect(std.meta.activeTag(it.engine) == .wide);
+    while (try it.next()) |_| {}
+
+    try std.testing.expectEqual(@as(usize, 128), it.engine.wide.stats.nodes_processed);
+    try std.testing.expectEqual(@as(usize, 128), it.engine.wide.stats.local_unique_predicate_evals);
+    // The one unique predicate spans exactly two state words. It should fan
+    // into those two sparse uses once per node, not once per eligible state.
+    try std.testing.expectEqual(@as(usize, 256), it.engine.wide.stats.predicate_state_word_fanouts);
+}
+
+test "forward query processes every element once across selector shapes" {
+    const alloc = std.testing.allocator;
+    var html_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer html_writer.deinit();
+    for (0..128) |_| try html_writer.writer.writeAll("<div>");
+    for (0..128) |_| try html_writer.writer.writeAll("</div>");
+    const html = try html_writer.toOwnedSlice();
+    defer alloc.free(html);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    try resetParsed(.{}, &doc, html);
+
+    const Case = struct {
+        source: []const u8,
+        expected: usize,
+    };
+    const cases = [_]Case{
+        .{ .source = "div", .expected = 128 },
+        .{ .source = "div div", .expected = 127 },
+        .{ .source = "div div div div", .expected = 125 },
+        .{ .source = "div, div div, div div div", .expected = 128 },
+    };
+
+    for (cases) |case| {
+        var selector = try ast.Selector.compileRuntime(alloc, case.source);
+        defer selector.deinit(alloc);
+        var it = doc.queryRuntime(selector);
+        defer it.deinit();
+        try std.testing.expect(std.meta.activeTag(it.engine) == .compact);
+
+        var count: usize = 0;
+        var previous: ?IndexInt = null;
+        while (try it.next()) |node| {
+            if (previous) |prev| try std.testing.expect(node.index > prev);
+            previous = node.index;
+            count += 1;
+        }
+        try std.testing.expectEqual(case.expected, count);
+        try std.testing.expectEqual(@as(usize, 128), it.engine.compact.stats.nodes_processed);
+        try std.testing.expectEqual(case.expected, it.engine.compact.stats.nodes_emitted);
+    }
+}
+
+test "forward terminal states are never propagated" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div><div><div></div></div></div>".*;
+    try resetParsed(.{}, &doc, &html);
+
+    var it = doc.query("div div");
+    defer it.deinit();
+    _ = (try it.next()) orelse return error.TestUnexpectedResult;
+
+    const final_bit = @as(u64, 1) << 1;
+    try std.testing.expect((it.engine.compact.root.self_matches & final_bit) == 0);
+    try std.testing.expect((it.engine.compact.root.lineage_matches & final_bit) == 0);
+    try std.testing.expect((it.engine.compact.root.prev_child_matches & final_bit) == 0);
+    try std.testing.expect((it.engine.compact.root.any_child_matches & final_bit) == 0);
+    for (it.engine.compact.stack.items) |frame| {
+        try std.testing.expect((frame.self_matches & final_bit) == 0);
+        try std.testing.expect((frame.lineage_matches & final_bit) == 0);
+        try std.testing.expect((frame.prev_child_matches & final_bit) == 0);
+        try std.testing.expect((frame.any_child_matches & final_bit) == 0);
+    }
+}
+
 test "selector-list overlap emits each candidate once" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);
@@ -3485,6 +3769,78 @@ test "wide RTL automaton shifts predecessor state across word boundaries" {
     try std.testing.expectEqual(@as(usize, 65), workspace.stats.local_unique_predicate_evals);
 }
 
+test "dynamic forward and RTL transitions cross selector word boundaries" {
+    const alloc = std.testing.allocator;
+
+    var nested_html: std.Io.Writer.Allocating = .init(alloc);
+    defer nested_html.deinit();
+    for (0..129) |_| try nested_html.writer.writeAll("<div>");
+    for (0..129) |_| try nested_html.writer.writeAll("</div>");
+    const nested_source = try nested_html.toOwnedSlice();
+    defer alloc.free(nested_source);
+    var nested_doc = GetDocument(.{}).init(alloc);
+    defer nested_doc.deinit();
+    try resetParsed(.{}, &nested_doc, nested_source);
+    const nested_target: IndexInt = @intCast(nested_doc.nodes.len - 1);
+
+    var sibling_html: std.Io.Writer.Allocating = .init(alloc);
+    defer sibling_html.deinit();
+    try sibling_html.writer.writeAll("<main>");
+    for (0..129) |_| try sibling_html.writer.writeAll("<i></i>");
+    try sibling_html.writer.writeAll("</main>");
+    const sibling_source = try sibling_html.toOwnedSlice();
+    defer alloc.free(sibling_source);
+    var sibling_doc = GetDocument(.{}).init(alloc);
+    defer sibling_doc.deinit();
+    try resetParsed(.{}, &sibling_doc, sibling_source);
+    const sibling_target: IndexInt = @intCast(sibling_doc.nodes.len - 1);
+
+    const Case = struct {
+        separator: []const u8,
+        tag: []const u8,
+        sibling: bool,
+    };
+    const cases = [_]Case{
+        .{ .separator = " > ", .tag = "div", .sibling = false },
+        .{ .separator = " ", .tag = "div", .sibling = false },
+        .{ .separator = " + ", .tag = "i", .sibling = true },
+        .{ .separator = " ~ ", .tag = "i", .sibling = true },
+    };
+
+    for ([_]usize{ 65, 129 }) |compound_count| {
+        for (cases) |case| {
+            var selector_source = std.ArrayList(u8).empty;
+            defer selector_source.deinit(alloc);
+            for (0..compound_count) |i| {
+                if (i != 0) try selector_source.appendSlice(alloc, case.separator);
+                try selector_source.appendSlice(alloc, case.tag);
+            }
+            var selector = try ast.Selector.compileRuntime(alloc, selector_source.items);
+            defer selector.deinit(alloc);
+
+            const Doc = GetDocument(.{});
+            const doc: *const Doc = if (case.sibling) &sibling_doc else &nested_doc;
+            const target = if (case.sibling) sibling_target else nested_target;
+
+            var it = doc.queryRuntime(selector);
+            defer it.deinit();
+            try std.testing.expect(std.meta.activeTag(it.engine) == .wide);
+            const first = (try it.next()) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(compound_count, it.engine.wide.exec_plan.state_count);
+            try std.testing.expectEqual(compound_count / 64 + @intFromBool(compound_count % 64 != 0), it.engine.wide.word_count);
+            var saw_target = first.index == target;
+            while (try it.next()) |node| {
+                if (node.index == target) saw_target = true;
+            }
+            try std.testing.expect(saw_target);
+
+            var workspace = matcher.MatchWorkspace.init(alloc);
+            defer workspace.deinit();
+            try std.testing.expect(try matcher.matchesSelectorAtWithWorkspace(Doc, doc, selector, target, InvalidIndex, &workspace));
+        }
+    }
+}
+
 test "RTL descendant failure merges ambiguous states and processes each node once" {
     const alloc = std.testing.allocator;
     var html_writer: std.Io.Writer.Allocating = .init(alloc);
@@ -3509,7 +3865,137 @@ test "RTL descendant failure merges ambiguous states and processes each node onc
     defer workspace.deinit();
     try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(GetDocument(.{}), &doc, selector, @intCast(doc.nodes.len - 1), InvalidIndex, &workspace));
     try std.testing.expectEqual(@as(usize, 128), workspace.stats.reverse_nodes_processed);
+    try std.testing.expectEqual(@as(usize, 0), workspace.stats.reverse_node_duplicate_processes);
+    try std.testing.expectEqual(workspace.stats.reverse_nodes_processed, workspace.stats.reverse_cells_created);
+    try std.testing.expectEqual(workspace.stats.reverse_nodes_processed, workspace.stats.reverse_queue_pushes);
     try std.testing.expect(workspace.stats.local_unique_predicate_evals <= 128 * 2);
+}
+
+test "RTL reached-node map spills without duplicate processing" {
+    const alloc = std.testing.allocator;
+    var html_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer html_writer.deinit();
+    for (0..300) |_| try html_writer.writer.writeAll("<div>");
+    for (0..300) |_| try html_writer.writer.writeAll("</div>");
+    const html = try html_writer.toOwnedSlice();
+    defer alloc.free(html);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    try resetParsed(.{}, &doc, html);
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(alloc);
+    try source.appendSlice(alloc, ".never");
+    for (1..64) |_| try source.appendSlice(alloc, " div");
+    var selector = try ast.Selector.compileRuntime(alloc, source.items);
+    defer selector.deinit(alloc);
+
+    var workspace = matcher.MatchWorkspace.init(alloc);
+    defer workspace.deinit();
+    try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(
+        GetDocument(.{}),
+        &doc,
+        selector,
+        @intCast(doc.nodes.len - 1),
+        InvalidIndex,
+        &workspace,
+    ));
+    try std.testing.expectEqual(@as(usize, 300), workspace.stats.reverse_nodes_processed);
+    try std.testing.expectEqual(@as(usize, 300), workspace.stats.reverse_cells_created);
+    try std.testing.expectEqual(@as(usize, 300), workspace.stats.reverse_queue_pushes);
+    try std.testing.expectEqual(@as(usize, 0), workspace.stats.reverse_node_duplicate_processes);
+}
+
+test "RTL workspace notices selector changes after allocator address reuse" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div class=a><x><div><div></div></div></x></div>".*;
+    try resetParsed(.{}, &doc, &html);
+    const target: IndexInt = @intCast(doc.nodes.len - 1);
+
+    var selector_buffer: [4096]u8 = undefined;
+    var first_allocator = std.heap.FixedBufferAllocator.init(&selector_buffer);
+    var workspace = matcher.MatchWorkspace.init(alloc);
+    defer workspace.deinit();
+
+    const first = try ast.Selector.compileRuntime(first_allocator.allocator(), ".a div div");
+    const first_source_ptr = first.source.ptr;
+    const first_compounds_ptr = first.compounds.ptr;
+    try std.testing.expect(try matcher.matchesSelectorAtWithWorkspace(
+        GetDocument(.{}),
+        &doc,
+        first,
+        target,
+        InvalidIndex,
+        &workspace,
+    ));
+
+    var second_allocator = std.heap.FixedBufferAllocator.init(&selector_buffer);
+    const second = try ast.Selector.compileRuntime(second_allocator.allocator(), ".a~div div");
+    // Equal-size compilation into a retained arena deliberately recreates the
+    // pointer-identity ABA case that a workspace cache must not mistake for the
+    // previous selector.
+    try std.testing.expect(first_source_ptr == second.source.ptr);
+    try std.testing.expect(first_compounds_ptr == second.compounds.ptr);
+    try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(
+        GetDocument(.{}),
+        &doc,
+        second,
+        target,
+        InvalidIndex,
+        &workspace,
+    ));
+}
+
+test "failed reverse-plan rebuild invalidates its previous selector identity" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div class=a><x><div><div></div></div></x></div>".*;
+    try resetParsed(.{}, &doc, &html);
+    const target: IndexInt = @intCast(doc.nodes.len - 1);
+
+    var first = try ast.Selector.compileRuntime(alloc, ".a div div");
+    defer first.deinit(alloc);
+    var second = try ast.Selector.compileRuntime(alloc, ".a~div div");
+    defer second.deinit(alloc);
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{});
+    var workspace = matcher.MatchWorkspace.init(failing.allocator());
+    defer workspace.deinit();
+    try std.testing.expect(try matcher.matchesSelectorAtWithWorkspace(
+        GetDocument(.{}),
+        &doc,
+        first,
+        target,
+        InvalidIndex,
+        &workspace,
+    ));
+
+    // Fail the first allocation after the cache miss. compileReversePlan has
+    // already begun replacing the old plan at that point.
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, matcher.matchesSelectorAtWithWorkspace(
+        GetDocument(.{}),
+        &doc,
+        second,
+        target,
+        InvalidIndex,
+        &workspace,
+    ));
+
+    // Once allocation succeeds again, the first selector must be rebuilt, not
+    // accepted against whatever partial state the failed second build left.
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expect(try matcher.matchesSelectorAtWithWorkspace(
+        GetDocument(.{}),
+        &doc,
+        first,
+        target,
+        InvalidIndex,
+        &workspace,
+    ));
 }
 
 test "RTL sibling topology cache invalidates across document generations" {
@@ -3557,6 +4043,9 @@ test "RTL sibling failure merges witnesses and uses optional topology" {
     defer compact_workspace.deinit();
     try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(@TypeOf(compact_doc), &compact_doc, selector, @intCast(compact_doc.nodes.len - 1), InvalidIndex, &compact_workspace));
     try std.testing.expectEqual(@as(usize, 128), compact_workspace.stats.reverse_nodes_processed);
+    try std.testing.expectEqual(@as(usize, 0), compact_workspace.stats.reverse_node_duplicate_processes);
+    try std.testing.expectEqual(compact_workspace.stats.reverse_nodes_processed, compact_workspace.stats.reverse_cells_created);
+    try std.testing.expectEqual(compact_workspace.stats.reverse_nodes_processed, compact_workspace.stats.reverse_queue_pushes);
     try std.testing.expectEqual(@as(usize, 1), compact_workspace.stats.topology_parent_builds);
     try std.testing.expectEqual(@as(usize, 128), compact_workspace.stats.topology_child_visits);
 
@@ -3567,10 +4056,13 @@ test "RTL sibling failure merges witnesses and uses optional topology" {
     defer linked_workspace.deinit();
     try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(@TypeOf(linked_doc), &linked_doc, selector, @intCast(linked_doc.nodes.len - 1), InvalidIndex, &linked_workspace));
     try std.testing.expectEqual(@as(usize, 128), linked_workspace.stats.reverse_nodes_processed);
+    try std.testing.expectEqual(@as(usize, 0), linked_workspace.stats.reverse_node_duplicate_processes);
+    try std.testing.expectEqual(linked_workspace.stats.reverse_nodes_processed, linked_workspace.stats.reverse_cells_created);
+    try std.testing.expectEqual(linked_workspace.stats.reverse_nodes_processed, linked_workspace.stats.reverse_queue_pushes);
     try std.testing.expectEqual(@as(usize, 0), linked_workspace.stats.topology_parent_builds);
 }
 
-test "stateless selector lists route through compact even beyond 64 compounds" {
+test "large stateless selector lists use dynamic zero-state executor" {
     const alloc = std.testing.allocator;
     var source = std.ArrayList(u8).empty;
     defer source.deinit(alloc);
@@ -3590,10 +4082,266 @@ test "stateless selector lists route through compact even beyond 64 compounds" {
     try resetParsed(.{}, &doc, &html);
     var it = doc.queryRuntime(selector);
     defer it.deinit();
-    try std.testing.expect(std.meta.activeTag(it.engine) == .compact);
+    try std.testing.expect(std.meta.activeTag(it.engine) == .wide);
     try std.testing.expect(try it.next() != null);
-    try std.testing.expectEqual(@as(usize, 1), it.engine.compact.stats.nodes_processed);
-    try std.testing.expectEqual(@as(usize, 128), it.engine.compact.stats.local_unique_predicate_evals);
+    try std.testing.expectEqual(@as(usize, 0), it.engine.wide.exec_plan.state_count);
+    try std.testing.expectEqual(@as(usize, 0), it.engine.wide.word_count);
+    try std.testing.expect(!it.engine.wide.exec_plan.has_tag_constraints);
+    try std.testing.expectEqual(@as(usize, 0), it.engine.wide.exec_plan.tag_dispatch.entries.len);
+    try std.testing.expectEqual(@as(usize, 0), it.engine.wide.exec_plan.tag_dispatch.wildcard_simple.len);
+    try std.testing.expectEqual(@as(usize, 0), it.engine.wide.tag_allowed.len);
+    try std.testing.expectEqual(@as(usize, 1), it.engine.wide.stats.nodes_processed);
+    try std.testing.expectEqual(@as(usize, 128), it.engine.wide.stats.local_unique_predicate_evals);
+}
+
+test "RTL point setup is proportional to reached nodes, not document size" {
+    const alloc = std.testing.allocator;
+    var html_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer html_writer.deinit();
+    try html_writer.writer.writeAll("<main>");
+    const unrelated_count: usize = @min(100_000, (common.MaxLen - 1024) / "<i></i>".len);
+    for (0..unrelated_count) |_| try html_writer.writer.writeAll("<i></i>");
+    for (0..8) |_| try html_writer.writer.writeAll("<div>");
+    for (0..8) |_| try html_writer.writer.writeAll("</div>");
+    try html_writer.writer.writeAll("</main>");
+    const html = try html_writer.toOwnedSlice();
+    defer alloc.free(html);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    try resetParsed(.{}, &doc, html);
+    const target: IndexInt = @intCast(doc.nodes.len - 1);
+    try std.testing.expect(target > unrelated_count);
+
+    var selector = try ast.Selector.compileRuntime(alloc, ".never div div");
+    defer selector.deinit(alloc);
+    var workspace = matcher.MatchWorkspace.init(alloc);
+    defer workspace.deinit();
+    try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(GetDocument(.{}), &doc, selector, target, InvalidIndex, &workspace));
+
+    // Only the eight-node ancestor chain and its <main> parent are reachable.
+    try std.testing.expect(workspace.stats.reverse_nodes_processed <= 9);
+    try std.testing.expectEqual(workspace.stats.reverse_nodes_processed, workspace.stats.reverse_cells_created);
+    try std.testing.expectEqual(workspace.stats.reverse_nodes_processed, workspace.stats.reverse_queue_pushes);
+    try std.testing.expectEqual(@as(usize, 0), workspace.stats.reverse_node_duplicate_processes);
+}
+
+test "deterministic point-match group avoids reverse-plan setup" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div id=target><span></span></div>".*;
+    try resetParsed(.{}, &doc, &html);
+    const target: IndexInt = @intCast(doc.nodes.len - 1);
+
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(alloc);
+    try source.appendSlice(alloc, "#target > span, .never");
+    for (0..96) |_| try source.appendSlice(alloc, " div");
+    var selector = try ast.Selector.compileRuntime(alloc, source.items);
+    defer selector.deinit(alloc);
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    var workspace = matcher.MatchWorkspace.init(failing.allocator());
+    defer workspace.deinit();
+    try std.testing.expect(try matcher.matchesSelectorAtWithWorkspace(GetDocument(.{}), &doc, selector, target, InvalidIndex, &workspace));
+    try std.testing.expectEqual(@as(usize, 0), workspace.execution_plan.state_count);
+    try std.testing.expectEqual(@as(usize, 0), workspace.stats.reverse_cells_created);
+    try std.testing.expectEqual(@as(usize, 0), workspace.stats.reverse_queue_pushes);
+}
+
+test "reverse point matching cleans up every allocation failure" {
+    const alloc = std.testing.allocator;
+    const Doc = GetDocument(.{});
+
+    var doc = Doc.init(alloc);
+    defer doc.deinit();
+    var html = "<main><div class=a><div><span></span></div></div><i></i></main>".*;
+    try resetParsed(.{}, &doc, &html);
+    var selector = try ast.Selector.compileRuntime(alloc, ".missing div span, .also-missing ~ span");
+    defer selector.deinit(alloc);
+    const target: IndexInt = 4;
+
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator, original: *const Doc, sel: ast.Selector, node: IndexInt) !void {
+            var workspace = matcher.MatchWorkspace.init(allocator);
+            defer workspace.deinit();
+            try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(
+                Doc,
+                original,
+                sel,
+                node,
+                InvalidIndex,
+                &workspace,
+            ));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(alloc, Case.run, .{ &doc, selector, target });
+}
+
+test "dynamic forward initialization cleans up every allocation failure" {
+    const alloc = std.testing.allocator;
+    const Doc = GetDocument(.{});
+
+    var selector_source = std.ArrayList(u8).empty;
+    defer selector_source.deinit(alloc);
+    for (0..65) |i| {
+        if (i != 0) try selector_source.append(alloc, ' ');
+        try selector_source.appendSlice(alloc, "div");
+    }
+    var selector = try ast.Selector.compileRuntime(alloc, selector_source.items);
+    defer selector.deinit(alloc);
+
+    var doc = Doc.init(alloc);
+    defer doc.deinit();
+    var html = "<div></div>".*;
+    try resetParsed(.{}, &doc, &html);
+
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator, original: *const Doc, sel: ast.Selector) !void {
+            // The document storage remains owned by the test allocator; only
+            // executor scratch is redirected through the failing allocator.
+            var local_doc = original.*;
+            local_doc.allocator = allocator;
+            var executor = forward.WideExecutor(Doc).init(&local_doc, sel, forward.buildPlan(sel), 0);
+            defer executor.deinit();
+            _ = try executor.process(1);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(alloc, Case.run, .{ &doc, selector });
+}
+
+test "dynamic simple groups evaluate one repeated local predicate" {
+    const alloc = std.testing.allocator;
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(alloc);
+    for (0..128) |i| {
+        if (i != 0) try source.appendSlice(alloc, ",");
+        try source.appendSlice(alloc, "div");
+    }
+    var selector = try ast.Selector.compileRuntime(alloc, source.items);
+    defer selector.deinit(alloc);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div></div>".*;
+    try resetParsed(.{}, &doc, &html);
+    var it = doc.queryRuntime(selector);
+    defer it.deinit();
+    try std.testing.expect(std.meta.activeTag(it.engine) == .wide);
+    try std.testing.expect(try it.next() != null);
+    try std.testing.expectEqual(@as(usize, 1), it.engine.wide.stats.local_unique_predicate_evals);
+}
+
+test "dynamic predicate cache is cleared only for predicates touched on the previous node" {
+    const alloc = std.testing.allocator;
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(alloc);
+    for (0..128) |i| {
+        if (i != 0) try source.appendSlice(alloc, ",");
+        try source.appendSlice(alloc, "[data-x]");
+    }
+    var selector = try ast.Selector.compileRuntime(alloc, source.items);
+    defer selector.deinit(alloc);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<main><div data-x></div><div></div></main>".*;
+    try resetParsed(.{}, &doc, &html);
+    var it = doc.queryRuntime(selector);
+    defer it.deinit();
+    const hit = (try it.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(IndexInt, 2), hit.index);
+    try std.testing.expect(try it.next() == null);
+    try std.testing.expectEqual(@as(usize, 3), it.engine.wide.stats.local_unique_predicate_evals);
+}
+
+test "reverse predicate cache does not leak local results across reached nodes" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div><div data-x></div></div>".*;
+    try resetParsed(.{}, &doc, &html);
+    var selector = try ast.Selector.compileRuntime(alloc, "[data-x] [data-x]");
+    defer selector.deinit(alloc);
+    var workspace = matcher.MatchWorkspace.init(alloc);
+    defer workspace.deinit();
+    try std.testing.expect(!try matcher.matchesSelectorAtWithWorkspace(
+        GetDocument(.{}),
+        &doc,
+        selector,
+        @intCast(doc.nodes.len - 1),
+        InvalidIndex,
+        &workspace,
+    ));
+    try std.testing.expectEqual(@as(usize, 2), workspace.stats.local_unique_predicate_evals);
+}
+
+test "dynamic tag dispatch preserves selector-list short-circuit order" {
+    const alloc = std.testing.allocator;
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(alloc);
+    try source.appendSlice(alloc, "div");
+    for (0..127) |i| {
+        var name_buf: [24]u8 = undefined;
+        try source.appendSlice(alloc, ",");
+        try source.appendSlice(alloc, try std.fmt.bufPrint(&name_buf, ".never{}", .{i}));
+    }
+    var selector = try ast.Selector.compileRuntime(alloc, source.items);
+    defer selector.deinit(alloc);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<div></div>".*;
+    try resetParsed(.{}, &doc, &html);
+    var it = doc.queryRuntime(selector);
+    defer it.deinit();
+    try std.testing.expect(std.meta.activeTag(it.engine) == .wide);
+    try std.testing.expect(try it.next() != null);
+    try std.testing.expectEqual(@as(usize, 1), it.engine.wide.stats.local_unique_predicate_evals);
+}
+
+test "dynamic tag dispatch rejects incompatible simple predicates before local matching" {
+    const alloc = std.testing.allocator;
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(alloc);
+    for (0..128) |i| {
+        if (i != 0) try source.appendSlice(alloc, ",");
+        var name_buf: [24]u8 = undefined;
+        try source.appendSlice(alloc, try std.fmt.bufPrint(&name_buf, "x{}", .{i}));
+    }
+    var selector = try ast.Selector.compileRuntime(alloc, source.items);
+    defer selector.deinit(alloc);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<x127></x127>".*;
+    try resetParsed(.{}, &doc, &html);
+    var it = doc.queryRuntime(selector);
+    defer it.deinit();
+    try std.testing.expect(std.meta.activeTag(it.engine) == .wide);
+    try std.testing.expect(try it.next() != null);
+    try std.testing.expectEqual(@as(usize, 1), it.engine.wide.stats.local_unique_predicate_evals);
+}
+
+test "node matches uses candidate-centric point matching" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<main><div id=p><span class=x></span></div></main>".*;
+    try resetParsed(.{}, &doc, &html);
+    const span = firstQuery(doc.query("span.x")) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expect(try span.matches("main div > span.x"));
+    try std.testing.expect(!try span.matches("aside span.x"));
+    try std.testing.expectError(error.InvalidSelector, span.matches("> span"));
+
+    var runtime = try ast.Selector.compileRuntime(alloc, "#p > span.x");
+    defer runtime.deinit(alloc);
+    try std.testing.expect(try span.matchesRuntime(runtime));
+    var relative = try ast.Selector.compileRuntime(alloc, "+ span");
+    defer relative.deinit(alloc);
+    try std.testing.expectError(error.InvalidSelector, span.matchesRuntime(relative));
 }
 
 test "query collect frees partial output when growth fails" {

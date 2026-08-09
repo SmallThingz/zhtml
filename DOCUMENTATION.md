@@ -101,6 +101,10 @@ All examples are verified by running `zig build examples-check`
   - `AttributeValueResult.value`
   - `AttributeValueResult.free(gpa)`
   - `getAttributeValueRaw(name)` returns the currently stored payload; expanding full-table entities remain raw in destructive compact storage
+- Point matching:
+  - `matches(comptime_selector)` tests the node itself with candidate-centric RTL matching
+  - `matchesRuntime(compiled_selector)` is the runtime-compiled equivalent
+  - both reject leading relative combinators (`>`, `+`, `~`) rather than treating them as scoped queries
 - Scoped queries:
   - same iterator-first query family as `Document` (`query` and `queryRuntime`)
 

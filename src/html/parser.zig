@@ -1287,7 +1287,9 @@ test "mismatched close with identical first8 prefix does not close long tag" {
 test "open-element stack preserves tag names longer than u16" {
     const alloc = std.testing.allocator;
     const name_len = 65_536;
-    const input = try alloc.alloc(u8, name_len * 2 + 5);
+    const input_len = name_len * 2 + 5;
+    if (comptime input_len > common.MaxLen) return error.SkipZigTest;
+    const input = try alloc.alloc(u8, input_len);
     defer alloc.free(input);
     input[0] = '<';
     @memset(input[1 .. name_len + 1], 'a');

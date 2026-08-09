@@ -119,14 +119,34 @@ pub const NthExpr = extern struct {
 
     /// Evaluates this expression for a 1-based child index.
     pub fn matches(self: @This(), index_1based: usize) bool {
-        const idx: i64 = @intCast(index_1based);
         const a: i64 = self.a;
         const b: i64 = self.b;
-        if (a == 0) return idx == b;
-        const diff = idx - b;
-        if ((diff > 0 and a < 0) or (diff < 0 and a > 0)) return false;
-        if (@rem(diff, a) != 0) return false;
-        return @divTrunc(diff, a) >= 0;
+
+        // Keep ordinary sibling positions on native i64 arithmetic. The only
+        // i64 overflow case is subtracting a negative B from an index near
+        // maxInt(i64); wider usize values also need the fallback below.
+        if (index_1based <= std.math.maxInt(i64)) {
+            const idx: i64 = @intCast(index_1based);
+            if (a == 0) return idx == b;
+            if (b >= 0 or idx <= std.math.maxInt(i64) + b) {
+                const diff = idx - b;
+                if ((diff > 0 and a < 0) or (diff < 0 and a > 0)) return false;
+                if (@rem(diff, a) != 0) return false;
+                return @divTrunc(diff, a) >= 0;
+            }
+        }
+
+        // This path is only reachable for extreme 64-bit sibling indexes. i32
+        // An+B coefficients fit comfortably in i128, so the subtraction and
+        // division cannot overflow here.
+        const idx: i128 = @intCast(index_1based);
+        const wide_a: i128 = self.a;
+        const wide_b: i128 = self.b;
+        if (wide_a == 0) return idx == wide_b;
+        const diff = idx - wide_b;
+        if ((diff > 0 and wide_a < 0) or (diff < 0 and wide_a > 0)) return false;
+        if (@rem(diff, wide_a) != 0) return false;
+        return @divTrunc(diff, wide_a) >= 0;
     }
 
     /// Formats this nth expression for human-readable output.
@@ -275,6 +295,10 @@ pub const Selector = struct {
     source: []const u8,
     /// True when slices were allocated by runtime compilation.
     runtime_owned: bool = false,
+    /// Opaque nonzero identity for runtime-compiled selectors. Reusable
+    /// matcher workspaces use this instead of allocation addresses, which may
+    /// be recycled after a selector is released. Compile-time selectors keep 0.
+    cache_id: u64 = 0,
     /// Comma-separated selector groups.
     groups: []const Group,
     /// Flattened compound list referenced by `groups`.
@@ -331,10 +355,17 @@ pub const Selector = struct {
     }
 };
 
-test "NthExpr handles full i32 coefficient range without overflow" {
+test "NthExpr handles full index and i32 coefficient ranges without overflow" {
     try std.testing.expect((NthExpr{ .a = 1, .b = std.math.minInt(i32) }).matches(1));
     try std.testing.expect((NthExpr{ .a = std.math.maxInt(i32), .b = std.math.minInt(i32) }).matches(2_147_483_646));
     try std.testing.expect(!(NthExpr{ .a = -1, .b = std.math.maxInt(i32) }).matches(@as(usize, std.math.maxInt(i32)) + 1));
+
+    if (comptime @bitSizeOf(usize) > 63) {
+        const i64_max: usize = @intCast(std.math.maxInt(i64));
+        try std.testing.expect((NthExpr{ .a = 1, .b = std.math.minInt(i32) }).matches(i64_max));
+        try std.testing.expect((NthExpr{ .a = 1, .b = 0 }).matches(i64_max + 1));
+        try std.testing.expect(!(NthExpr{ .a = -1, .b = std.math.maxInt(i32) }).matches(i64_max + 1));
+    }
 }
 
 test "format selector AST types" {

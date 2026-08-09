@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
     const mod = b.addModule("html", .{
         .root_source_file = b.path("root.zig"),
         .target = target,
+        .optimize = optimize,
     });
     mod.addOptions("config", config_options);
 

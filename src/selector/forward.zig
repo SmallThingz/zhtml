@@ -2,7 +2,9 @@ const std = @import("std");
 const declaration_testing = @import("../testing.zig");
 const ast = @import("ast.zig");
 const matcher = @import("matcher.zig");
+const execution_plan = @import("execution_plan.zig");
 const common = @import("../common.zig");
+const tags = @import("../html/tags.zig");
 
 test {
     declaration_testing.refAllDeclsRecursive(@This());
@@ -10,6 +12,15 @@ test {
 
 const IndexInt = common.IndexInt;
 const InvalidIndex = common.InvalidIndex;
+
+inline fn bitWordCount(count: usize) usize {
+    return count / 64 + @intFromBool(count % 64 != 0);
+}
+
+fn checkedStateStorageWords(slots: usize, word_count: usize) !usize {
+    const words_per_slot = std.math.mul(usize, word_count, 4) catch return error.OutOfMemory;
+    return std.math.mul(usize, slots, words_per_slot) catch error.OutOfMemory;
+}
 
 pub const MaxForwardCompounds: usize = 64;
 
@@ -22,10 +33,12 @@ pub const Plan = struct {
     adjacent_targets: u64 = 0,
     sibling_targets: u64 = 0,
     final_mask: u64 = 0,
+    continuation_mask: u64 = 0,
     needs_child_position: bool = false,
     stateful: bool = false,
     scope_self_seed_mask: u64 = 0,
     scope_lineage_seed_mask: u64 = 0,
+    has_tag_constraints: bool = false,
 };
 
 inline fn bit(index: usize) u64 {
@@ -49,9 +62,11 @@ pub fn buildPlan(selector: ast.Selector) Plan {
             const absolute = start + relative;
             const comp = selector.compounds[absolute];
             inspectCompoundFeatures(selector, comp, &plan);
+            plan.has_tag_constraints = plan.has_tag_constraints or comp.hasTag();
             if (!compact) continue;
 
             const compound_bit = bit(absolute);
+            if (relative + 1 < len) plan.continuation_mask |= compound_bit;
             if (relative == 0) {
                 // Leading combinators are anchored checks in processSimple, not
                 // transitions: `> div` and a leading descendant need no stack.
@@ -104,6 +119,7 @@ pub const Frame = struct {
 pub const Stats = struct {
     nodes_processed: usize = 0,
     local_unique_predicate_evals: usize = 0,
+    predicate_state_word_fanouts: usize = 0,
     nodes_emitted: usize = 0,
 };
 
@@ -121,8 +137,15 @@ pub fn Executor(comptime Doc: type) type {
         seed_workspace: matcher.MatchWorkspace,
         stats: Stats = .{},
         initialized: bool = false,
+        tag_cache: [16]TagCacheEntry = [_]TagCacheEntry{.{}} ** 16,
 
         const Self = @This();
+        const TagCacheEntry = struct {
+            key: u64 = 0,
+            len: IndexInt = 0,
+            allowed: u64 = 0,
+            valid: bool = false,
+        };
 
         pub fn init(doc: *const Doc, selector: ast.Selector, plan: Plan, scope_root: IndexInt) Self {
             return .{
@@ -158,21 +181,24 @@ pub fn Executor(comptime Doc: type) type {
                 parent.element_child_count += 1;
                 child_position = parent.element_child_count;
             }
-            const eligible_bits = self.eligibleMask(parent, raw.parent);
+            var eligible_bits = self.eligibleMask(parent, raw.parent);
+            if (self.plan.has_tag_constraints) eligible_bits &= self.tagAllowedMask(raw.name_or_text.slice(self.doc.source));
             const matched = try self.evaluateEligible(idx, eligible_bits, child_position);
+            const final_hits = matched & self.plan.final_mask;
+            const persistent = matched & self.plan.continuation_mask;
 
-            parent.prev_child_matches = matched;
-            parent.any_child_matches |= matched;
-            const lineage = parent.lineage_matches | matched;
+            parent.prev_child_matches = persistent;
+            parent.any_child_matches |= persistent;
+            const lineage = parent.lineage_matches | persistent;
             if (raw.subtree_end > idx) {
                 try self.stack.append(self.allocator, .{
                     .subtree_end = raw.subtree_end,
                     .node_index = idx,
-                    .self_matches = matched,
+                    .self_matches = persistent,
                     .lineage_matches = lineage,
                 });
             }
-            const is_match = (matched & self.plan.final_mask) != 0;
+            const is_match = final_hits != 0;
             if (is_match) self.stats.nodes_emitted += 1;
             return is_match;
         }
@@ -182,8 +208,11 @@ pub fn Executor(comptime Doc: type) type {
             if (!raw.isElement(idx)) return false;
             self.stats.nodes_processed += 1;
             self.node_ctx.begin(self.allocator, 0);
+            const allowed = if (self.plan.has_tag_constraints) self.tagAllowedMask(raw.name_or_text.slice(self.doc.source)) else std.math.maxInt(u64);
             for (self.selector.groups) |group| {
                 if (group.compound_len != 1) continue;
+                const absolute: usize = @intCast(group.compound_start);
+                if ((allowed & bit(absolute)) == 0) continue;
                 const comp = self.selector.compounds[group.compound_start];
                 const anchored = switch (comp.combinator) {
                     .none, .descendant => true,
@@ -235,6 +264,28 @@ pub fn Executor(comptime Doc: type) type {
             return matched;
         }
 
+        fn tagAllowedMask(self: *Self, node_name: []const u8) u64 {
+            const key = tags.first8KeyWithMode(node_name, Doc.Options.non_destructive);
+            const len: IndexInt = @intCast(node_name.len);
+            const mixed = key ^ (@as(u64, len) *% 0x9e3779b97f4a7c15);
+            const slot: usize = @intCast(mixed & 15);
+            const cached = &self.tag_cache[slot];
+            if (cached.valid and cached.key == key and cached.len == len) return cached.allowed;
+
+            var allowed: u64 = 0;
+            for (self.selector.compounds, 0..) |comp, absolute| {
+                if (!comp.hasTag()) {
+                    allowed |= bit(absolute);
+                    continue;
+                }
+                const tag = comp.tag.slice(self.selector.source);
+                const tag_key = if (comp.tag_key != 0) comp.tag_key else tags.first8KeyWithMode(tag, false);
+                if (tag.len == node_name.len and tag_key == key) allowed |= bit(absolute);
+            }
+            cached.* = .{ .key = key, .len = len, .allowed = allowed, .valid = true };
+            return allowed;
+        }
+
         fn syncStack(self: *Self, idx: IndexInt) void {
             while (self.stack.items.len != 0 and idx > self.stack.items[self.stack.items.len - 1].subtree_end) _ = self.stack.pop();
             if (self.stack.items.len != 0) std.debug.assert(self.doc.nodes[idx].parent == self.stack.items[self.stack.items.len - 1].node_index or !self.doc.nodes[idx].isElement(idx));
@@ -272,7 +323,10 @@ pub fn Executor(comptime Doc: type) type {
                 self.stats.local_unique_predicate_evals += 1;
                 const representative: usize = @intCast(self.predicate_plan.representatives[predicate_id]);
                 if (try matcher.matchesCompoundForward(Doc, self.doc, self.selector, self.selector.compounds[representative], node_index, &self.node_ctx)) {
-                    matched |= eligible_bits & self.predicate_plan.predicateMaskConst(predicate_id)[0];
+                    for (self.predicate_plan.usesFor(predicate_id)) |use| {
+                        if (use.word_index != 0) continue;
+                        matched |= eligible_bits & use.mask;
+                    }
                 }
             }
             return matched;
@@ -290,33 +344,23 @@ pub fn WideExecutor(comptime Doc: type) type {
         selector: ast.Selector,
         plan: Plan,
         scope_root: IndexInt,
-        word_count: usize,
-        masks: []u64 = &.{},
+        exec_plan: execution_plan.Plan = .{},
+        word_count: usize = 0,
         eligible_words: []u64 = &.{},
+        tag_allowed: []u64 = &.{},
         states: std.ArrayListUnmanaged(u64) = .empty,
         stack: std.ArrayListUnmanaged(WideFrame) = .empty,
         node_ctx: matcher.NodeContext = .{},
-        predicate_plan: matcher.PredicatePlan = .{},
         seen_predicates: []u64 = &.{},
+        matched_predicates: []u64 = &.{},
+        state_fanned_predicates: []u64 = &.{},
+        touched_predicates: std.ArrayListUnmanaged(usize) = .empty,
         seed_workspace: matcher.MatchWorkspace,
         stats: Stats = .{},
         initialized: bool = false,
         root_child_count: usize = 0,
 
         const Self = @This();
-        const MaskCount = 10;
-        const Mask = enum(usize) {
-            start_none,
-            start_child,
-            start_descendant,
-            child_targets,
-            descendant_targets,
-            adjacent_targets,
-            sibling_targets,
-            final,
-            scope_self,
-            scope_lineage,
-        };
         const State = enum(usize) { self_matches, lineage, prev_child, any_child };
         const WideFrame = struct {
             subtree_end: IndexInt,
@@ -331,26 +375,33 @@ pub fn WideExecutor(comptime Doc: type) type {
                 .selector = selector,
                 .plan = plan,
                 .scope_root = scope_root,
-                .word_count = (selector.compounds.len + 63) / 64,
                 .seed_workspace = matcher.MatchWorkspace.init(doc.allocator),
             };
         }
 
         pub fn deinit(self: *Self) void {
-            if (self.masks.len != 0) self.allocator.free(self.masks);
-            self.masks = &.{};
+            self.exec_plan.deinit(self.allocator);
             if (self.eligible_words.len != 0) self.allocator.free(self.eligible_words);
             self.eligible_words = &.{};
+            if (self.tag_allowed.len != 0) self.allocator.free(self.tag_allowed);
+            self.tag_allowed = &.{};
             self.states.deinit(self.allocator);
             self.states = .empty;
             self.stack.deinit(self.allocator);
             self.stack = .empty;
             self.node_ctx.deinit();
-            self.predicate_plan.deinit(self.allocator);
             if (self.seen_predicates.len != 0) self.allocator.free(self.seen_predicates);
             self.seen_predicates = &.{};
+            if (self.matched_predicates.len != 0) self.allocator.free(self.matched_predicates);
+            self.matched_predicates = &.{};
+            if (self.state_fanned_predicates.len != 0) self.allocator.free(self.state_fanned_predicates);
+            self.state_fanned_predicates = &.{};
+            self.touched_predicates.deinit(self.allocator);
+            self.touched_predicates = .empty;
             self.seed_workspace.deinit();
+            self.word_count = 0;
             self.initialized = false;
+            self.root_child_count = 0;
         }
 
         pub fn process(self: *Self, idx: IndexInt) !bool {
@@ -362,7 +413,7 @@ pub fn WideExecutor(comptime Doc: type) type {
 
             const parent_slot = if (self.stack.items.len == 0) 0 else self.stack.items[self.stack.items.len - 1].slot;
             var child_position: usize = 0;
-            if (self.plan.needs_child_position) {
+            if (self.exec_plan.needs_child_position) {
                 if (self.stack.items.len == 0) {
                     self.root_child_count += 1;
                     child_position = self.root_child_count;
@@ -372,28 +423,38 @@ pub fn WideExecutor(comptime Doc: type) type {
                 }
             }
 
+            self.beginNode(child_position);
+            var is_match = try self.evaluateSimpleGroups(idx, raw.parent);
             const temp_slot = self.stack.items.len + 1;
-            try self.ensureStateSlots(temp_slot + 1);
-            const matched = self.state(temp_slot, .self_matches);
-            @memset(matched, 0);
-            self.buildEligible(parent_slot, raw.parent);
-            try self.evaluateNode(idx, child_position, matched);
+            if (self.word_count != 0) {
+                try self.ensureStateSlots(temp_slot + 1);
+                const matched = self.state(temp_slot, .self_matches);
+                @memset(matched, 0);
+                self.buildEligible(parent_slot, raw.parent);
+                if (self.exec_plan.has_tag_constraints) self.filterEligibleByTag(raw.name_or_text.slice(self.doc.source));
+                try self.evaluateStates(idx, matched);
+                is_match = is_match or intersects(matched, self.exec_plan.mask(.final));
 
-            @memcpy(self.state(parent_slot, .prev_child), matched);
-            orInto(self.state(parent_slot, .any_child), matched);
+                // Terminal states are observed above but never propagated.
+                andInto(matched, self.exec_plan.mask(.continuation));
+                @memcpy(self.state(parent_slot, .prev_child), matched);
+                orInto(self.state(parent_slot, .any_child), matched);
 
-            if (raw.subtree_end > idx) {
-                const lineage = self.state(temp_slot, .lineage);
-                @memcpy(lineage, self.state(parent_slot, .lineage));
-                orInto(lineage, matched);
-                @memset(self.state(temp_slot, .prev_child), 0);
-                @memset(self.state(temp_slot, .any_child), 0);
+                if (raw.subtree_end > idx) {
+                    const lineage = self.state(temp_slot, .lineage);
+                    @memcpy(lineage, self.state(parent_slot, .lineage));
+                    orInto(lineage, matched);
+                    @memset(self.state(temp_slot, .prev_child), 0);
+                    @memset(self.state(temp_slot, .any_child), 0);
+                }
+            }
+
+            if (raw.subtree_end > idx and (self.word_count != 0 or self.exec_plan.needs_child_position)) {
                 try self.stack.append(self.allocator, .{
                     .subtree_end = raw.subtree_end,
                     .slot = temp_slot,
                 });
             }
-            const is_match = intersects(matched, self.mask(.final));
             if (is_match) self.stats.nodes_emitted += 1;
             return is_match;
         }
@@ -401,56 +462,43 @@ pub fn WideExecutor(comptime Doc: type) type {
         fn ensureInitialized(self: *Self) !void {
             self.initialized = true;
             errdefer self.deinit();
-            self.masks = try self.allocator.alloc(u64, self.word_count * MaskCount);
-            @memset(self.masks, 0);
-            self.eligible_words = try self.allocator.alloc(u64, self.word_count);
-            @memset(self.eligible_words, 0);
-            try self.ensureStateSlots(2);
-            @memset(self.states.items, 0);
-            self.compileMasks();
-            if (self.scope_root != InvalidIndex and self.scope_root != 0 and self.scope_root < self.doc.nodes.len) {
+            self.exec_plan = try execution_plan.Plan.init(self.allocator, self.selector);
+            self.word_count = self.exec_plan.word_count;
+            if (self.word_count != 0) {
+                self.eligible_words = try self.allocator.alloc(u64, self.word_count);
+                @memset(self.eligible_words, 0);
+                if (self.exec_plan.has_tag_constraints) {
+                    self.tag_allowed = try self.allocator.alloc(u64, self.word_count);
+                    @memset(self.tag_allowed, 0);
+                }
+                try self.ensureStateSlots(2);
+                @memset(self.states.items, 0);
+            }
+            const predicate_words = bitWordCount(self.exec_plan.predicates.count);
+            if (predicate_words != 0) {
+                self.seen_predicates = try self.allocator.alloc(u64, predicate_words);
+                @memset(self.seen_predicates, 0);
+                self.matched_predicates = try self.allocator.alloc(u64, predicate_words);
+                @memset(self.matched_predicates, 0);
+                self.state_fanned_predicates = try self.allocator.alloc(u64, predicate_words);
+                @memset(self.state_fanned_predicates, 0);
+                try self.touched_predicates.ensureTotalCapacity(
+                    self.allocator,
+                    @min(self.exec_plan.predicates.count, 64),
+                );
+            }
+            if (self.word_count != 0 and self.scope_root != InvalidIndex and self.scope_root != 0 and self.scope_root < self.doc.nodes.len) {
                 try self.seedRoot();
             }
         }
 
-        fn compileMasks(self: *Self) void {
-            for (self.selector.groups) |group| {
-                if (group.compound_len == 0) continue;
-                const start: usize = @intCast(group.compound_start);
-                const len: usize = @intCast(group.compound_len);
-                setBit(self.mask(.final), start + len - 1);
-                for (0..len) |rel| {
-                    const absolute = start + rel;
-                    const comp = self.selector.compounds[absolute];
-                    if (rel == 0) {
-                        switch (comp.combinator) {
-                            .none => setBit(self.mask(.start_none), absolute),
-                            .child => setBit(self.mask(.start_child), absolute),
-                            .descendant => setBit(self.mask(.start_descendant), absolute),
-                            .adjacent, .sibling => {},
-                        }
-                    } else switch (comp.combinator) {
-                        .child => setBit(self.mask(.child_targets), absolute),
-                        .descendant => setBit(self.mask(.descendant_targets), absolute),
-                        .adjacent => setBit(self.mask(.adjacent_targets), absolute),
-                        .sibling => setBit(self.mask(.sibling_targets), absolute),
-                        .none => {},
-                    }
-                }
-            }
-            shiftRightOne(self.mask(.scope_self), self.mask(.child_targets), self.mask(.descendant_targets));
-            shiftRightOne(self.mask(.scope_lineage), &.{}, self.mask(.descendant_targets));
-        }
-
         fn seedRoot(self: *Self) !void {
             const self_state = self.state(0, .self_matches);
-            try self.seedMaskAt(self.mask(.scope_self), self.scope_root, self_state);
+            try self.seedMaskAt(self.exec_plan.mask(.scope_self), self.scope_root, self_state);
             const lineage = self.state(0, .lineage);
             @memcpy(lineage, self_state);
-            // eligible_words is scratch: overwritten by buildEligible before any
-            // normal matching, so reuse it instead of a temporary allocation.
             const pending = self.eligible_words;
-            @memcpy(pending, self.mask(.scope_lineage));
+            @memcpy(pending, self.exec_plan.mask(.scope_lineage));
             var cursor = self.scope_root;
             while (any(pending) and cursor != InvalidIndex and cursor != 0) {
                 const found = self.state(1, .self_matches);
@@ -463,50 +511,151 @@ pub fn WideExecutor(comptime Doc: type) type {
         }
 
         fn seedMaskAt(self: *Self, wanted: []const u64, node_index: IndexInt, out: []u64) !void {
-            var absolute: usize = 0;
-            while (absolute < self.selector.compounds.len) : (absolute += 1) {
-                if (!hasBit(wanted, absolute)) continue;
-                for (self.selector.groups) |group| {
-                    const start: usize = @intCast(group.compound_start);
-                    const len: usize = @intCast(group.compound_len);
-                    if (absolute < start or absolute >= start + len) continue;
-                    if (try matcher.matchesPrefixAt(Doc, self.doc, self.selector, group, absolute - start + 1, node_index, &self.seed_workspace)) setBit(out, absolute);
-                    break;
+            for (wanted, 0..) |wanted_word, word_index| {
+                var pending = wanted_word;
+                while (pending != 0) {
+                    const local_bit: usize = @intCast(@ctz(pending));
+                    pending &= pending - 1;
+                    const state_index = word_index * 64 + local_bit;
+                    if (state_index >= self.exec_plan.state_count) continue;
+                    const meta = self.exec_plan.states[state_index];
+                    const group = self.selector.groups[meta.group_index];
+                    if (try matcher.matchesPrefixAt(
+                        Doc,
+                        self.doc,
+                        self.selector,
+                        group,
+                        @as(usize, @intCast(meta.relative)) + 1,
+                        node_index,
+                        &self.seed_workspace,
+                    )) setBit(out, state_index);
                 }
             }
         }
 
         fn buildEligible(self: *Self, parent_slot: usize, raw_parent: IndexInt) void {
-            for (self.eligible_words, self.mask(.start_none), self.mask(.start_descendant)) |*dst, none, descendant| dst.* = none | descendant;
-            if (raw_parent == self.scope_root) orInto(self.eligible_words, self.mask(.start_child));
-            shiftOneAndOr(self.eligible_words, self.state(parent_slot, .self_matches), self.mask(.child_targets));
-            shiftOneAndOr(self.eligible_words, self.state(parent_slot, .lineage), self.mask(.descendant_targets));
-            shiftOneAndOr(self.eligible_words, self.state(parent_slot, .prev_child), self.mask(.adjacent_targets));
-            shiftOneAndOr(self.eligible_words, self.state(parent_slot, .any_child), self.mask(.sibling_targets));
+            for (self.eligible_words, self.exec_plan.mask(.start_none), self.exec_plan.mask(.start_descendant)) |*dst, none, descendant| dst.* = none | descendant;
+            if (raw_parent == self.scope_root) orInto(self.eligible_words, self.exec_plan.mask(.start_child));
+            shiftOneAndOr(self.eligible_words, self.state(parent_slot, .self_matches), self.exec_plan.mask(.child_targets));
+            shiftOneAndOr(self.eligible_words, self.state(parent_slot, .lineage), self.exec_plan.mask(.descendant_targets));
+            shiftOneAndOr(self.eligible_words, self.state(parent_slot, .prev_child), self.exec_plan.mask(.adjacent_targets));
+            shiftOneAndOr(self.eligible_words, self.state(parent_slot, .any_child), self.exec_plan.mask(.sibling_targets));
         }
 
-        fn evaluateNode(self: *Self, node_index: IndexInt, child_position: usize, matched: []u64) !void {
-            if (self.predicate_plan.state_ids.len == 0) {
-                self.predicate_plan = try matcher.PredicatePlan.init(self.allocator, self.selector);
-                self.seen_predicates = try self.allocator.alloc(u64, (self.predicate_plan.count + 63) / 64);
+        fn beginNode(self: *Self, child_position: usize) void {
+            for (self.touched_predicates.items) |predicate_id| {
+                const bit_mask = @as(u64, 1) << @intCast(predicate_id % 64);
+                const word = predicate_id / 64;
+                self.seen_predicates[word] &= ~bit_mask;
+                self.matched_predicates[word] &= ~bit_mask;
+                self.state_fanned_predicates[word] &= ~bit_mask;
             }
-            @memset(self.seen_predicates, 0);
+            self.touched_predicates.clearRetainingCapacity();
             self.node_ctx.begin(self.allocator, child_position);
+        }
+
+        fn predicateMatches(self: *Self, predicate_id: usize, node_index: IndexInt) !bool {
+            const bit_mask = @as(u64, 1) << @intCast(predicate_id % 64);
+            const word = predicate_id / 64;
+            if ((self.seen_predicates[word] & bit_mask) != 0) return (self.matched_predicates[word] & bit_mask) != 0;
+            try self.touched_predicates.append(self.allocator, predicate_id);
+            self.seen_predicates[word] |= bit_mask;
+            self.stats.local_unique_predicate_evals += 1;
+            const representative: usize = @intCast(self.exec_plan.predicates.representatives[predicate_id]);
+            const result = try matcher.matchesCompoundForward(
+                Doc,
+                self.doc,
+                self.selector,
+                self.selector.compounds[representative],
+                node_index,
+                &self.node_ctx,
+            );
+            if (result) self.matched_predicates[word] |= bit_mask;
+            return result;
+        }
+
+        fn evaluateSimpleGroups(self: *Self, node_index: IndexInt, raw_parent: IndexInt) !bool {
+            if (!self.exec_plan.has_tag_constraints) {
+                for (0..self.exec_plan.simple_groups.len) |simple_index| {
+                    if (try self.evaluateSimpleIndex(simple_index, node_index, raw_parent)) return true;
+                }
+                return false;
+            }
+
+            const node_name = self.doc.nodes[node_index].name_or_text.slice(self.doc.source);
+            const sig: execution_plan.TagSig = .{
+                .key = tags.first8KeyWithMode(node_name, Doc.Options.non_destructive),
+                .len = @intCast(node_name.len),
+            };
+            const tagged = if (self.exec_plan.tag_dispatch.find(sig)) |entry|
+                self.exec_plan.tag_dispatch.simpleIndices(entry)
+            else
+                &.{};
+            const wildcard = self.exec_plan.tag_dispatch.wildcard_simple;
+
+            var wi: usize = 0;
+            var ti: usize = 0;
+            while (wi < wildcard.len or ti < tagged.len) {
+                const simple_index = if (ti >= tagged.len or (wi < wildcard.len and wildcard[wi] < tagged[ti])) blk: {
+                    defer wi += 1;
+                    break :blk wildcard[wi];
+                } else blk: {
+                    defer ti += 1;
+                    break :blk tagged[ti];
+                };
+                if (try self.evaluateSimpleIndex(simple_index, node_index, raw_parent)) return true;
+            }
+            return false;
+        }
+
+        fn evaluateSimpleIndex(self: *Self, simple_index: usize, node_index: IndexInt, raw_parent: IndexInt) !bool {
+            const simple = self.exec_plan.simple_groups[simple_index];
+            const comp = self.selector.compounds[simple.compound];
+            const anchored = switch (comp.combinator) {
+                .none, .descendant => true,
+                .child => raw_parent == self.scope_root,
+                .adjacent, .sibling => false,
+            };
+            if (!anchored) return false;
+            const predicate_id: usize = @intCast(self.exec_plan.predicates.state_ids[simple.compound]);
+            return self.predicateMatches(predicate_id, node_index);
+        }
+
+        fn filterEligibleByTag(self: *Self, node_name: []const u8) void {
+            @memcpy(self.tag_allowed, self.exec_plan.tag_dispatch.wildcard_state_words);
+            const sig: execution_plan.TagSig = .{
+                .key = tags.first8KeyWithMode(node_name, Doc.Options.non_destructive),
+                .len = @intCast(node_name.len),
+            };
+            if (self.exec_plan.tag_dispatch.find(sig)) |entry| {
+                for (self.exec_plan.tag_dispatch.stateUses(entry)) |use| {
+                    self.tag_allowed[@intCast(use.word_index)] |= use.mask;
+                }
+            }
+            for (self.eligible_words, self.tag_allowed) |*eligible, allowed| eligible.* &= allowed;
+        }
+
+        fn evaluateStates(self: *Self, node_index: IndexInt, matched: []u64) !void {
             for (self.eligible_words, 0..) |eligible_word, word_index| {
                 var pending = eligible_word;
                 while (pending != 0) {
                     const bit_index: usize = @intCast(@ctz(pending));
                     pending &= pending - 1;
-                    const absolute = word_index * 64 + bit_index;
-                    if (absolute >= self.selector.compounds.len) continue;
-                    const predicate_id: usize = self.predicate_plan.state_ids[absolute];
-                    const seen_bit = @as(u64, 1) << @intCast(predicate_id % 64);
-                    if ((self.seen_predicates[predicate_id / 64] & seen_bit) != 0) continue;
-                    self.seen_predicates[predicate_id / 64] |= seen_bit;
-                    self.stats.local_unique_predicate_evals += 1;
-                    const representative: usize = @intCast(self.predicate_plan.representatives[predicate_id]);
-                    if (try matcher.matchesCompoundForward(Doc, self.doc, self.selector, self.selector.compounds[representative], node_index, &self.node_ctx)) {
-                        for (matched, self.eligible_words, self.predicate_plan.predicateMaskConst(predicate_id)) |*dst, eligible, mask_word| dst.* |= eligible & mask_word;
+                    const state_index = word_index * 64 + bit_index;
+                    if (state_index >= self.exec_plan.state_count) continue;
+                    const meta = self.exec_plan.states[state_index];
+                    const predicate_id: usize = @intCast(self.exec_plan.predicates.state_ids[meta.compound]);
+                    const predicate_bit = @as(u64, 1) << @intCast(predicate_id % 64);
+                    const predicate_word = predicate_id / 64;
+                    if ((self.state_fanned_predicates[predicate_word] & predicate_bit) != 0) continue;
+                    const local_match = try self.predicateMatches(predicate_id, node_index);
+                    self.state_fanned_predicates[predicate_word] |= predicate_bit;
+                    if (local_match) {
+                        for (self.exec_plan.predicateStateUsesFor(predicate_id)) |use| {
+                            self.stats.predicate_state_word_fanouts += 1;
+                            const word: usize = @intCast(use.word_index);
+                            matched[word] |= self.eligible_words[word] & use.mask;
+                        }
                     }
                 }
             }
@@ -517,16 +666,11 @@ pub fn WideExecutor(comptime Doc: type) type {
         }
 
         fn ensureStateSlots(self: *Self, slots: usize) !void {
-            const needed = slots * self.word_count * 4;
+            const needed = try checkedStateStorageWords(slots, self.word_count);
             if (self.states.items.len >= needed) return;
             const old_len = self.states.items.len;
             try self.states.resize(self.allocator, needed);
             @memset(self.states.items[old_len..], 0);
-        }
-
-        fn mask(self: *Self, which: Mask) []u64 {
-            const start = @intFromEnum(which) * self.word_count;
-            return self.masks[start .. start + self.word_count];
         }
 
         fn state(self: *Self, slot: usize, which: State) []u64 {
@@ -536,10 +680,6 @@ pub fn WideExecutor(comptime Doc: type) type {
 
         fn setBit(words: []u64, index: usize) void {
             words[index / 64] |= @as(u64, 1) << @intCast(index % 64);
-        }
-
-        fn hasBit(words: []const u64, index: usize) bool {
-            return (words[index / 64] & (@as(u64, 1) << @intCast(index % 64))) != 0;
         }
 
         fn any(words: []const u64) bool {
@@ -553,23 +693,15 @@ pub fn WideExecutor(comptime Doc: type) type {
         }
 
         fn orInto(dst: []u64, src: []const u64) void {
-            for (dst, src) |*d, s| d.* |= s;
+            for (dst, src) |*d, value| d.* |= value;
         }
 
         fn andNotInto(dst: []u64, src: []const u64) void {
-            for (dst, src) |*d, s| d.* &= ~s;
+            for (dst, src) |*d, value| d.* &= ~value;
         }
 
-        fn shiftRightOne(dst: []u64, a: []const u64, b: []const u64) void {
-            var carry: u64 = 0;
-            var i = dst.len;
-            while (i != 0) {
-                i -= 1;
-                const source = (if (a.len == 0) 0 else a[i]) | b[i];
-                const next_carry = source << 63;
-                dst[i] = (source >> 1) | carry;
-                carry = next_carry;
-            }
+        fn andInto(dst: []u64, src: []const u64) void {
+            for (dst, src) |*d, value| d.* &= value;
         }
 
         fn shiftOneAndOr(dst: []u64, src: []const u64, transition_mask: []const u64) void {
@@ -581,6 +713,11 @@ pub fn WideExecutor(comptime Doc: type) type {
             }
         }
     };
+}
+
+test "dynamic state storage sizing rejects overflow" {
+    try std.testing.expectError(error.OutOfMemory, checkedStateStorageWords(std.math.maxInt(usize), 2));
+    try std.testing.expectEqual(@as(usize, 32), try checkedStateStorageWords(2, 4));
 }
 
 test "forward plan flattens groups into exact transition masks" {

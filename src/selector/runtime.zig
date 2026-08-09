@@ -6,6 +6,28 @@ test {
 }
 const ast = @import("ast.zig");
 const common = @import("../common.zig");
+
+var next_selector_cache_id: std.atomic.Value(u64) = .init(1);
+var next_selector_cache_id_32: u64 = 1;
+var selector_cache_id_lock: std.atomic.Mutex = .unlocked;
+
+fn freshSelectorCacheId() u64 {
+    if (comptime @sizeOf(usize) >= @sizeOf(u64)) {
+        var id = next_selector_cache_id.fetchAdd(1, .monotonic);
+        if (id == 0) id = next_selector_cache_id.fetchAdd(1, .monotonic);
+        return id;
+    }
+
+    while (!selector_cache_id_lock.tryLock()) std.atomic.spinLoopHint();
+    defer selector_cache_id_lock.unlock();
+    var id = next_selector_cache_id_32;
+    next_selector_cache_id_32 +%= 1;
+    if (id == 0) {
+        id = next_selector_cache_id_32;
+        next_selector_cache_id_32 +%= 1;
+    }
+    return id;
+}
 const tables = @import("../html/tables.zig");
 const tags = @import("../html/tags.zig");
 const test_helpers = @import("test_helpers.zig");
@@ -119,6 +141,7 @@ const Parser = struct {
         return .{
             .source = self.source,
             .runtime_owned = true,
+            .cache_id = if (@inComptime()) 0 else freshSelectorCacheId(),
             .groups = groups,
             .compounds = compounds,
             .classes = classes,
