@@ -197,6 +197,41 @@ pub const ImplicitCloseMask = struct {
     pub const optgroup: u8 = 1 << 7;
 };
 
+pub const ImplicitCloseBoundaryMask = struct {
+    pub const regular: u8 = 1 << 0;
+    pub const button: u8 = 1 << 1;
+    pub const list_item: u8 = 1 << 2;
+    pub const table: u8 = 1 << 3;
+    pub const select: u8 = 1 << 4;
+};
+
+/// Returns the optional-close scope boundaries contributed by an open tag.
+pub noinline fn implicitCloseBoundaryMask(tag_len: usize, key: u64) u8 {
+    const B = ImplicitCloseBoundaryMask;
+    return switch (tag_len) {
+        2 => switch (key) {
+            KEY.TD, KEY.TH => B.regular,
+            KEY.OL, KEY.UL => B.list_item,
+            else => 0,
+        },
+        4 => if (key == KEY.HTML) B.regular | B.table else 0,
+        5 => if (key == KEY.TABLE) B.regular | B.table else 0,
+        6 => switch (key) {
+            KEY.APPLET, KEY.OBJECT => B.regular,
+            KEY.BUTTON => B.button,
+            KEY.SELECT => B.select,
+            else => 0,
+        },
+        7 => if (key == KEY.CAPTION or key == KEY.MARQUEE) B.regular else 0,
+        8 => switch (key) {
+            KEY.TEMPLATE => B.regular | B.table,
+            KEY.DATALIST => B.select,
+            else => 0,
+        },
+        else => 0,
+    };
+}
+
 const implicit_p = ImplicitCloseMask.p;
 const implicit_li = ImplicitCloseMask.li;
 const implicit_dt_dd = ImplicitCloseMask.dt_dd;
@@ -205,6 +240,60 @@ const implicit_td_th = ImplicitCloseMask.td_th;
 const implicit_head = ImplicitCloseMask.head;
 const implicit_option = ImplicitCloseMask.option;
 const implicit_optgroup = ImplicitCloseMask.optgroup;
+
+/// Packs the optional-close source class in the low byte and the classes
+/// closed by this start tag in the high byte, avoiding two `(len,key)`
+/// dispatches in parsers that need both properties.
+pub inline fn implicitCloseMeta(name: []const u8, key: u64) u16 {
+    const M = ImplicitCloseMask;
+    return switch (name.len) {
+        1 => if (key == KEY.P) M.p | (@as(u16, M.p) << 8) else 0,
+        2 => switch (key) {
+            KEY.HR => @as(u16, M.p | M.option | M.optgroup) << 8,
+            KEY.LI => M.li | (@as(u16, M.p | M.li) << 8),
+            KEY.DT, KEY.DD => M.dt_dd | (@as(u16, M.p | M.dt_dd) << 8),
+            KEY.TR => M.tr | (@as(u16, M.tr) << 8),
+            KEY.TD, KEY.TH => M.td_th | (@as(u16, M.td_th) << 8),
+            KEY.H1, KEY.H2, KEY.H3, KEY.H4, KEY.H5, KEY.H6, KEY.DL, KEY.OL, KEY.UL => @as(u16, M.p) << 8,
+            else => 0,
+        },
+        3 => switch (key) {
+            KEY.DIV, KEY.NAV, KEY.PRE => @as(u16, M.p) << 8,
+            else => 0,
+        },
+        4 => switch (key) {
+            KEY.HEAD => M.head,
+            KEY.BODY => @as(u16, M.head) << 8,
+            KEY.FORM, KEY.MAIN, KEY.MENU => @as(u16, M.p) << 8,
+            else => 0,
+        },
+        5 => switch (key) {
+            KEY.ASIDE, KEY.TABLE => @as(u16, M.p) << 8,
+            else => 0,
+        },
+        6 => switch (key) {
+            KEY.OPTION => M.option | (@as(u16, M.option) << 8),
+            KEY.DIALOG, KEY.FIGURE, KEY.FOOTER, KEY.HEADER, KEY.HGROUP, KEY.SEARCH => @as(u16, M.p) << 8,
+            else => 0,
+        },
+        7 => switch (key) {
+            KEY.ADDRESS, KEY.ARTICLE, KEY.DETAILS, KEY.SECTION => @as(u16, M.p) << 8,
+            else => 0,
+        },
+        8 => switch (key) {
+            KEY.FIELDSET => @as(u16, M.p) << 8,
+            KEY.OPTGROUP => M.optgroup | (@as(u16, M.option | M.optgroup) << 8),
+            else => 0,
+        },
+        9 => if (key == KEY.PLAINTEXT and std.ascii.toLower(name[8]) == 't') @as(u16, M.p) << 8 else 0,
+        10 => switch (key) {
+            KEY.BLOCKQUOTE => if (std.ascii.toLower(name[8]) == 't' and std.ascii.toLower(name[9]) == 'e') @as(u16, M.p) << 8 else 0,
+            KEY.FIGCAPTION => if (std.ascii.toLower(name[8]) == 'o' and std.ascii.toLower(name[9]) == 'n') @as(u16, M.p) << 8 else 0,
+            else => 0,
+        },
+        else => 0,
+    };
+}
 
 /// Returns the single active-source bit for an optional-end-tag source, or 0.
 pub inline fn implicitCloseSourceMask(tag_len: usize, key: u64) u8 {

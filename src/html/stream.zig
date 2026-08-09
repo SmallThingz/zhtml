@@ -86,14 +86,16 @@ pub const Parser = struct {
     pub fn parse(self: @This(), allocator: std.mem.Allocator, source: []const u8, ctx: anytype, comptime callback: anytype) !void {
         if (!common.lenFits(source.len)) return error.InputTooLarge;
 
+        var stack_buffer: [32]OpenTag = undefined;
         var p = State(@TypeOf(ctx), callback){
             .allocator = allocator,
             .source = source,
             .ctx = ctx,
             .options = self.options,
+            .stack = .initBuffer(&stack_buffer),
         };
-        if (self.options.track_nesting) try p.stack.append(allocator, .{ .name = .{}, .key = 0, .depth = 0 });
-        defer p.stack.deinit(allocator);
+        if (self.options.track_nesting) p.stack.appendAssumeCapacity(.{ .name = .{}, .key = 0 });
+        defer if (p.stack_heap) p.stack.deinit(allocator);
         defer p.tag_index.deinit(allocator);
         try p.run();
     }
@@ -106,8 +108,9 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8, ctx: anytype, com
 const OpenTag = struct {
     name: Span,
     key: u64,
-    depth: u32,
     foreign: bool = false,
+    implicit_source: u8 = 0,
+    implicit_boundary: u8 = 0,
 
     pub inline fn keyValue(self: *const @This()) u64 {
         return self.key;
@@ -128,7 +131,11 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         options: Options,
         i: usize = 0,
         stack: std.ArrayList(OpenTag) = .empty,
+        stack_heap: bool = false,
         tag_index: open_tag_index.LiveIndex(OpenTag) = .{},
+        implicit_source_mask: u8 = 0,
+        implicit_source_counts: [8]IndexInt = .{0} ** 8,
+        slow_close_misses: u8 = 0,
 
         const Self = @This();
 
@@ -185,8 +192,11 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             const void_element = !foreign_element and tags.isVoidTagWithKey(tag_name, tag.key);
             const closes_immediately = void_element or (foreign_element and self_closing);
 
-            if (self.options.track_nesting and !foreign_element and self.stack.items.len > 1 and tags.implicitCloseTriggerMask(tag_name, tag.key) != 0) {
-                try self.applyImplicitClosures(tag_name, tag.key, token_start);
+            const implicit_meta = if (self.options.track_nesting and !foreign_element) tags.implicitCloseMeta(tag_name, tag.key) else 0;
+            const implicit_source: u8 = @truncate(implicit_meta);
+            const implicit_trigger: u8 = @truncate(implicit_meta >> 8);
+            if (self.stack.items.len > 1 and self.implicit_source_mask & implicit_trigger != 0) {
+                try self.applyImplicitClosures(implicit_trigger, token_start);
             }
 
             const depth = self.currentDepth();
@@ -225,7 +235,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 if (self.options.emit_text and self.i < self.source.len) try self.emitTextAtDepth(self.i, self.source.len, text_depth);
                 self.i = self.source.len;
                 if (self.options.track_nesting) {
-                    const open = OpenTag{ .name = name_span, .key = tag.key, .depth = depth };
+                    const open = OpenTag{ .name = name_span, .key = tag.key };
                     try self.emitEnd(open, self.i, self.i, true);
                 }
                 return;
@@ -236,7 +246,13 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 return;
             }
 
-            if (self.options.track_nesting) try self.pushOpen(.{ .name = name_span, .key = tag.key, .depth = depth, .foreign = foreign_element });
+            if (self.options.track_nesting) try self.pushOpen(.{
+                .name = name_span,
+                .key = tag.key,
+                .foreign = foreign_element,
+                .implicit_source = implicit_source,
+                .implicit_boundary = if (self.implicit_source_mask != 0) tags.implicitCloseBoundaryMask(tag_name.len, tag.key) else 0,
+            });
         }
 
         /// Returns whether a new start tag is parsed in foreign content. SVG's
@@ -331,7 +347,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             }
         }
 
-        fn parsePi(self: *Self) !void {
+        noinline fn parsePi(self: *Self) !void {
             const start = self.i;
             const content_start = self.i + 2;
             const close = scanner.findBytePosOrEnd(self.source, content_start, '>');
@@ -353,7 +369,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             const content_start = self.i;
             const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
             const text_depth = if (self.options.track_nesting) depth + 1 else 0;
-            const open = OpenTag{ .name = name_span, .key = tag.key, .depth = depth };
+            const open = OpenTag{ .name = name_span, .key = tag.key };
             if (self.findRawTextClose(self.source[tag.start..tag.end], tag.key, self.i)) |close| {
                 if (close.content_end > content_start) try self.emitTextAtDepth(content_start, close.content_end, text_depth);
                 try self.emitEnd(open, close.close_start, close.close_end, false);
@@ -392,29 +408,37 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             _ = try callback(self.ctx, .{
                 .source = self.source,
                 .kind = .end_tag,
-                .depth = open.depth,
+                .depth = self.currentDepth(),
                 .name = open.name,
                 .token = .{ .start = @intCast(token_start), .len = @intCast(token_end - token_start) },
                 .implicit = implicit,
             });
         }
 
-        fn applyImplicitClosures(self: *Self, new_tag: []const u8, new_key: u64, pos: usize) !void {
-            while (self.stack.items.len > 1) {
+        fn applyImplicitClosures(self: *Self, trigger: u8, pos: usize) !void {
+            while (self.implicit_source_mask & trigger != 0) {
                 var stack_pos = self.stack.items.len;
                 var found: ?usize = null;
-                var scope: tags.ImplicitCloseScope = .{};
+                var scope: u8 = 0;
+                const B = tags.ImplicitCloseBoundaryMask;
                 while (stack_pos > 1) {
                     stack_pos -= 1;
                     const open = self.stack.items[stack_pos];
-                    if (tags.isImplicitCloseSourceWithLenAndKey(open.name.len, open.key) and
-                        tags.shouldImplicitlyCloseWithLenAndKey(open.name.len, open.key, new_tag, new_key) and
-                        scope.permits(open.name.len, open.key))
-                    {
-                        found = stack_pos;
-                        break;
+                    if (open.implicit_source & trigger != 0) {
+                        const blockers: u8 = switch (open.implicit_source) {
+                            tags.ImplicitCloseMask.p => B.regular | B.button,
+                            tags.ImplicitCloseMask.li => B.regular | B.list_item,
+                            tags.ImplicitCloseMask.dt_dd, tags.ImplicitCloseMask.head => B.regular,
+                            tags.ImplicitCloseMask.tr, tags.ImplicitCloseMask.td_th => B.table,
+                            tags.ImplicitCloseMask.option, tags.ImplicitCloseMask.optgroup => B.select,
+                            else => 0,
+                        };
+                        if (scope & blockers == 0) {
+                            found = stack_pos;
+                            break;
+                        }
                     }
-                    scope.observe(open.name.len, open.key);
+                    scope |= open.implicit_boundary;
                 }
 
                 const found_pos = found orelse break;
@@ -425,19 +449,68 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             }
         }
 
-        fn pushOpen(self: *Self, open_value: OpenTag) !void {
+        fn pushOpen(self: *Self, open: OpenTag) !void {
+            if (self.tag_index.active) return self.pushOpenIndexed(open);
+            if (self.stack.items.len == self.stack.capacity) try self.growOpenStack();
+            self.stack.appendAssumeCapacity(open);
+            if (open.implicit_source != 0) {
+                const source_index: usize = @ctz(open.implicit_source);
+                self.implicit_source_counts[source_index] += 1;
+                self.implicit_source_mask |= open.implicit_source;
+            }
+        }
+
+        noinline fn pushOpenIndexed(self: *Self, open_value: OpenTag) !void {
             var open = open_value;
             try self.tag_index.preparePush(self.allocator, &open);
-            try self.stack.append(self.allocator, open);
+            if (self.stack.items.len == self.stack.capacity) try self.growOpenStack();
+            self.stack.appendAssumeCapacity(open);
             self.tag_index.commitPush(&self.stack.items[self.stack.items.len - 1], self.stack.items.len);
+            if (open.implicit_source != 0) {
+                const source_index: usize = @ctz(open.implicit_source);
+                self.implicit_source_counts[source_index] += 1;
+                self.implicit_source_mask |= open.implicit_source;
+            }
+        }
+
+        noinline fn growOpenStack(self: *Self) !void {
+            if (self.stack_heap) {
+                try self.stack.ensureUnusedCapacity(self.allocator, 1);
+                return;
+            }
+            const old_items = self.stack.items;
+            const new_capacity = std.ArrayList(OpenTag).growCapacity(old_items.len + 1);
+            const new_memory = try self.allocator.alloc(OpenTag, new_capacity);
+            @memcpy(new_memory[0..old_items.len], old_items);
+            self.stack.items = new_memory[0..old_items.len];
+            self.stack.capacity = new_memory.len;
+            self.stack_heap = true;
         }
 
         fn popOpen(self: *Self) OpenTag {
+            if (self.tag_index.active) return self.popOpenIndexed();
+            const open = self.stack.pop().?;
+            std.debug.assert(open.name.len != 0);
+            if (open.implicit_source != 0) {
+                const source_index: usize = @ctz(open.implicit_source);
+                self.implicit_source_counts[source_index] -= 1;
+                if (self.implicit_source_counts[source_index] == 0) self.implicit_source_mask &= ~open.implicit_source;
+            }
+            return open;
+        }
+
+        noinline fn popOpenIndexed(self: *Self) OpenTag {
             const pos = self.stack.items.len - 1;
             const open = self.stack.pop().?;
             std.debug.assert(open.name.len != 0);
             self.tag_index.pop(&open, pos + 1);
             self.tag_index.maybeDeactivate(self.allocator, self.stack.items.len);
+            if (!self.tag_index.active) self.slow_close_misses = 0;
+            if (open.implicit_source != 0) {
+                const source_index: usize = @ctz(open.implicit_source);
+                self.implicit_source_counts[source_index] -= 1;
+                if (self.implicit_source_counts[source_index] == 0) self.implicit_source_mask &= ~open.implicit_source;
+            }
             return open;
         }
 
@@ -451,7 +524,11 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     if (self.openMatchesName(self.stack.items[pos], close_name, close.key)) return @intCast(pos);
                     pos -= 1;
                 }
-                try self.tag_index.activate(self.allocator, self.stack.items);
+                if (self.slow_close_misses < 15) {
+                    self.slow_close_misses += 1;
+                    return null;
+                }
+                try self.activateTagIndex();
                 return null;
             }
 
@@ -464,13 +541,18 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             return null;
         }
 
+        noinline fn activateTagIndex(self: *Self) !void {
+            @branchHint(.cold);
+            try self.tag_index.activate(self.allocator, self.stack.items);
+        }
+
         inline fn openMatchesName(self: *const Self, open: OpenTag, close_name: []const u8, close_key: u64) bool {
             if (open.name.len != close_name.len or open.key != close_key) return false;
             if (close_name.len <= 8) return true;
             return std.ascii.eqlIgnoreCase(open.name.slice(self.source)[8..], close_name[8..]);
         }
 
-        fn scanTagName(self: *Self, start: usize) TagScan {
+        inline fn scanTagName(self: *Self, start: usize) TagScan {
             return scanner.scanTagName(self.source, start, false);
         }
 
@@ -479,6 +561,8 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn findTagEnd(self: *Self, start: usize) ?usize {
+            if (start >= self.source.len) return null;
+            if (self.source[start] == '>') return start;
             if (self.options.assume_no_gt_in_attribute_values) {
                 const end = scanner.findBytePosOrEnd(self.source, start, '>');
                 return if (end == self.source.len) null else end;
