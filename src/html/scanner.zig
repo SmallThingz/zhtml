@@ -1,10 +1,101 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const declaration_testing = @import("../testing.zig");
 const tables = @import("tables.zig");
 const tags = @import("tags.zig");
 
 test {
     declaration_testing.refAllDeclsRecursive(@This());
+}
+
+const use_vectors = switch (builtin.zig_backend) {
+    .stage2_aarch64,
+    .stage2_powerpc,
+    .stage2_riscv64,
+    .stage2_spirv,
+    => false,
+    else => true,
+};
+
+/// Counts `value` in `source` using direct vector masks.
+/// Kept separate from the parser body so the sampling path does not inflate
+/// the tokenization loop.
+pub noinline fn countByte(source: []const u8, value: u8) usize {
+    var index: usize = 0;
+    var count: usize = 0;
+
+    if (use_vectors and !std.debug.inValgrind() and !@inComptime()) {
+        if (std.simd.suggestVectorLength(u8)) |suggested_len| {
+            const Block = @Vector(suggested_len, u8);
+            const BoolBlock = @Vector(suggested_len, bool);
+            const MaskInt = std.meta.Int(.unsigned, suggested_len);
+            const mask: Block = @splat(value);
+
+            while (index + suggested_len <= source.len) : (index += suggested_len) {
+                const block: Block = source[index..][0..suggested_len].*;
+                const matches: BoolBlock = block == mask;
+                const bits: MaskInt = @bitCast(matches);
+                count += @popCount(bits);
+            }
+        }
+    }
+
+    while (index < source.len) : (index += 1) {
+        count += @intFromBool(source[index] == value);
+    }
+    return count;
+}
+
+/// Finds `value` at or after `start`; returns `source.len` on a miss.
+/// Keep this specialized and non-optional: on current Zig/LLVM, `?usize`
+/// uses a hidden result pointer and `std.simd.firstTrue` lowers to a long
+/// reduction tree, while bitcasting the compare mask feeds `@ctz` directly.
+pub fn findBytePosOrEnd(source: []const u8, start: usize, value: u8) usize {
+    if (start >= source.len) return source.len;
+
+    var index = start;
+    if (use_vectors and !std.debug.inValgrind() and !@inComptime()) {
+        if (std.simd.suggestVectorLength(u8)) |suggested_len| {
+            const max_len = suggested_len * 2;
+            const min_len = @min(suggested_len, 4);
+
+            comptime var block_len_sum: u16 = max_len;
+            inline while (block_len_sum >= min_len) : (block_len_sum /= 2) {
+                const block_len = @min(block_len_sum, suggested_len);
+                const block_cnt = @max(1, block_len_sum / block_len);
+                const Block = @Vector(block_len, u8);
+                const BoolBlock = @Vector(block_len, bool);
+                const MaskInt = std.meta.Int(.unsigned, block_len);
+                const mask: Block = @splat(value);
+
+                if (index + block_len_sum <= source.len) while (true) {
+                    inline for (0..block_cnt) |_| {
+                        if (comptime block_len == suggested_len) {
+                            const block: Block = source[index..][0..block_len].*;
+                            const matches: BoolBlock = block == mask;
+                            const bits: MaskInt = @bitCast(matches);
+                            if (bits != 0) return index + @ctz(bits);
+                        } else {
+                            var offset: usize = 0;
+                            while (offset < block_len) : (offset += 1) {
+                                if (source[index + offset] == value) return index + offset;
+                            }
+                        }
+                        index += block_len;
+                    }
+
+                    if (block_len_sum == max_len) {
+                        if (index + block_len_sum > source.len) break;
+                    } else break;
+                };
+            }
+        }
+    }
+
+    while (index < source.len) : (index += 1) {
+        if (source[index] == value) return index;
+    }
+    return source.len;
 }
 
 pub const TagName = struct {
@@ -77,7 +168,9 @@ pub inline fn findTagEnd(source: []const u8, start: usize) ?usize {
         // value (`a=x=">"`). Accept the common assignment shapes directly;
         // ambiguous malformed input falls back to the exact tokenizer below.
         if (!assignmentEqStartsAttributeValue(source, start, special)) return findTagEndSlow(source, start);
-        search = (std.mem.indexOfScalarPos(u8, source, value_start + 1, quote) orelse return null) + 1;
+        search = findBytePosOrEnd(source, value_start + 1, quote);
+        if (search == source.len) return null;
+        search += 1;
     }
     return null;
 }
@@ -144,11 +237,13 @@ fn findTagEndSlow(source: []const u8, start: usize) ?usize {
                 };
             },
             .quoted_single => {
-                i = std.mem.indexOfScalarPos(u8, source, i, '\'') orelse return null;
+                i = findBytePosOrEnd(source, i, '\'');
+                if (i == source.len) return null;
                 state = .after_quoted;
             },
             .quoted_double => {
-                i = std.mem.indexOfScalarPos(u8, source, i, '"') orelse return null;
+                i = findBytePosOrEnd(source, i, '"');
+                if (i == source.len) return null;
                 state = .after_quoted;
             },
             .unquoted => {
@@ -297,7 +392,8 @@ pub inline fn findDeclarationEnd(source: []const u8, start: usize) ?usize {
         switch (source[i]) {
             '>' => return i,
             '\'', '"' => |quote| {
-                i = std.mem.indexOfScalarPos(u8, source, i + 1, quote) orelse return null;
+                i = findBytePosOrEnd(source, i + 1, quote);
+                if (i == source.len) return null;
             },
             else => {},
         }
@@ -319,7 +415,9 @@ pub inline fn findRawTextClose(
     if (name.len == 0) return null;
     var search = start;
     const first = std.ascii.toLower(name[0]);
-    while (std.mem.indexOfScalarPos(u8, source, search, '<')) |lt| {
+    while (true) {
+        const lt = findBytePosOrEnd(source, search, '<');
+        if (lt == source.len) return null;
         search = lt + 1;
         if (lt + 2 >= source.len or source[lt + 1] != '/' or std.ascii.toLower(source[lt + 2]) != first) continue;
 

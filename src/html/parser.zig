@@ -184,7 +184,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 SmallInitialNodeCapacity
             else blk: {
                 const sample_len = @min(self.input.len, NodeDensitySampleBytes);
-                const lt_count = std.mem.countScalar(u8, self.input[0..sample_len], '<');
+                const lt_count = scanner.countByte(self.input[0..sample_len], '<');
                 const projected_tags = std.math.mul(usize, lt_count, self.input.len) catch self.input.len;
                 const density_estimate = projected_tags / sample_len;
                 break :blk @max(LargeInitialNodeCapacity, density_estimate + density_estimate / 8 + 1);
@@ -297,7 +297,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 if (comptime opts.drop_whitespace_text_nodes == .nodes_and_preceding) start = self.i;
             }
 
-            self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '<') orelse self.input.len;
+            self.i = scanner.findBytePosOrEnd(self.input, self.i, '<');
             try self.addNode(.{ start, self.i }, false, .{});
         }
 
@@ -305,7 +305,7 @@ fn ParseState(comptime opts: ParseOptions) type {
         noinline fn handleInvalidOpeningTag(noalias self: *Self, start: IndexInt) !void {
             const parent_idx = self.currentParent();
             const last = &self.nodes.items[self.nodes.items.len - 1];
-            self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '<') orelse self.input.len;
+            self.i = scanner.findBytePosOrEnd(self.input, self.i, '<');
             if (last.isText(@intCast(self.nodes.items.len - 1)) and last.parent == parent_idx and last.name_or_text.end() == start) { // Merge the node if the last node is text already
                 last.name_or_text.setEnd(@intCast(self.i));
             } else { // append new node if last node was not text
@@ -810,7 +810,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             self.i += 2;
             // Processing-instruction-like forms are treated as opaque and end at
             // the next `>`.
-            self.i = std.mem.indexOfScalarPos(u8, self.input, self.i, '>') orelse self.input.len;
+            self.i = scanner.findBytePosOrEnd(self.input, self.i, '>');
             if (self.i < self.input.len) self.i += 1;
         }
 
@@ -823,14 +823,11 @@ fn ParseState(comptime opts: ParseOptions) type {
                 std.ascii.toLower(tag_name[1]) == 'v' and std.ascii.toLower(tag_name[2]) == 'g';
         }
 
-        inline fn isSvgTagKey(tag_key: u64) bool {
-            return tag_key == comptime tags.first8KeyWithMode("svg", false);
-        }
-
         inline fn findSvgContentEnd(noalias self: *Self) ?usize {
             var depth: usize = 1;
             while (self.i < self.input.len) {
-                const lt = std.mem.indexOfScalarPos(u8, self.input, self.i, '<') orelse return null;
+                const lt = scanner.findBytePosOrEnd(self.input, self.i, '<');
+                if (lt == self.input.len) return null;
                 if (lt + 1 >= self.input.len) return null;
 
                 self.i = lt + 1;

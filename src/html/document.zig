@@ -15,6 +15,7 @@ const matcher = @import("../selector/matcher.zig");
 const forward = @import("../selector/forward.zig");
 const prepared_selector = @import("../selector/prepared.zig");
 const parser = @import("parser.zig");
+const scanner = @import("scanner.zig");
 const common = @import("../common.zig");
 const IndexInt = common.IndexInt;
 
@@ -771,7 +772,9 @@ fn GetNode(comptime options: ParseOptions) type {
 
         fn writeDecodedEscaped(writer: anytype, value: []const u8, comptime attribute: bool) WriterError(@TypeOf(writer))!void {
             var i: usize = 0;
-            while (std.mem.indexOfScalarPos(u8, value, i, '&')) |amp| {
+            while (true) {
+                const amp = scanner.findBytePosOrEnd(value, i, '&');
+                if (amp == value.len) break;
                 if (amp > i) {
                     if (comptime attribute) try writeEscapedAttrValue(writer, value[i..amp]) else try writeEscapedText(writer, value[i..amp]);
                 }

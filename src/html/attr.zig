@@ -95,7 +95,8 @@ pub fn parseRawValue(source: []const u8, span_end: usize, eq_index: usize) RawVa
     }
 
     if (c == 0x27 or c == '"') {
-        const j = std.mem.indexOfScalarPos(u8, source, i + 1, c) orelse span_end;
+        const found = scanner.findBytePosOrEnd(source[0..span_end], i + 1, c);
+        const j = @min(found, span_end);
         const next_start = if (j < span_end) j + 1 else span_end;
         return .{ .kind = .quoted, .start = i + 1, .end = j, .quote = c, .next_start = next_start };
     }
@@ -505,7 +506,7 @@ fn materializeRawValue(comptime entity_decoding: entities.EntityDecoding, alloca
 
     const slice = source[raw.start..raw.end];
     const first = entities.firstDecodableEntityWithMode(entity_decoding, true, slice, 0);
-    if (first == null and std.mem.indexOfScalar(u8, slice, 0) == null) return .{ .value = slice };
+    if (first == null and scanner.findBytePosOrEnd(slice, 0, 0) == slice.len) return .{ .value = slice };
 
     return .{
         .value = try entities.decodeAllocWithMode(entity_decoding, true, allocator, slice),

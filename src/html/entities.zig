@@ -11,6 +11,7 @@ test {
 }
 const IndexInt = @import("../common.zig").IndexInt;
 const tables = @import("tables.zig");
+const scanner = @import("scanner.zig");
 const named_entities = @import("../../bench/entity_lookup/generated/named_entities.zig");
 const InvalidDigit = 0xff;
 const ReplacementUtf8 = [3]u8{ 0xEF, 0xBF, 0xBD };
@@ -59,15 +60,16 @@ pub fn decodeInPlaceWithMode(comptime mode: EntityDecoding, comptime normalize_w
 
 pub fn decodeInPlaceResultWithMode(comptime mode: EntityDecoding, comptime normalize_whitespace: bool, slice: []u8) InPlaceResult {
     if (expansionExtraWithMode(mode, false, slice) != 0) return .{ .len = slice.len, .complete = false };
-    const first = std.mem.indexOfScalar(u8, slice, '&') orelse {
-        return .{ .len = if (comptime normalize_whitespace) normalizeWhitespaceInPlace(slice) else slice.len };
-    };
+    const first = scanner.findBytePosOrEnd(slice, 0, '&');
+    if (first == slice.len) return .{ .len = if (comptime normalize_whitespace) normalizeWhitespaceInPlace(slice) else slice.len };
     return .{ .len = decodeInPlaceFromMode(mode, normalize_whitespace, slice, first) };
 }
 
 pub fn firstDecodableEntityWithMode(comptime mode: EntityDecoding, comptime attribute: bool, slice: []const u8, start: usize) ?usize {
     var i = start;
-    while (std.mem.indexOfScalarPos(u8, slice, i, '&')) |amp| {
+    while (true) {
+        const amp = scanner.findBytePosOrEnd(slice, i, '&');
+        if (amp == slice.len) return null;
         if (decodeEntityWithMode(mode, attribute, slice[amp + 1 ..]) != null) {
             @branchHint(.likely);
             return amp;
@@ -91,7 +93,9 @@ pub fn expansionExtraWithMode(comptime mode: EntityDecoding, comptime attribute:
     // lookup for every ampersand before an in-place decode.
     var extra: usize = 0;
     var i: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, slice, i, '&')) |amp| {
+    while (true) {
+        const amp = scanner.findBytePosOrEnd(slice, i, '&');
+        if (amp == slice.len) break;
         if (amp + 5 <= slice.len) {
             const candidate = slice[amp .. amp + 5];
             if (std.mem.eql(u8, candidate, "&nLt;") or std.mem.eql(u8, candidate, "&nGt;")) {
@@ -194,16 +198,18 @@ fn decodePlainInPlaceFrom(slice: []u8, first: usize, comptime null_as_space: boo
             w += 1;
         }
 
-        const next_amp = std.mem.indexOfScalarPos(u8, slice, r, '&') orelse return slice.len;
+        const next_amp = scanner.findBytePosOrEnd(slice, r, '&');
+        if (next_amp == slice.len) return slice.len;
         r = next_amp;
         w = next_amp;
     }
 
     while (true) {
-        const next_amp = std.mem.indexOfScalarPos(u8, slice, r, '&') orelse {
+        const next_amp = scanner.findBytePosOrEnd(slice, r, '&');
+        if (next_amp == slice.len) {
             std.mem.copyForwards(u8, slice[w .. w + (slice.len - r)], slice[r..]);
             return w + (slice.len - r);
-        };
+        }
         const chunk_len = next_amp - r;
         if (chunk_len != 0) {
             std.mem.copyForwards(u8, slice[w .. w + chunk_len], slice[r..next_amp]);

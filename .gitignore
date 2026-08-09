@@ -7,6 +7,7 @@ bench/parsers/
 bench/results/*
 bench/fixtures/*.html
 bench/runners/*/target/
+Cargo.lock
 
 __pycache__/
 *.pyc

@@ -146,7 +146,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
         fn run(self: *Self) !void {
             while (self.i < self.source.len) {
-                const lt = std.mem.indexOfScalarPos(u8, self.source, self.i, '<') orelse self.source.len;
+                const lt = scanner.findBytePosOrEnd(self.source, self.i, '<');
                 if (lt > self.i and self.options.emit_text) try self.emitText(self.i, lt);
                 if (lt >= self.source.len) break;
                 self.i = lt;
@@ -190,7 +190,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 self.i = self.source.len;
                 return;
             };
-            const self_closing = scanner.isSelfClosingStartTag(self.source, tag.end, tag_end);
+            const self_closing = self.source[tag_end - 1] == '/' and scanner.isSelfClosingStartTag(self.source, tag.end, tag_end);
             const tag_name = self.source[tag.start..tag.end];
             const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
             const foreign_element = self.currentForeignContext() or tags.isSvgWithKey(tag_name, tag.key) or tags.isMathWithKey(tag_name, tag.key);
@@ -346,7 +346,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         fn parsePi(self: *Self) !void {
             const start = self.i;
             const content_start = self.i + 2;
-            const close = std.mem.indexOfScalarPos(u8, self.source, content_start, '>') orelse self.source.len;
+            const close = scanner.findBytePosOrEnd(self.source, content_start, '>');
             const value_end = if (close > content_start and close < self.source.len and self.source[close - 1] == '?') close - 1 else close;
             const token_end = @min(close + 1, self.source.len);
             self.i = token_end;
@@ -491,12 +491,22 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn findTagEnd(self: *Self, start: usize) ?usize {
-            if (self.options.assume_no_gt_in_attribute_values) return std.mem.indexOfScalarPos(u8, self.source, start, '>');
+            if (self.options.assume_no_gt_in_attribute_values) {
+                const end = scanner.findBytePosOrEnd(self.source, start, '>');
+                return if (end == self.source.len) null else end;
+            }
+            return self.findTagEndQuoted(start);
+        }
+
+        noinline fn findTagEndQuoted(self: *Self, start: usize) ?usize {
             return scanner.findTagEnd(self.source, start);
         }
 
         fn findBangEnd(self: *Self, start: usize) usize {
-            if (self.options.assume_no_gt_in_attribute_values) return (std.mem.indexOfScalarPos(u8, self.source, start, '>') orelse (self.source.len - 1)) + 1;
+            if (self.options.assume_no_gt_in_attribute_values) {
+                const end = scanner.findBytePosOrEnd(self.source, start, '>');
+                return @min(end + 1, self.source.len);
+            }
             return if (scanner.findDeclarationEnd(self.source, start)) |end| end + 1 else self.source.len;
         }
 
@@ -516,7 +526,9 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             defer descendants.deinit(self.allocator);
 
             var i = start;
-            while (std.mem.indexOfScalarPos(u8, self.source, i, '<')) |lt| {
+            while (true) {
+                const lt = scanner.findBytePosOrEnd(self.source, i, '<');
+                if (lt == self.source.len) return self.source.len;
                 if (lt + 1 >= self.source.len) return self.source.len;
 
                 if (std.mem.startsWith(u8, self.source[lt..], "<!--")) {
@@ -530,7 +542,8 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 }
 
                 if (self.source[lt + 1] == '?') {
-                    i = (std.mem.indexOfScalarPos(u8, self.source, lt + 2, '>') orelse (self.source.len - 1)) + 1;
+                    const end = scanner.findBytePosOrEnd(self.source, lt + 2, '>');
+                    i = @min(end + 1, self.source.len);
                     continue;
                 }
 
@@ -558,7 +571,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     const child = self.scanTagName(lt + 1);
                     const end_pos = self.findTagEnd(child.end) orelse return self.source.len;
                     const child_name = self.source[child.start..child.end];
-                    const self_closing = scanner.isSelfClosingStartTag(self.source, child.end, end_pos);
+                    const self_closing = self.source[end_pos - 1] == '/' and scanner.isSelfClosingStartTag(self.source, child.end, end_pos);
                     const parent_foreign = skipForeignContext(root, descendants.items);
                     const child_foreign = parent_foreign or tags.isSvgWithKey(child_name, child.key) or tags.isMathWithKey(child_name, child.key);
 
