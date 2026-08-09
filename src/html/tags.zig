@@ -130,50 +130,6 @@ const KEY = struct {
     const MATH = litKey("math");
 };
 
-pub const OpenTagKind = enum(u8) { normal, void, text_only, plaintext, svg };
-
-/// Classifies parser-relevant start-tag behavior in one `(len,key)` dispatch.
-pub inline fn classifyOpenTag(name: []const u8, key: u64) OpenTagKind {
-    const first: u8 = @truncate(key);
-    return switch (name.len) {
-        2 => switch (first) {
-            'b' => if (key == KEY.BR) .void else .normal,
-            'h' => if (key == KEY.HR) .void else .normal,
-            else => .normal,
-        },
-        3 => switch (first) {
-            'c' => if (key == KEY.COL) .void else .normal,
-            'i' => if (key == KEY.IMG) .void else .normal,
-            's' => if (key == KEY.SVG) .svg else .normal,
-            'w' => if (key == KEY.WBR) .void else .normal,
-            else => .normal,
-        },
-        4 => switch (first) {
-            'a' => if (key == KEY.AREA) .void else .normal,
-            'b' => if (key == KEY.BASE) .void else .normal,
-            'l' => if (key == KEY.LINK) .void else .normal,
-            'm' => if (key == KEY.META) .void else .normal,
-            else => .normal,
-        },
-        5 => switch (first) {
-            'e' => if (key == KEY.EMBED) .void else .normal,
-            'i' => if (key == KEY.INPUT) .void else .normal,
-            'p' => if (key == KEY.PARAM) .void else .normal,
-            's' => if (key == KEY.STYLE) .text_only else .normal,
-            't' => if (key == KEY.TITLE) .text_only else if (key == KEY.TRACK) .void else .normal,
-            else => .normal,
-        },
-        6 => if (first == 's') switch (key) {
-            KEY.SCRIPT => .text_only,
-            KEY.SOURCE => .void,
-            else => .normal,
-        } else .normal,
-        8 => if (first == 't' and key == KEY.TEXTAREA) .text_only else .normal,
-        9 => if (first == 'p' and key == KEY.PLAINTEXT and std.ascii.toLower(name[8]) == 't') .plaintext else .normal,
-        else => .normal,
-    };
-}
-
 /// Fast void-tag check with caller-provided key.
 pub fn isVoidTagWithKey(name: []const u8, key: u64) bool {
     return switch (name.len) {
@@ -230,14 +186,25 @@ pub fn isPlainTextTagWithKey(name: []const u8, key: u64) bool {
     return name.len == 9 and key == KEY.PLAINTEXT and std.ascii.toLower(name[8]) == 't';
 }
 
-const implicit_p: u8 = 1 << 0;
-const implicit_li: u8 = 1 << 1;
-const implicit_dt_dd: u8 = 1 << 2;
-const implicit_tr: u8 = 1 << 3;
-const implicit_td_th: u8 = 1 << 4;
-const implicit_head: u8 = 1 << 5;
-const implicit_option: u8 = 1 << 6;
-const implicit_optgroup: u8 = 1 << 7;
+pub const ImplicitCloseMask = struct {
+    pub const p: u8 = 1 << 0;
+    pub const li: u8 = 1 << 1;
+    pub const dt_dd: u8 = 1 << 2;
+    pub const tr: u8 = 1 << 3;
+    pub const td_th: u8 = 1 << 4;
+    pub const head: u8 = 1 << 5;
+    pub const option: u8 = 1 << 6;
+    pub const optgroup: u8 = 1 << 7;
+};
+
+const implicit_p = ImplicitCloseMask.p;
+const implicit_li = ImplicitCloseMask.li;
+const implicit_dt_dd = ImplicitCloseMask.dt_dd;
+const implicit_tr = ImplicitCloseMask.tr;
+const implicit_td_th = ImplicitCloseMask.td_th;
+const implicit_head = ImplicitCloseMask.head;
+const implicit_option = ImplicitCloseMask.option;
+const implicit_optgroup = ImplicitCloseMask.optgroup;
 
 /// Returns the single active-source bit for an optional-end-tag source, or 0.
 pub inline fn implicitCloseSourceMask(tag_len: usize, key: u64) u8 {
@@ -261,28 +228,61 @@ pub inline fn implicitCloseSourceMask(tag_len: usize, key: u64) u8 {
 /// A parser can intersect this with its currently-open source mask and avoid
 /// any stack walk when no compatible source is open.
 pub inline fn implicitCloseTriggerMask(new_tag: []const u8, new_key: u64) u8 {
-    var mask: u8 = if (closesPWithKey(new_tag, new_key)) implicit_p else 0;
-    switch (new_tag.len) {
+    return switch (new_tag.len) {
+        1 => if (new_key == KEY.P) implicit_p else 0,
         2 => switch (new_key) {
-            KEY.LI => mask |= implicit_li,
-            KEY.DT, KEY.DD => mask |= implicit_dt_dd,
-            KEY.TR => mask |= implicit_tr,
-            KEY.TD, KEY.TH => mask |= implicit_td_th,
-            KEY.HR => mask |= implicit_option | implicit_optgroup,
-            else => {},
+            KEY.LI => implicit_p | implicit_li,
+            KEY.DT, KEY.DD => implicit_p | implicit_dt_dd,
+            KEY.TR => implicit_tr,
+            KEY.TD, KEY.TH => implicit_td_th,
+            KEY.HR => implicit_p | implicit_option | implicit_optgroup,
+            KEY.H1,
+            KEY.H2,
+            KEY.H3,
+            KEY.H4,
+            KEY.H5,
+            KEY.H6,
+            KEY.DL,
+            KEY.OL,
+            KEY.UL,
+            => implicit_p,
+            else => 0,
         },
-        4 => {
-            if (new_key == KEY.BODY) mask |= implicit_head;
+        3 => switch (new_key) {
+            KEY.DIV, KEY.NAV, KEY.PRE => implicit_p,
+            else => 0,
         },
-        6 => {
-            if (new_key == KEY.OPTION) mask |= implicit_option;
+        4 => switch (new_key) {
+            KEY.BODY => implicit_head,
+            KEY.FORM, KEY.MAIN, KEY.MENU => implicit_p,
+            else => 0,
         },
-        8 => {
-            if (new_key == KEY.OPTGROUP) mask |= implicit_option | implicit_optgroup;
+        5 => switch (new_key) {
+            KEY.ASIDE, KEY.TABLE => implicit_p,
+            else => 0,
         },
-        else => {},
-    }
-    return mask;
+        6 => switch (new_key) {
+            KEY.OPTION => implicit_option,
+            KEY.DIALOG, KEY.FIGURE, KEY.FOOTER, KEY.HEADER, KEY.HGROUP, KEY.SEARCH => implicit_p,
+            else => 0,
+        },
+        7 => switch (new_key) {
+            KEY.ADDRESS, KEY.ARTICLE, KEY.DETAILS, KEY.SECTION => implicit_p,
+            else => 0,
+        },
+        8 => switch (new_key) {
+            KEY.FIELDSET => implicit_p,
+            KEY.OPTGROUP => implicit_option | implicit_optgroup,
+            else => 0,
+        },
+        9 => if (new_key == KEY.PLAINTEXT and std.ascii.toLower(new_tag[8]) == 't') implicit_p else 0,
+        10 => switch (new_key) {
+            KEY.BLOCKQUOTE => if (std.ascii.toLower(new_tag[8]) == 't' and std.ascii.toLower(new_tag[9]) == 'e') implicit_p else 0,
+            KEY.FIGCAPTION => if (std.ascii.toLower(new_tag[8]) == 'o' and std.ascii.toLower(new_tag[9]) == 'n') implicit_p else 0,
+            else => 0,
+        },
+        else => 0,
+    };
 }
 
 /// Returns true when `open_tag_len`/`open_key` represent an optional-close source tag.
@@ -298,7 +298,7 @@ pub fn shouldImplicitlyCloseWithKeys(open_tag: []const u8, open_key: u64, new_ta
 /// Optional-close predicate with caller-provided open-tag length.
 pub fn shouldImplicitlyCloseWithLenAndKey(open_tag_len: usize, open_key: u64, new_tag: []const u8, new_key: u64) bool {
     return switch (open_tag_len) {
-        1 => open_key == KEY.P and closesPWithKey(new_tag, new_key),
+        1 => open_key == KEY.P and (implicitCloseTriggerMask(new_tag, new_key) & implicit_p != 0),
         2 => switch (open_key) {
             KEY.LI => new_key == KEY.LI,
             KEY.DT, KEY.DD => new_key == KEY.DT or new_key == KEY.DD,
@@ -373,78 +373,6 @@ fn isRegularScopeBoundary(tag_len: usize, key: u64) bool {
         6 => key == KEY.APPLET or key == KEY.OBJECT,
         7 => key == KEY.CAPTION or key == KEY.MARQUEE,
         8 => key == KEY.TEMPLATE,
-        else => false,
-    };
-}
-
-fn closesPWithKey(new_tag: []const u8, new_key: u64) bool {
-    return switch (new_tag.len) {
-        1 => new_key == KEY.P,
-        2 => switch (new_key) {
-            KEY.LI,
-            KEY.DT,
-            KEY.DD,
-            KEY.HR,
-            KEY.H1,
-            KEY.H2,
-            KEY.H3,
-            KEY.H4,
-            KEY.H5,
-            KEY.H6,
-            KEY.DL,
-            KEY.OL,
-            KEY.UL,
-            => true,
-            else => false,
-        },
-        3 => switch (new_key) {
-            KEY.DIV,
-            KEY.NAV,
-            KEY.PRE,
-            => true,
-            else => false,
-        },
-        4 => switch (new_key) {
-            KEY.FORM,
-            KEY.MAIN,
-            KEY.MENU,
-            => true,
-            else => false,
-        },
-        5 => switch (new_key) {
-            KEY.ASIDE,
-            KEY.TABLE,
-            => true,
-            else => false,
-        },
-        6 => switch (new_key) {
-            KEY.DIALOG,
-            KEY.FIGURE,
-            KEY.FOOTER,
-            KEY.HEADER,
-            KEY.HGROUP,
-            KEY.SEARCH,
-            => true,
-            else => false,
-        },
-        7 => switch (new_key) {
-            KEY.ADDRESS,
-            KEY.ARTICLE,
-            KEY.DETAILS,
-            KEY.SECTION,
-            => true,
-            else => false,
-        },
-        8 => switch (new_key) {
-            KEY.FIELDSET => true,
-            else => false,
-        },
-        9 => new_key == KEY.PLAINTEXT and std.ascii.toLower(new_tag[8]) == 't',
-        10 => switch (new_key) {
-            KEY.BLOCKQUOTE => std.ascii.toLower(new_tag[8]) == 't' and std.ascii.toLower(new_tag[9]) == 'e',
-            KEY.FIGCAPTION => std.ascii.toLower(new_tag[8]) == 'o' and std.ascii.toLower(new_tag[9]) == 'n',
-            else => false,
-        },
         else => false,
     };
 }

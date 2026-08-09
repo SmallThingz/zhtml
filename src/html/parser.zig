@@ -67,7 +67,7 @@ fn ParseState(comptime opts: ParseOptions) type {
         parse_stack_heap_owned: bool = false,
         /// Optional-end-tag source classes currently present on the open stack.
         implicit_source_mask: u8 = 0,
-        implicit_source_duplicates: u8 = 0,
+        implicit_source_counts: [8]IndexInt = .{0} ** 8,
         /// Malformed-close index exists only after a deep full-stack miss.
         tag_index: ?*open_tag_index.LiveIndex(OpenElem) = null,
 
@@ -80,14 +80,103 @@ fn ParseState(comptime opts: ParseOptions) type {
             idx: IndexInt,
             /// Last direct element child only when sibling/child links are persisted.
             last_child: if (opts.store_last_child or opts.store_prev_sibling) IndexInt else void = if (opts.store_last_child or opts.store_prev_sibling) InvalidIndex else {},
-            /// Optional-close source class cached in struct padding.
+            /// Optional-close source class and scope boundary bits live in
+            /// otherwise-unused struct padding on the hot open stack.
             implicit_source: u8 = 0,
+            implicit_boundary: u8 = 0,
 
             pub inline fn keyValue(self: *const @This()) u64 {
                 return self.tag_key;
             }
         };
         const TagNameScan = scanner.TagName;
+        const TagKind = enum(u8) { normal, void, text_only, plaintext, svg };
+        const TagMeta = struct {
+            kind: TagKind = .normal,
+            source: u8 = 0,
+            trigger: u8 = 0,
+            boundary: u8 = 0,
+        };
+        const ImplicitBoundary = struct {
+            const regular: u8 = 1 << 0;
+            const button: u8 = 1 << 1;
+            const list_item: u8 = 1 << 2;
+            const table: u8 = 1 << 3;
+            const select: u8 = 1 << 4;
+        };
+
+        const ParserKey = struct {
+            const ADDRESS = tags.first8KeyWithMode("address", false);
+            const APPLET = tags.first8KeyWithMode("applet", false);
+            const AREA = tags.first8KeyWithMode("area", false);
+            const ARTICLE = tags.first8KeyWithMode("article", false);
+            const ASIDE = tags.first8KeyWithMode("aside", false);
+            const BASE = tags.first8KeyWithMode("base", false);
+            const BLOCKQUOTE = tags.first8KeyWithMode("blockquote", false);
+            const BODY = tags.first8KeyWithMode("body", false);
+            const BR = tags.first8KeyWithMode("br", false);
+            const BUTTON = tags.first8KeyWithMode("button", false);
+            const CAPTION = tags.first8KeyWithMode("caption", false);
+            const COL = tags.first8KeyWithMode("col", false);
+            const DATALIST = tags.first8KeyWithMode("datalist", false);
+            const DD = tags.first8KeyWithMode("dd", false);
+            const DETAILS = tags.first8KeyWithMode("details", false);
+            const DIALOG = tags.first8KeyWithMode("dialog", false);
+            const DIV = tags.first8KeyWithMode("div", false);
+            const DL = tags.first8KeyWithMode("dl", false);
+            const DT = tags.first8KeyWithMode("dt", false);
+            const EMBED = tags.first8KeyWithMode("embed", false);
+            const FIELDSET = tags.first8KeyWithMode("fieldset", false);
+            const FIGCAPTION = tags.first8KeyWithMode("figcaption", false);
+            const FIGURE = tags.first8KeyWithMode("figure", false);
+            const FOOTER = tags.first8KeyWithMode("footer", false);
+            const FORM = tags.first8KeyWithMode("form", false);
+            const H1 = tags.first8KeyWithMode("h1", false);
+            const H2 = tags.first8KeyWithMode("h2", false);
+            const H3 = tags.first8KeyWithMode("h3", false);
+            const H4 = tags.first8KeyWithMode("h4", false);
+            const H5 = tags.first8KeyWithMode("h5", false);
+            const H6 = tags.first8KeyWithMode("h6", false);
+            const HEAD = tags.first8KeyWithMode("head", false);
+            const HEADER = tags.first8KeyWithMode("header", false);
+            const HGROUP = tags.first8KeyWithMode("hgroup", false);
+            const HR = tags.first8KeyWithMode("hr", false);
+            const HTML = tags.first8KeyWithMode("html", false);
+            const IMG = tags.first8KeyWithMode("img", false);
+            const INPUT = tags.first8KeyWithMode("input", false);
+            const LI = tags.first8KeyWithMode("li", false);
+            const LINK = tags.first8KeyWithMode("link", false);
+            const MAIN = tags.first8KeyWithMode("main", false);
+            const MARQUEE = tags.first8KeyWithMode("marquee", false);
+            const MENU = tags.first8KeyWithMode("menu", false);
+            const META = tags.first8KeyWithMode("meta", false);
+            const NAV = tags.first8KeyWithMode("nav", false);
+            const OBJECT = tags.first8KeyWithMode("object", false);
+            const OL = tags.first8KeyWithMode("ol", false);
+            const OPTGROUP = tags.first8KeyWithMode("optgroup", false);
+            const OPTION = tags.first8KeyWithMode("option", false);
+            const P = tags.first8KeyWithMode("p", false);
+            const PARAM = tags.first8KeyWithMode("param", false);
+            const PLAINTEXT = tags.first8KeyWithMode("plaintext", false);
+            const PRE = tags.first8KeyWithMode("pre", false);
+            const SCRIPT = tags.first8KeyWithMode("script", false);
+            const SEARCH = tags.first8KeyWithMode("search", false);
+            const SECTION = tags.first8KeyWithMode("section", false);
+            const SELECT = tags.first8KeyWithMode("select", false);
+            const SOURCE = tags.first8KeyWithMode("source", false);
+            const STYLE = tags.first8KeyWithMode("style", false);
+            const SVG = tags.first8KeyWithMode("svg", false);
+            const TABLE = tags.first8KeyWithMode("table", false);
+            const TD = tags.first8KeyWithMode("td", false);
+            const TEMPLATE = tags.first8KeyWithMode("template", false);
+            const TEXTAREA = tags.first8KeyWithMode("textarea", false);
+            const TH = tags.first8KeyWithMode("th", false);
+            const TITLE = tags.first8KeyWithMode("title", false);
+            const TR = tags.first8KeyWithMode("tr", false);
+            const TRACK = tags.first8KeyWithMode("track", false);
+            const UL = tags.first8KeyWithMode("ul", false);
+            const WBR = tags.first8KeyWithMode("wbr", false);
+        };
 
         /// Reserve capacities + add initial values to containers
         inline fn initContainers(noalias self: *Self) !void {
@@ -321,23 +410,95 @@ fn ParseState(comptime opts: ParseOptions) type {
                 }
             };
 
+            // Compute every parser-relevant start-tag property in one dispatch.
+            // Keeping this literal in the hot parser avoids reclassifying the same
+            // `(len,key)` for optional-close trigger, special kind, and source.
+            const M = tags.ImplicitCloseMask;
+            const B = ImplicitBoundary;
+            const K = ParserKey;
+            const tag_meta: TagMeta = switch (tag_name.len) {
+                1 => if (tag_name_key == K.P) .{ .source = M.p, .trigger = M.p } else .{},
+                2 => switch (tag_name_key) {
+                    K.BR => .{ .kind = .void },
+                    K.HR => .{ .kind = .void, .trigger = M.p | M.option | M.optgroup },
+                    K.LI => .{ .source = M.li, .trigger = M.p | M.li },
+                    K.DT, K.DD => .{ .source = M.dt_dd, .trigger = M.p | M.dt_dd },
+                    K.TR => .{ .source = M.tr, .trigger = M.tr },
+                    K.TD, K.TH => .{ .source = M.td_th, .trigger = M.td_th, .boundary = B.regular },
+                    K.OL, K.UL => .{ .trigger = M.p, .boundary = B.list_item },
+                    K.H1, K.H2, K.H3, K.H4, K.H5, K.H6, K.DL => .{ .trigger = M.p },
+                    else => .{},
+                },
+                3 => switch (tag_name_key) {
+                    K.COL, K.IMG, K.WBR => .{ .kind = .void },
+                    K.SVG => .{ .kind = .svg },
+                    K.DIV, K.NAV, K.PRE => .{ .trigger = M.p },
+                    else => .{},
+                },
+                4 => switch (tag_name_key) {
+                    K.AREA, K.BASE, K.LINK, K.META => .{ .kind = .void },
+                    K.HTML => .{ .boundary = B.regular | B.table },
+                    K.HEAD => .{ .source = M.head },
+                    K.BODY => .{ .trigger = M.head },
+                    K.FORM, K.MAIN, K.MENU => .{ .trigger = M.p },
+                    else => .{},
+                },
+                5 => switch (tag_name_key) {
+                    K.EMBED, K.INPUT, K.PARAM, K.TRACK => .{ .kind = .void },
+                    K.STYLE, K.TITLE => .{ .kind = .text_only },
+                    K.TABLE => .{ .trigger = M.p, .boundary = B.regular | B.table },
+                    K.ASIDE => .{ .trigger = M.p },
+                    else => .{},
+                },
+                6 => switch (tag_name_key) {
+                    K.SCRIPT => .{ .kind = .text_only },
+                    K.SOURCE => .{ .kind = .void },
+                    K.OPTION => .{ .source = M.option, .trigger = M.option },
+                    K.APPLET, K.OBJECT => .{ .boundary = B.regular },
+                    K.BUTTON => .{ .boundary = B.button },
+                    K.SELECT => .{ .boundary = B.select },
+                    K.DIALOG, K.FIGURE, K.FOOTER, K.HEADER, K.HGROUP, K.SEARCH => .{ .trigger = M.p },
+                    else => .{},
+                },
+                7 => switch (tag_name_key) {
+                    K.CAPTION, K.MARQUEE => .{ .boundary = B.regular },
+                    K.ADDRESS, K.ARTICLE, K.DETAILS, K.SECTION => .{ .trigger = M.p },
+                    else => .{},
+                },
+                8 => switch (tag_name_key) {
+                    K.TEXTAREA => .{ .kind = .text_only },
+                    K.FIELDSET => .{ .trigger = M.p },
+                    K.OPTGROUP => .{ .source = M.optgroup, .trigger = M.option | M.optgroup },
+                    K.TEMPLATE => .{ .boundary = B.regular | B.table },
+                    K.DATALIST => .{ .boundary = B.select },
+                    else => .{},
+                },
+                9 => if (tag_name_key == K.PLAINTEXT and std.ascii.toLower(tag_name[8]) == 't')
+                    .{ .kind = .plaintext, .trigger = M.p }
+                else
+                    .{},
+                10 => switch (tag_name_key) {
+                    K.BLOCKQUOTE => if (std.ascii.toLower(tag_name[8]) == 't' and std.ascii.toLower(tag_name[9]) == 'e') .{ .trigger = M.p } else .{},
+                    K.FIGCAPTION => if (std.ascii.toLower(tag_name[8]) == 'o' and std.ascii.toLower(tag_name[9]) == 'n') .{ .trigger = M.p } else .{},
+                    else => .{},
+                },
+                else => .{},
+            };
+
             // Resolve optional-close HTML elements before any special-content
             // branch so tags such as <plaintext> cannot remain nested in an open <p>.
-            if (self.implicit_source_mask != 0 and self.parse_stack.items.len > 1) {
-                const trigger_mask = tags.implicitCloseTriggerMask(tag_name, tag_name_key);
-                if (self.implicit_source_mask & trigger_mask != 0) {
-                    const top = self.parse_stack.items[self.parse_stack.items.len - 1];
-                    if (top.implicit_source & trigger_mask != 0) {
-                        const popped = self.popOpen(indexed);
-                        self.nodes.items[popped.idx].subtree_end = @intCast(self.nodes.items.len - 1);
-                        if (self.implicit_source_mask & trigger_mask != 0) self.applyImplicitClosures(trigger_mask, indexed);
-                    } else {
-                        self.applyImplicitClosures(trigger_mask, indexed);
-                    }
+            if (self.implicit_source_mask & tag_meta.trigger != 0 and self.parse_stack.items.len > 1) {
+                const top = self.parse_stack.items[self.parse_stack.items.len - 1];
+                if (top.implicit_source & tag_meta.trigger != 0) {
+                    const popped = self.popOpen(indexed);
+                    self.nodes.items[popped.idx].subtree_end = @intCast(self.nodes.items.len - 1);
+                    if (self.implicit_source_mask & tag_meta.trigger != 0) self.applyImplicitClosures(tag_meta.trigger, indexed);
+                } else {
+                    self.applyImplicitClosures(tag_meta.trigger, indexed);
                 }
             }
 
-            switch (tags.classifyOpenTag(tag_name, tag_name_key)) {
+            switch (tag_meta.kind) {
                 .svg => return self.handleSvgTag(name_start, name_end, attr_end),
                 .plaintext => return self.handlePlaintextTag(name_start, name_end),
                 .text_only => return self.handleTextOnlyTag(name_start, name_end, tag_name_key),
@@ -357,7 +518,8 @@ fn ParseState(comptime opts: ParseOptions) type {
                 .idx = @intCast(node_idx),
                 .tag_key = tag_name_key,
                 .last_child = if (comptime opts.store_last_child or opts.store_prev_sibling) InvalidIndex else {},
-                .implicit_source = tags.implicitCloseSourceMask(tag_name.len, tag_name_key),
+                .implicit_source = tag_meta.source,
+                .implicit_boundary = tag_meta.boundary,
             });
         }
 
@@ -413,19 +575,31 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         noinline fn applyImplicitClosures(noalias self: *Self, trigger_mask: u8, comptime indexed: bool) void {
+            const M = tags.ImplicitCloseMask;
+            const B = ImplicitBoundary;
+
             while (self.parse_stack.items.len > 1) {
                 var pos = self.parse_stack.items.len;
                 var found: ?usize = null;
-                var scope: tags.ImplicitCloseScope = .{};
+                var boundaries: u8 = 0;
                 while (pos > 1) {
                     pos -= 1;
                     const open = self.parse_stack.items[pos];
-                    const open_len = self.nodes.items[open.idx].name_or_text.len;
-                    if (open.implicit_source & trigger_mask != 0 and scope.permits(open_len, open.tag_key)) {
-                        found = pos;
-                        break;
+                    if (open.implicit_source & trigger_mask != 0) {
+                        const blockers: u8 = switch (open.implicit_source) {
+                            M.p => B.regular | B.button,
+                            M.li => B.regular | B.list_item,
+                            M.dt_dd, M.head => B.regular,
+                            M.tr, M.td_th => B.table,
+                            M.option, M.optgroup => B.select,
+                            else => 0,
+                        };
+                        if (boundaries & blockers == 0) {
+                            found = pos;
+                            break;
+                        }
                     }
-                    scope.observe(open_len, open.tag_key);
+                    boundaries |= open.implicit_boundary;
                 }
 
                 const found_pos = found orelse break;
@@ -441,35 +615,6 @@ fn ParseState(comptime opts: ParseOptions) type {
 
         inline fn deinitParseStack(noalias self: *Self) void {
             if (self.parse_stack_heap_owned) self.parse_stack.deinit(self.allocator);
-        }
-
-        inline fn addImplicitSource(noalias self: *Self, open: OpenElem) void {
-            const source = open.implicit_source;
-            if (source == 0) return;
-            if (self.implicit_source_mask & source != 0) self.implicit_source_duplicates |= source;
-            self.implicit_source_mask |= source;
-        }
-
-        inline fn removeImplicitSource(noalias self: *Self, open: OpenElem) void {
-            const source = open.implicit_source;
-            if (source == 0) return;
-            if (self.implicit_source_duplicates & source == 0) {
-                self.implicit_source_mask &= ~source;
-                return;
-            }
-            self.recountImplicitSource(source);
-        }
-
-        noinline fn recountImplicitSource(noalias self: *Self, source: u8) void {
-            @branchHint(.cold);
-            var seen: u2 = 0;
-            for (self.parse_stack.items[1..]) |item| {
-                if (item.implicit_source & source == 0) continue;
-                seen += 1;
-                if (seen == 2) return;
-            }
-            self.implicit_source_duplicates &= ~source;
-            if (seen == 0) self.implicit_source_mask &= ~source;
         }
 
         noinline fn growParseStack(noalias self: *Self) !void {
@@ -494,7 +639,10 @@ fn ParseState(comptime opts: ParseOptions) type {
                 try self.growParseStack();
             }
             self.parse_stack.appendAssumeCapacity(open);
-            self.addImplicitSource(open);
+            if (open.implicit_source != 0) {
+                self.implicit_source_counts[@ctz(open.implicit_source)] += 1;
+                self.implicit_source_mask |= open.implicit_source;
+            }
         }
 
         noinline fn pushOpenIndexed(noalias self: *Self, open: OpenElem) !void {
@@ -504,14 +652,21 @@ fn ParseState(comptime opts: ParseOptions) type {
             try index.preparePush(self.allocator, &open);
             self.parse_stack.appendAssumeCapacity(open);
             index.commitPush(&open, self.parse_stack.items.len);
-            self.addImplicitSource(open);
+            if (open.implicit_source != 0) {
+                self.implicit_source_counts[@ctz(open.implicit_source)] += 1;
+                self.implicit_source_mask |= open.implicit_source;
+            }
         }
 
         inline fn popOpen(noalias self: *Self, comptime indexed: bool) OpenElem {
             if (comptime indexed) return self.popOpenIndexed();
             const open = self.parse_stack.pop().?;
             std.debug.assert(open.idx != 0);
-            self.removeImplicitSource(open);
+            if (open.implicit_source != 0) {
+                const count = &self.implicit_source_counts[@ctz(open.implicit_source)];
+                count.* -= 1;
+                if (count.* == 0) self.implicit_source_mask &= ~open.implicit_source;
+            }
             return open;
         }
 
@@ -520,7 +675,11 @@ fn ParseState(comptime opts: ParseOptions) type {
             const stack_len = self.parse_stack.items.len;
             const open = self.parse_stack.pop().?;
             std.debug.assert(open.idx != 0);
-            self.removeImplicitSource(open);
+            if (open.implicit_source != 0) {
+                const count = &self.implicit_source_counts[@ctz(open.implicit_source)];
+                count.* -= 1;
+                if (count.* == 0) self.implicit_source_mask &= ~open.implicit_source;
+            }
             self.tag_index.?.pop(&open, stack_len);
             return open;
         }

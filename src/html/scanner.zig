@@ -56,36 +56,39 @@ pub inline fn scanTagName(source: []const u8, start: usize, comptime normalize_f
 pub inline fn findTagEnd(source: []const u8, start: usize) ?usize {
     if (start >= source.len) return null;
 
-    // Normal HTML attributes overwhelmingly use quoted values. Keep those on
-    // vectorized searches instead of restarting a byte-wise tokenizer at the
-    // first quote. Ambiguous/malformed quote placement falls back to the exact
-    // state machine below.
+    // The hot path scans only for `>` and `=`. Quotes matter to the tokenizer
+    // only when an `=` has actually begun a quoted attribute value; scanning
+    // for every quote doubles the number of candidates on ordinary HTML.
     var search = start;
-    while (std.mem.indexOfAnyPos(u8, source, search, ">\"'")) |special| {
-        const c = source[special];
-        if (c == '>') return special;
-        if (!quoteStartsAttributeValue(source, start, special)) return findTagEndSlow(source, start);
-        search = (std.mem.indexOfScalarPos(u8, source, special + 1, c) orelse return null) + 1;
+    while (std.mem.indexOfAnyPos(u8, source, search, ">=")) |special| {
+        if (source[special] == '>') return special;
+
+        var value_start = special + 1;
+        while (value_start < source.len and tables.WhitespaceTable[source[value_start]]) : (value_start += 1) {}
+        if (value_start >= source.len) return null;
+
+        const quote = source[value_start];
+        if (quote != '\'' and quote != '"') {
+            search = special + 1;
+            continue;
+        }
+
+        // A later '=' inside an unquoted value must not manufacture a quoted
+        // value (`a=x=">"`). Accept the common assignment shapes directly;
+        // ambiguous malformed input falls back to the exact tokenizer below.
+        if (!assignmentEqStartsAttributeValue(source, start, special)) return findTagEndSlow(source, start);
+        search = (std.mem.indexOfScalarPos(u8, source, value_start + 1, quote) orelse return null) + 1;
     }
     return null;
 }
 
-inline fn quoteStartsAttributeValue(source: []const u8, start: usize, quote: usize) bool {
-    var i = quote;
+inline fn assignmentEqStartsAttributeValue(source: []const u8, start: usize, eq: usize) bool {
+    var i = eq;
     while (i > start and tables.WhitespaceTable[source[i - 1]]) : (i -= 1) {}
-    if (i == start or source[i - 1] != '=') return false;
-
-    // Stay deliberately conservative: the fast path handles the overwhelmingly
-    // common `name="value"` shape. Whitespace before '=' and an earlier '=' in
-    // the same token are ambiguous tokenizer states and fall back to the exact
-    // scanner instead of guessing.
-    const eq = i - 1;
-    if (eq == start or tables.WhitespaceTable[source[eq - 1]] or !tables.AttrNameCharTable[source[eq - 1]]) return false;
-    i = eq - 1;
-    while (i > start and !tables.WhitespaceTable[source[i - 1]] and source[i - 1] != '/') : (i -= 1) {
-        if (source[i - 1] == '=') return false;
-    }
-    return true;
+    const name_end = i;
+    while (i > start and tables.AttrNameCharTable[source[i - 1]]) : (i -= 1) {}
+    if (i == name_end) return false;
+    return i == start or tables.WhitespaceTable[source[i - 1]] or source[i - 1] == '/';
 }
 
 fn findTagEndSlow(source: []const u8, start: usize) ?usize {
