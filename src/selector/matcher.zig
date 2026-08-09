@@ -103,7 +103,7 @@ pub fn matchesSelectorAtPrepared(
 ) !bool {
     if (node_index >= doc.nodes.len) return false;
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
-    var workspace = try MatchWorkspace.initPrepared(doc.allocator, selector, plan);
+    var workspace = MatchWorkspace.initPrepared(doc.allocator, selector, plan);
     defer workspace.deinit();
     return try matchesSelectorAtWithWorkspace(Doc, doc, selector, node_index, scope_root, &workspace);
 }
@@ -112,7 +112,7 @@ pub fn matchesSelectorAtWithWorkspace(comptime Doc: type, noalias doc: *const Do
     if (node_index >= doc.nodes.len) return false;
     if (scope_root != InvalidIndex and scope_root >= doc.nodes.len) return false;
     if (!doc.nodes[node_index].isElement(node_index)) return false;
-    workspace.prepare(selector, scope_root, @intFromPtr(doc), doc.generation);
+    workspace.prepareTopology(@intFromPtr(doc), doc.generation);
 
     var reverse_needed = false;
     for (selector.groups) |group| {
@@ -159,7 +159,7 @@ fn groupRightmostCouldMatch(comptime Doc: type, doc: *const Doc, selector: ast.S
 /// Used once when seeding a scoped forward query from ancestors outside its scan.
 pub fn matchesPrefixAt(comptime Doc: type, noalias doc: *const Doc, selector: ast.Selector, group: ast.Group, prefix_len: usize, node_index: IndexInt, workspace: *MatchWorkspace) !bool {
     if (prefix_len == 0 or prefix_len > group.compound_len or node_index >= doc.nodes.len) return false;
-    workspace.prepare(selector, InvalidIndex, @intFromPtr(doc), doc.generation);
+    workspace.prepareTopology(@intFromPtr(doc), doc.generation);
     const partial: ast.Group = .{
         .compound_start = group.compound_start,
         .compound_len = @intCast(prefix_len),
@@ -336,9 +336,8 @@ pub const MatchWorkspace = struct {
     reverse_word_count: usize = 0,
     reverse_scratch_ready: bool = false,
     stats: MatchStats = .{},
-    prepared_scope: IndexInt = InvalidIndex,
-    prepared_doc: usize = 0,
-    prepared_generation: u64 = 0,
+    topology_doc: usize = 0,
+    topology_generation: u64 = 0,
     reverse_selector_id: u64 = 0,
     reverse_source: usize = 0,
     reverse_compounds: usize = 0,
@@ -347,9 +346,8 @@ pub const MatchWorkspace = struct {
         return .{ .allocator = allocator };
     }
 
-    pub fn initPrepared(allocator: std.mem.Allocator, selector: ast.Selector, plan: *const execution_plan.Plan) !@This() {
+    pub fn initPrepared(allocator: std.mem.Allocator, selector: ast.Selector, plan: *const execution_plan.Plan) @This() {
         var self = init(allocator);
-        errdefer self.deinit();
         self.execution_plan = plan.*;
         self.owns_execution_plan = false;
         self.setReverseSelectorIdentity(selector);
@@ -380,13 +378,10 @@ pub const MatchWorkspace = struct {
         self.reverse_cells = .empty;
     }
 
-    fn prepare(self: *@This(), _: ast.Selector, scope_root: IndexInt, doc_id: usize, generation: u64) void {
-        if (self.prepared_scope == scope_root and
-            self.prepared_doc == doc_id and
-            self.prepared_generation == generation) return;
-        self.prepared_scope = scope_root;
-        self.prepared_doc = doc_id;
-        self.prepared_generation = generation;
+    fn prepareTopology(self: *@This(), doc_id: usize, generation: u64) void {
+        if (self.topology_doc == doc_id and self.topology_generation == generation) return;
+        self.topology_doc = doc_id;
+        self.topology_generation = generation;
         self.topology_prev.clearRetainingCapacity();
     }
 
@@ -1198,4 +1193,28 @@ test "matcher direct selector entry points handle attrs classes pseudos and not"
     try std.testing.expect(try matchesSelectorAt(@TypeOf(doc), &doc, sel, 2, InvalidIndex));
     try std.testing.expect(!try matchesSelectorAt(@TypeOf(doc), &doc, sel, 4, InvalidIndex));
     try std.testing.expect(!try matchesSelectorAt(@TypeOf(doc), &doc, sel, @intCast(doc.nodes.len), InvalidIndex));
+}
+
+test "RTL sibling topology survives scope changes within one workspace" {
+    const html = @import("../html/document.zig");
+    const alloc = std.testing.allocator;
+    var input = "<div><a></a><x></x><b></b></div>".*;
+    const opts: html.ParseOptions = .{};
+    var doc = try opts.parse(alloc, &input);
+    defer doc.deinit();
+
+    var selector = try ast.Selector.compileRuntime(alloc, "a ~ b");
+    defer selector.deinit(alloc);
+    var workspace = MatchWorkspace.init(alloc);
+    defer workspace.deinit();
+
+    const target: IndexInt = 4;
+    try std.testing.expect(try matchesSelectorAtWithWorkspace(@TypeOf(doc), &doc, selector, target, InvalidIndex, &workspace));
+    try std.testing.expectEqual(@as(usize, 1), workspace.stats.topology_parent_builds);
+
+    // Scope affects selector anchoring, not the document's previous-sibling
+    // topology. A scope change must therefore reuse the already-built parent
+    // topology rather than scan the same siblings again.
+    try std.testing.expect(try matchesSelectorAtWithWorkspace(@TypeOf(doc), &doc, selector, target, 1, &workspace));
+    try std.testing.expectEqual(@as(usize, 1), workspace.stats.topology_parent_builds);
 }

@@ -3514,6 +3514,109 @@ test "random selector differential agrees across reference forward dynamic and R
     }
 }
 
+test "wide fixed-word and generic boundaries preserve descendant-chain semantics" {
+    const alloc = std.testing.allocator;
+    const depth: usize = 260;
+
+    var html_writer: std.Io.Writer.Allocating = .init(alloc);
+    defer html_writer.deinit();
+    for (0..depth) |_| try html_writer.writer.writeAll("<div>");
+    for (0..depth) |_| try html_writer.writer.writeAll("</div>");
+    const html = try html_writer.toOwnedSlice();
+    defer alloc.free(html);
+
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    try resetParsed(.{}, &doc, html);
+
+    const counts = [_]usize{ 65, 128, 192, 256, 257 };
+    for (counts) |compound_count| {
+        var source = std.ArrayList(u8).empty;
+        defer source.deinit(alloc);
+        for (0..compound_count) |i| {
+            if (i != 0) try source.append(alloc, ' ');
+            try source.appendSlice(alloc, "div");
+        }
+
+        var selector = try ast.Selector.compileRuntime(alloc, source.items);
+        defer selector.deinit(alloc);
+        var prepared = try prepared_selector.PreparedSelector.compile(alloc, source.items);
+        defer prepared.deinit();
+
+        var runtime_it = doc.queryRuntime(selector);
+        defer runtime_it.deinit();
+        var prepared_it = doc.queryPrepared(&prepared);
+        defer prepared_it.deinit();
+        var runtime_count: usize = 0;
+        var prepared_count: usize = 0;
+        while (try runtime_it.next()) |_| runtime_count += 1;
+        while (try prepared_it.next()) |_| prepared_count += 1;
+
+        const expected = depth - compound_count + 1;
+        try std.testing.expectEqual(expected, runtime_count);
+        try std.testing.expectEqual(expected, prepared_count);
+    }
+}
+
+test "wide relation transitions cross the 63-to-64 word boundary" {
+    const alloc = std.testing.allocator;
+    const Doc = GetDocument(.{});
+    const Case = struct {
+        combinator: []const u8,
+        html: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .combinator = " ", .html = "<a><x><b id=target></b></x></a>" },
+        .{ .combinator = " > ", .html = "<a><b id=target></b></a>" },
+        .{ .combinator = " + ", .html = "<div><a></a><b id=target></b></div>" },
+        .{ .combinator = " ~ ", .html = "<div><a></a><x></x><b id=target></b></div>" },
+    };
+
+    for (cases) |case| {
+        const html = try alloc.dupe(u8, case.html);
+        defer alloc.free(html);
+        var doc = Doc.init(alloc);
+        defer doc.deinit();
+        try resetParsed(.{}, &doc, html);
+        const target = (firstQuery(doc.query("#target")) orelse return error.TestUnexpectedResult).index;
+
+        // The first group occupies states 0..62. The `a` in the second group
+        // lands at state 63, so its transition to `b#target` must carry from
+        // word 0 into bit 0 of word 1 for every structural relation.
+        var source = std.ArrayList(u8).empty;
+        defer source.deinit(alloc);
+        for (0..63) |i| {
+            if (i != 0) try source.append(alloc, ' ');
+            try source.appendSlice(alloc, "zz");
+        }
+        try source.appendSlice(alloc, ", a");
+        try source.appendSlice(alloc, case.combinator);
+        try source.appendSlice(alloc, "b#target");
+
+        var selector = try ast.Selector.compileRuntime(alloc, source.items);
+        defer selector.deinit(alloc);
+        var prepared = try prepared_selector.PreparedSelector.compile(alloc, source.items);
+        defer prepared.deinit();
+        try std.testing.expectEqual(@as(usize, 65), prepared.execution_plan.state_count);
+        try std.testing.expectEqual(@as(usize, 2), prepared.execution_plan.word_count);
+
+        var runtime_it = doc.queryRuntime(selector);
+        defer runtime_it.deinit();
+        const runtime_match = (try runtime_it.next()) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(target, runtime_match.index);
+        try std.testing.expect((try runtime_it.next()) == null);
+
+        var prepared_it = doc.queryPrepared(&prepared);
+        defer prepared_it.deinit();
+        const prepared_match = (try prepared_it.next()) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(target, prepared_match.index);
+        try std.testing.expect((try prepared_it.next()) == null);
+
+        try std.testing.expect(try matcher.matchesSelectorAt(Doc, &doc, selector, target, 0));
+        try std.testing.expect(try doc.nodeAt(target).matchesPrepared(&prepared));
+    }
+}
+
 test "forward iterator preserves sibling and ancestry state across yields" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);
@@ -4502,6 +4605,68 @@ test "chunked escaping preserves large sparse attribute and text spans" {
     try doc.writeHtml(&counter, .force);
     try std.testing.expectEqual(expected.len, counter.bytes);
     try std.testing.expect(counter.calls < 64);
+}
+
+test "prepared wide query keeps borrowed plan valid across every scratch allocation failure" {
+    const alloc = std.testing.allocator;
+    const Doc = GetDocument(.{});
+
+    var selector_source = std.ArrayList(u8).empty;
+    defer selector_source.deinit(alloc);
+    for (0..65) |i| {
+        if (i != 0) try selector_source.append(alloc, ' ');
+        try selector_source.appendSlice(alloc, "div");
+    }
+    var prepared = try prepared_selector.PreparedSelector.compile(alloc, selector_source.items);
+    defer prepared.deinit();
+
+    var doc = Doc.init(alloc);
+    defer doc.deinit();
+    var html = "<div></div>".*;
+    try resetParsed(.{}, &doc, &html);
+
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator, original: *const Doc, program: *const prepared_selector.PreparedSelector) !void {
+            var local_doc = original.*;
+            local_doc.allocator = allocator;
+            var it = local_doc.queryPrepared(program);
+            defer it.deinit();
+            try std.testing.expect((try it.next()) == null);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(alloc, Case.run, .{ &doc, &prepared });
+
+    // Fault-injection runs must never consume or deinitialize the borrowed plan.
+    try std.testing.expect(prepared.execution_plan.state_count != 0);
+    var final_it = doc.queryPrepared(&prepared);
+    defer final_it.deinit();
+    try std.testing.expect((try final_it.next()) == null);
+}
+
+test "prepared point matching keeps borrowed plan valid across every scratch allocation failure" {
+    const alloc = std.testing.allocator;
+    const Doc = GetDocument(.{});
+
+    var doc = Doc.init(alloc);
+    defer doc.deinit();
+    var html = "<main><div class=a><div><span></span></div></div></main>".*;
+    try resetParsed(.{}, &doc, &html);
+    var prepared = try prepared_selector.PreparedSelector.compile(alloc, ".missing div span");
+    defer prepared.deinit();
+    const target: IndexInt = 4;
+
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator, original: *const Doc, program: *const prepared_selector.PreparedSelector, node: IndexInt) !void {
+            var local_doc = original.*;
+            local_doc.allocator = allocator;
+            const wrapped = local_doc.nodeAt(node);
+            try std.testing.expect(!try wrapped.matchesPrepared(program));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(alloc, Case.run, .{ &doc, &prepared, target });
+
+    try std.testing.expect(prepared.execution_plan.state_count != 0);
+    try std.testing.expect(!try doc.nodeAt(target).matchesPrepared(&prepared));
 }
 
 test "prepared wide selector matches runtime query for document and scope" {

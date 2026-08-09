@@ -28,15 +28,12 @@ pub const Mask = enum(usize) {
 pub const MaskCount = @typeInfo(Mask).@"enum".fields.len;
 
 pub const StatefulGroup = struct {
-    ast_group_index: IndexInt,
     compound_start: IndexInt,
     compound_len: IndexInt,
     state_start: usize,
-    has_existential: bool,
 };
 
 pub const SimpleGroup = struct {
-    ast_group_index: IndexInt,
     compound: IndexInt,
 };
 
@@ -115,8 +112,6 @@ pub const Plan = struct {
     state_count: usize = 0,
     word_count: usize = 0,
     needs_child_position: bool = false,
-    needs_last_child: bool = false,
-    needs_attributes: bool = false,
     has_tag_constraints: bool = false,
     filter_state_tags: bool = false,
 
@@ -233,7 +228,6 @@ pub const Plan = struct {
             if (group.compound_len == 0) continue;
             if (group.compound_len == 1) {
                 self.simple_groups[simple_index] = .{
-                    .ast_group_index = @intCast(group_index),
                     .compound = group.compound_start,
                 };
                 simple_index += 1;
@@ -241,7 +235,6 @@ pub const Plan = struct {
             }
 
             const state_start = next_state;
-            var existential = false;
             var rel: IndexInt = 0;
             while (rel < group.compound_len) : (rel += 1) {
                 const absolute = group.compound_start + rel;
@@ -266,25 +259,17 @@ pub const Plan = struct {
                     }
                 } else switch (comp.combinator) {
                     .child => setBit(self.maskMut(.child_targets), state),
-                    .descendant => {
-                        setBit(self.maskMut(.descendant_targets), state);
-                        existential = true;
-                    },
+                    .descendant => setBit(self.maskMut(.descendant_targets), state),
                     .adjacent => setBit(self.maskMut(.adjacent_targets), state),
-                    .sibling => {
-                        setBit(self.maskMut(.sibling_targets), state);
-                        existential = true;
-                    },
+                    .sibling => setBit(self.maskMut(.sibling_targets), state),
                     .none => {},
                 }
             }
 
             self.stateful_groups[stateful_index] = .{
-                .ast_group_index = @intCast(group_index),
                 .compound_start = group.compound_start,
                 .compound_len = group.compound_len,
                 .state_start = state_start,
-                .has_existential = existential,
             };
             stateful_index += 1;
         }
@@ -519,12 +504,11 @@ fn inspectFeatures(selector: ast.Selector, group: ast.Group, plan: *Plan) void {
     while (rel < group.compound_len) : (rel += 1) {
         const comp = selector.compounds[group.compound_start + rel];
         plan.has_tag_constraints = plan.has_tag_constraints or comp.hasTag();
-        plan.needs_attributes = plan.needs_attributes or comp.hasId() or comp.class_len != 0 or comp.attr_len != 0 or comp.not_len != 0;
         var i: IndexInt = 0;
         while (i < comp.pseudo_len) : (i += 1) {
             switch (selector.pseudos[comp.pseudo_start + i].kind) {
                 .first_child, .nth_child => plan.needs_child_position = true,
-                .last_child => plan.needs_last_child = true,
+                .last_child => {},
             }
         }
     }

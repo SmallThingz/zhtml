@@ -47,3 +47,19 @@ test "prepared selector owns selector and execution plan" {
     try std.testing.expectEqualStrings("main div > span.x", prepared.selector.source);
     try std.testing.expect(prepared.execution_plan.state_count != 0);
 }
+
+test "prepared selector cleans up every partial allocation failure" {
+    const alloc = std.testing.allocator;
+    const source =
+        "div div div div div div div div, " ++
+        "x0, x1, x2, x3, x4, x5, x6, x7, " ++
+        ".a0, .a1, .a2, .a3, .a4, .a5, .a6, .a7";
+
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator, selector_source: []const u8) !void {
+            var prepared = try PreparedSelector.compile(allocator, selector_source);
+            defer prepared.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(alloc, Case.run, .{source});
+}
