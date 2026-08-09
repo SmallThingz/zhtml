@@ -91,10 +91,11 @@ pub const Parser = struct {
             !self.options.emit_end_tags and
             !self.options.include_comments and
             !self.options.include_doctype and
-            !self.options.include_processing_instructions)
+            !self.options.include_processing_instructions and
+            !self.options.track_nesting and
+            self.options.assume_no_gt_in_attribute_values)
         {
-            // No event kind is enabled: nothing to scan or emit, and no parser
-            // state to construct.
+            scanOnly(source);
             return;
         }
 
@@ -113,6 +114,104 @@ pub const Parser = struct {
 
 pub fn parse(allocator: std.mem.Allocator, source: []const u8, ctx: anytype, comptime callback: anytype) !void {
     try (Parser{}).parse(allocator, source, ctx, callback);
+}
+
+fn scanOnly(source: []const u8) void {
+    var i: usize = 0;
+    while (i < source.len) {
+        if (source[i] != '<') {
+            i = findLtScanOnly(source, i);
+            if (i >= source.len) break;
+        }
+
+        const lt = i;
+        if (lt + 1 >= source.len) break;
+
+        switch (source[lt + 1]) {
+            '/' => i = findGtScanOnly(source, lt + 2),
+            '!' => {
+                if (lt + 3 < source.len and source[lt + 2] == '-' and source[lt + 3] == '-') {
+                    i = if (std.mem.indexOfPos(u8, source, lt + 4, "-->")) |end| end + 3 else source.len;
+                } else {
+                    i = findGtScanOnly(source, lt + 2);
+                }
+            },
+            '?' => i = findGtScanOnly(source, lt + 2),
+            else => |c| {
+                if (!tables.TagNameCharTable[c]) {
+                    i = lt + 1;
+                    continue;
+                }
+                i = (std.mem.indexOfScalarPos(u8, source, lt + 2, '>') orelse (source.len - 1)) + 1;
+
+                const lower = std.ascii.toLower(c);
+                if (lower != 's' and lower != 't' and lower != 'p') continue;
+                if (lower == 's' and
+                    !scanOnlyStartsWithIgnoreCase(source, lt + 1, "script") and
+                    !scanOnlyStartsWithIgnoreCase(source, lt + 1, "style")) continue;
+                if (lower == 't' and
+                    !scanOnlyStartsWithIgnoreCase(source, lt + 1, "title") and
+                    !scanOnlyStartsWithIgnoreCase(source, lt + 1, "textarea")) continue;
+                if (lower == 'p' and !scanOnlyStartsWithIgnoreCase(source, lt + 1, "plaintext")) continue;
+
+                const tag = scanner.scanTagName(source, lt + 1, false);
+                const name = source[tag.start..tag.end];
+                if (lower == 'p' and tags.isPlainTextTagWithKey(name, tag.key)) break;
+                if ((lower == 's' or lower == 't') and tags.isTextOnlyTagWithKey(name, tag.key)) {
+                    if (scanOnlyFindRawTextClose(source, name, tag.key, i)) |close| {
+                        i = close.close_end;
+                    } else {
+                        break;
+                    }
+                }
+            },
+        }
+    }
+    std.mem.doNotOptimizeAway(i);
+}
+
+inline fn scanOnlyStartsWithIgnoreCase(source: []const u8, start: usize, comptime needle: []const u8) bool {
+    if (start + needle.len > source.len) return false;
+    inline for (needle, 0..) |want, off| {
+        if (std.ascii.toLower(source[start + off]) != want) return false;
+    }
+    return true;
+}
+
+fn findLtScanOnly(source: []const u8, start: usize) usize {
+    var i = start;
+    const limit = @min(start + 32, source.len);
+    while (i < limit) : (i += 1) {
+        if (source[i] == '<') return i;
+    }
+    return std.mem.indexOfScalarPos(u8, source, i, '<') orelse source.len;
+}
+
+fn findGtScanOnly(source: []const u8, start: usize) usize {
+    var i = start;
+    const limit = @min(start + 32, source.len);
+    while (i < limit) : (i += 1) {
+        if (source[i] == '>') return i + 1;
+    }
+    return (std.mem.indexOfScalarPos(u8, source, i, '>') orelse (source.len - 1)) + 1;
+}
+
+fn scanOnlyFindRawTextClose(source: []const u8, name: []const u8, key: u64, start: usize) ?RawClose {
+    if (name.len == 0) return null;
+    var search = start;
+    const first = std.ascii.toLower(name[0]);
+    while (std.mem.indexOfScalarPos(u8, source, search, '<')) |lt| {
+        search = lt + 1;
+        if (lt + 2 >= source.len or source[lt + 1] != '/' or std.ascii.toLower(source[lt + 2]) != first) continue;
+
+        const close = scanner.scanTagName(source, lt + 2, false);
+        if (!tags.equalByLenAndKeyIgnoreCase(source[close.start..close.end], close.key, name, key)) continue;
+        if (close.end >= source.len) return null;
+        const delimiter = source[close.end];
+        if (delimiter != '>' and delimiter != '/' and !tables.WhitespaceTable[delimiter]) continue;
+        return .{ .content_end = lt, .close_start = lt, .close_end = findGtScanOnly(source, close.end) };
+    }
+    return null;
 }
 
 const OpenTag = struct {

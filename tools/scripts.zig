@@ -172,6 +172,51 @@ fn pathExists(io: std.Io, path: []const u8) bool {
     return common.fileExists(io, path);
 }
 
+const SyntheticFixture = struct {
+    name: []const u8,
+    unit: []const u8,
+};
+
+const synthetic_fixtures = [_]SyntheticFixture{
+    .{ .name = "synthetic-forms.html", .unit = "<form action=/submit method=post><fieldset><legend>Account</legend><label>Name <input name=name required></label><label>Email <input type=email name=email></label><select name=plan><option>Free</option><option selected>Pro</option></select><textarea name=notes>hello &amp; goodbye</textarea><button>Save</button></fieldset></form>" },
+    .{ .name = "synthetic-table-grid.html", .unit = "<table><caption>Quarterly results</caption><thead><tr><th>Region</th><th>Sales</th><th>Growth</th></tr></thead><tbody><tr><th>North</th><td>12,345</td><td>8%</td></tr><tr><th>South</th><td>9,876</td><td>11%</td></tr></tbody></table>" },
+    .{ .name = "synthetic-list-nested.html", .unit = "<nav><ul><li><a href=#one>One</a><ul><li>Alpha</li><li>Beta<ol><li>First</li><li>Second</li></ol></li></ul></li><li><a href=#two>Two</a></li><li><a href=#three>Three</a></li></ul></nav>" },
+    .{ .name = "synthetic-comments-doctype.html", .unit = "<!-- card boundary; fake markup: </section> --><section data-kind=card><h2>Title</h2><!-- body begins --><p>Text &amp; entities &#169; with <em>markup</em>.</p><!-- body ends --></section>" },
+    .{ .name = "synthetic-template-rich.html", .unit = "<template id=card><article class=card><header><slot name=title>Untitled</slot></header><div class=body><slot></slot></div><footer><button type=button>Close</button></footer></article></template>" },
+    .{ .name = "synthetic-whitespace-noise.html", .unit = "  \n\t<section   class = \"noisy block\" data-value = 'a > b' >\n    <h2>  Heading  </h2>\n\t<p> Text with     irregular   spacing. </p>\n  </section>\n" },
+    .{ .name = "synthetic-news-feed.html", .unit = "<article class=story><header><h2><a href=/story>Breaking headline</a></h2><time datetime=2025-01-02>2 January</time></header><p>A concise summary with <strong>important</strong> context.</p><footer><a href=/author>Reporter</a><span>42 comments</span></footer></article>" },
+    .{ .name = "synthetic-ecommerce.html", .unit = "<article class=product data-sku=ABC-123><a href=/product><img src=/image.webp alt=Product loading=lazy><h2>Useful Product</h2></a><p class=price><del>$99.00</del><ins>$79.00</ins></p><form><label>Quantity <input type=number min=1 value=1></label><button>Add to cart</button></form></article>" },
+    .{ .name = "synthetic-forum-thread.html", .unit = "<article class=post><aside><a href=/user><img src=/avatar.png alt='User avatar'></a><span class=role>member</span></aside><div class=content><header><a href=#post>Posted just now</a></header><blockquote>Previous message</blockquote><p>Reply text with <code>inline_code()</code>.</p></div></article>" },
+};
+
+fn setupSyntheticFixtures(io: std.Io, alloc: std.mem.Allocator, refresh: bool) !void {
+    const repeat_count = 1024;
+    const prefix = "<!doctype html><html><head><meta charset=utf-8><title>Benchmark fixture</title></head><body>";
+    const suffix = "</body></html>";
+
+    for (synthetic_fixtures) |fixture| {
+        const target = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ FIXTURES_DIR, fixture.name });
+        defer alloc.free(target);
+
+        if (!refresh) {
+            const stat = std.Io.Dir.cwd().statFile(io, target, .{}) catch null;
+            if (stat != null and stat.?.size > 0) {
+                std.debug.print("cached: {s}\n", .{fixture.name});
+                continue;
+            }
+        }
+
+        var contents = std.ArrayList(u8).empty;
+        defer contents.deinit(alloc);
+        try contents.ensureTotalCapacity(alloc, prefix.len + fixture.unit.len * repeat_count + suffix.len);
+        try contents.appendSlice(alloc, prefix);
+        for (0..repeat_count) |_| try contents.appendSlice(alloc, fixture.unit);
+        try contents.appendSlice(alloc, suffix);
+        try common.writeFile(io, target, contents.items);
+        std.debug.print("generated: {s}\n", .{fixture.name});
+    }
+}
+
 fn setupParsers(io: std.Io, alloc: std.mem.Allocator) !void {
     try common.ensureDir(io, PARSERS_DIR);
     const repos = [_]struct { url: []const u8, dir: []const u8 }{
@@ -240,6 +285,7 @@ fn setupFixtures(io: std.Io, alloc: std.mem.Allocator, refresh: bool) !void {
         };
         try common.runInherit(io, alloc, &argv, REPO_ROOT);
     }
+    try setupSyntheticFixtures(io, alloc, refresh);
     std.debug.print("fixtures ready in {s}\n", .{FIXTURES_DIR});
 }
 
@@ -248,7 +294,7 @@ fn ensureExternalParsersBuilt(io: std.Io, alloc: std.mem.Allocator, include_lexb
         try setupParsers(io, alloc);
     }
 
-    if (include_lexbor and !pathExists(io, "bench/build/lexbor/liblexbor_static.a")) {
+    if (include_lexbor) {
         const cmake_cfg = [_][]const u8{
             "cmake",
             "-S",
@@ -256,6 +302,7 @@ fn ensureExternalParsersBuilt(io: std.Io, alloc: std.mem.Allocator, include_lexb
             "-B",
             "bench/build/lexbor",
             "-DCMAKE_BUILD_TYPE=Release",
+            "-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG -march=native",
             "-DLEXBOR_BUILD_TESTS=OFF",
             "-DLEXBOR_BUILD_EXAMPLES=OFF",
         };
@@ -267,12 +314,13 @@ fn ensureExternalParsersBuilt(io: std.Io, alloc: std.mem.Allocator, include_lexb
 
 fn buildRunners(io: std.Io, alloc: std.mem.Allocator, include_lexbor: bool) !void {
     try common.ensureDir(io, BIN_DIR);
-    const zig_build = [_][]const u8{ "zig", "build", "-Doptimize=ReleaseFast" };
+    const zig_build = [_][]const u8{ "zig", "build", "-Doptimize=ReleaseFast", "-Dcpu=native" };
     try common.runInherit(io, alloc, &zig_build, REPO_ROOT);
 
     const strlen_cc = [_][]const u8{
         "cc",
         "-O3",
+        "-march=native",
         "-fno-builtin",
         "bench/runners/strlen_runner.c",
         "-o",
@@ -284,6 +332,7 @@ fn buildRunners(io: std.Io, alloc: std.mem.Allocator, include_lexbor: bool) !voi
         const lexbor_cc = [_][]const u8{
             "cc",
             "-O3",
+            "-march=native",
             "bench/runners/lexbor_runner.c",
             "bench/build/lexbor/liblexbor_static.a",
             "-Ibench/parsers/lexbor/source",
@@ -295,6 +344,8 @@ fn buildRunners(io: std.Io, alloc: std.mem.Allocator, include_lexbor: bool) !voi
     }
 
     const cargo_lol = [_][]const u8{
+        "env",
+        "RUSTFLAGS=-Ctarget-cpu=native",
         "cargo",
         "build",
         "--release",
@@ -627,7 +678,7 @@ fn compareWorktrees(io: std.Io, alloc: std.mem.Allocator, args: []const []const 
     const fixture_dir = try std.fs.path.join(alloc, &.{ base_dir, FIXTURES_DIR });
     defer alloc.free(fixture_dir);
 
-    const build_argv = [_][]const u8{ "zig", "build", "-Doptimize=ReleaseFast" };
+    const build_argv = [_][]const u8{ "zig", "build", "-Doptimize=ReleaseFast", "-Dcpu=native" };
     std.debug.print("building base: {s}\n", .{base_dir});
     try common.runInherit(io, alloc, &build_argv, base_dir);
     std.debug.print("building candidate: {s}\n", .{candidate_dir});
