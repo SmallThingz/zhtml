@@ -44,7 +44,7 @@ with OUT.open("w") as out:
         out.write(f".{{.name_start={row[0]},.name_len={row[1]},.value_start={row[2]},.value_len={row[3]}}},\n")
     out.write("};\n")
 hash_run = subprocess.run(
-    ["rtk", "proxy", "zig", "run", str(Path(__file__).with_name("std_hashes.zig")), "-O", "ReleaseFast"],
+    ["zig", "run", str(Path(__file__).with_name("std_hashes.zig")), "-O", "ReleaseFast"],
     cwd=ROOT,
     text=True,
     capture_output=True,
