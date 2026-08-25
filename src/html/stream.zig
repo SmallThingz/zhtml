@@ -46,7 +46,7 @@ pub const AttributeIterator = attr.RawIterator;
 pub const Event = struct {
     source: []const u8,
     kind: EventKind,
-    depth: u32,
+    depth: IndexInt,
     name: Span = .{},
     value: Span = .{},
     attrs: Span = .{},
@@ -365,7 +365,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             }
         }
 
-        fn parseRawText(self: *Self, tag: TagScan, depth: u32) !void {
+        fn parseRawText(self: *Self, tag: TagScan, depth: IndexInt) !void {
             const content_start = self.i;
             const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
             const text_depth = if (self.options.track_nesting) depth + 1 else 0;
@@ -385,7 +385,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             try self.emitTextAtDepth(start, end, self.currentDepth());
         }
 
-        fn emitTextAtDepth(self: *Self, start: usize, end: usize, depth: u32) !void {
+        fn emitTextAtDepth(self: *Self, start: usize, end: usize, depth: IndexInt) !void {
             if (!self.options.emit_text) return;
             if (start >= end) return;
             if (self.options.drop_whitespace_text_nodes) {
@@ -556,7 +556,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             return scanner.scanTagName(self.source, start, false);
         }
 
-        fn currentDepth(self: *Self) u32 {
+        fn currentDepth(self: *Self) IndexInt {
             return if (self.options.track_nesting) @intCast(self.stack.items.len - 1) else 0;
         }
 
@@ -841,7 +841,7 @@ test "streaming self-closing syntax closes SVG and MathML elements" {
 test "slash in unquoted foreign attribute value is not self-closing syntax" {
     const Ctx = struct {
         attr_ok: bool = false,
-        text_depth: ?u32 = null,
+        text_depth: ?IndexInt = null,
 
         fn cb(self: *@This(), ev: Event) !bool {
             if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "g")) {
@@ -859,7 +859,7 @@ test "slash in unquoted foreign attribute value is not self-closing syntax" {
     var ctx: Ctx = .{};
     try parse(std.testing.allocator, "<svg><g data=x/>inside</g></svg>", &ctx, Ctx.cb);
     try std.testing.expect(ctx.attr_ok);
-    try std.testing.expectEqual(@as(?u32, 2), ctx.text_depth);
+    try std.testing.expectEqual(@as(?IndexInt, 2), ctx.text_depth);
 }
 
 test "SVG foreignObject children use HTML self-closing rules" {
@@ -1102,9 +1102,9 @@ test "streaming parser keeps raw and escapable raw tag contents opaque" {
 
 test "streaming text-only and plaintext content has child depth" {
     const Ctx = struct {
-        script_depth: ?u32 = null,
-        title_depth: ?u32 = null,
-        plaintext_depth: ?u32 = null,
+        script_depth: ?IndexInt = null,
+        title_depth: ?IndexInt = null,
+        plaintext_depth: ?IndexInt = null,
 
         fn cb(self: *@This(), ev: Event) !bool {
             if (ev.kind != .text) return true;
@@ -1122,9 +1122,9 @@ test "streaming text-only and plaintext content has child depth" {
         &ctx,
         Ctx.cb,
     );
-    try std.testing.expectEqual(@as(?u32, 2), ctx.script_depth);
-    try std.testing.expectEqual(@as(?u32, 2), ctx.title_depth);
-    try std.testing.expectEqual(@as(?u32, 1), ctx.plaintext_depth);
+    try std.testing.expectEqual(@as(?IndexInt, 2), ctx.script_depth);
+    try std.testing.expectEqual(@as(?IndexInt, 2), ctx.title_depth);
+    try std.testing.expectEqual(@as(?IndexInt, 1), ctx.plaintext_depth);
 }
 
 test "streaming unterminated text-only elements emit configurable implicit EOF ends" {
@@ -1330,7 +1330,7 @@ test "streaming parser emits syntactic end tags without nesting" {
             if (ev.kind == .end_tag) {
                 if (self.names.items.len != 0) try self.names.append(std.testing.allocator, ',');
                 try self.names.appendSlice(std.testing.allocator, ev.nameSlice());
-                try std.testing.expectEqual(@as(u32, 0), ev.depth);
+                try std.testing.expectEqual(@as(IndexInt, 0), ev.depth);
             }
             return true;
         }
@@ -1370,7 +1370,7 @@ test "streaming implicit end option suppresses mismatched-pop and optional-close
     const Ctx = struct {
         implicit_count: usize = 0,
         explicit_a: usize = 0,
-        div_depth: ?u32 = null,
+        div_depth: ?IndexInt = null,
 
         fn cb(self: *@This(), ev: Event) !bool {
             if (ev.kind == .end_tag) {
@@ -1391,7 +1391,7 @@ test "streaming implicit end option suppresses mismatched-pop and optional-close
     );
     try std.testing.expectEqual(@as(usize, 0), ctx.implicit_count);
     try std.testing.expectEqual(@as(usize, 1), ctx.explicit_a);
-    try std.testing.expectEqual(@as(?u32, 0), ctx.div_depth);
+    try std.testing.expectEqual(@as(?IndexInt, 0), ctx.div_depth);
 }
 
 test "streaming lazy closing snapshot handles stale reuse dirty suffix and long collisions" {
@@ -1448,7 +1448,7 @@ test "unterminated end tag is discarded instead of emitted" {
 
 test "plaintext start tag implicitly closes paragraph before text" {
     const Ctx = struct {
-        text_depth: ?u32 = null,
+        text_depth: ?IndexInt = null,
         p_closed: bool = false,
 
         fn cb(self: *@This(), ev: Event) !bool {
@@ -1462,5 +1462,5 @@ test "plaintext start tag implicitly closes paragraph before text" {
     try parse(std.testing.allocator, "<p>before<plaintext>after", &ctx, Ctx.cb);
     try std.testing.expect(ctx.p_closed);
     // <p> has closed, so plaintext is at depth 0 and its text is at depth 1.
-    try std.testing.expectEqual(@as(?u32, 1), ctx.text_depth);
+    try std.testing.expectEqual(@as(?IndexInt, 1), ctx.text_depth);
 }
