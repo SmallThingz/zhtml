@@ -1,9 +1,19 @@
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
 #include "lexbor/html/html.h"
+
+static int parse_iterations(const char *text, size_t *out) {
+    errno = 0;
+    char *end = NULL;
+    const unsigned long long value = strtoull(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' || value > SIZE_MAX) return 0;
+    *out = (size_t)value;
+    return 1;
+}
 
 static uint64_t now_ns(void) {
     struct timespec ts;
@@ -25,7 +35,7 @@ static unsigned char *read_file(const char *path, size_t *out_len) {
     }
     rewind(f);
 
-    unsigned char *buf = (unsigned char *)malloc((size_t)sz);
+    unsigned char *buf = (unsigned char *)malloc((size_t)sz != 0 ? (size_t)sz : 1);
     if (!buf) {
         fclose(f);
         return NULL;
@@ -54,7 +64,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    size_t iterations = (size_t)strtoull(argv[2], NULL, 10);
+    size_t iterations = 0;
+    if (!parse_iterations(argv[2], &iterations)) {
+        fprintf(stderr, "invalid iterations: %s\n", argv[2]);
+        free(input);
+        return 2;
+    }
 
     lxb_html_document_t *doc = lxb_html_document_create();
     if (doc == NULL) {

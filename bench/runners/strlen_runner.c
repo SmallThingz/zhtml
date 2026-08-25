@@ -1,8 +1,18 @@
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+static int parse_iterations(const char *text, size_t *out) {
+    errno = 0;
+    char *end = NULL;
+    const unsigned long long value = strtoull(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' || value > SIZE_MAX) return 0;
+    *out = (size_t)value;
+    return 1;
+}
 
 static uint64_t now_ns(void) {
     struct timespec ts;
@@ -17,7 +27,11 @@ int main(int argc, char **argv) {
     }
 
     const char *path = argv[1];
-    const size_t iterations = (size_t)strtoull(argv[2], NULL, 10);
+    size_t iterations = 0;
+    if (!parse_iterations(argv[2], &iterations)) {
+        fprintf(stderr, "invalid iterations: %s\n", argv[2]);
+        return 2;
+    }
 
     FILE *f = fopen(path, "rb");
     if (f == NULL) {
