@@ -123,7 +123,7 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
         .strictest => |*fixture| {
             var it = fixture.doc.queryRuntime(sel);
             while (try it.next()) |node| {
-                if ((try node.getAttributeValue(alloc, "id"))) |id| {
+                if ((try node.getAttributeValue(runtime_arena.allocator(), "id"))) |id| {
                     try out_ids.append(alloc, id.value);
                 }
             }
@@ -131,7 +131,7 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
         .fastest => |*fixture| {
             var it = fixture.doc.queryRuntime(sel);
             while (try it.next()) |node| {
-                if ((try node.getAttributeValue(alloc, "id"))) |id| {
+                if ((try node.getAttributeValue(runtime_arena.allocator(), "id"))) |id| {
                     try out_ids.append(alloc, id.value);
                 }
             }
@@ -139,7 +139,7 @@ fn runSelectorIds(io: std.Io, alloc: std.mem.Allocator, mode: ParseMode, fixture
         .full => |*fixture| {
             var it = fixture.doc.queryRuntime(sel);
             while (try it.next()) |node| {
-                if ((try node.getAttributeValue(alloc, "id"))) |id| try out_ids.append(alloc, id.value);
+                if ((try node.getAttributeValue(runtime_arena.allocator(), "id"))) |id| try out_ids.append(alloc, id.value);
             }
         },
     }

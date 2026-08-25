@@ -391,8 +391,11 @@ fn runAllTests(
     } else {
         const threads = try gpa.alloc(std.Thread, job_count);
         defer gpa.free(threads);
+        var spawned: usize = 0;
+        errdefer for (threads[0..spawned]) |t| t.join();
         for (threads) |*t| {
             t.* = try std.Thread.spawn(.{}, worker, .{&ctx});
+            spawned += 1;
         }
         for (threads) |t| t.join();
     }
