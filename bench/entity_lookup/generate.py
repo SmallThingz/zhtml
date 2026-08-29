@@ -177,7 +177,10 @@ translated_zig, count = re.subn(
 if count != 1:
     raise RuntimeError("could not replace translated entity_compare")
 
-tuned_hash = f'''const AssoValues = [_]u16{{{ints(asso_values)}}};
+tuned_hash = f'''// gperf emits unsigned short values, but C integer promotion makes the
+// additions below at least int-width. Use u32 here to preserve that behavior
+// in Zig and avoid safety-check overflows on arbitrary non-entity input.
+const AssoValues = [_]u32{{{ints(asso_values)}}};
 
 pub fn entity_hash(str: [*c]const u8, len: usize) u32 {{
     var hash: u32 = @intCast(len);

@@ -164,24 +164,13 @@ pub inline fn findTagEnd(source: []const u8, start: usize) ?usize {
             continue;
         }
 
-        // A later '=' inside an unquoted value must not manufacture a quoted
-        // value (`a=x=">"`). Accept the common assignment shapes directly;
-        // ambiguous malformed input falls back to the exact tokenizer below.
-        if (!assignmentEqStartsAttributeValue(source, start, special)) return findTagEndSlow(source, start);
-        search = findBytePosOrEnd(source, value_start + 1, quote);
-        if (search == source.len) return null;
-        search += 1;
+        // Once an equals sign is followed by a quote, local byte context is
+        // not enough to know whether that equals sign is an assignment. It may
+        // itself be data in an unquoted value or the first byte of a recovered
+        // attribute name. Use the exact tokenizer state machine for this tag.
+        return findTagEndSlow(source, start);
     }
     return null;
-}
-
-inline fn assignmentEqStartsAttributeValue(source: []const u8, start: usize, eq: usize) bool {
-    var i = eq;
-    while (i > start and tables.WhitespaceTable[source[i - 1]]) : (i -= 1) {}
-    const name_end = i;
-    while (i > start and tables.AttrNameCharTable[source[i - 1]]) : (i -= 1) {}
-    if (i == name_end) return false;
-    return i == start or tables.WhitespaceTable[source[i - 1]] or source[i - 1] == '/';
 }
 
 fn findTagEndSlow(source: []const u8, start: usize) ?usize {
@@ -458,6 +447,17 @@ test "tag end scanner does not invent quoted values inside unquoted data" {
 
     const quoted = " a=\"x>y\" id=z>tail";
     try std.testing.expectEqual(@as(?usize, 13), findTagEnd(quoted, 0));
+}
+
+test "tag end scanner does not promote unquoted value fragments to quoted attributes" {
+    // After `a=` the whitespace is still before-value state, so `b='` begins
+    // the unquoted value. The quote before `c` is data, and `c='` starts the
+    // actual unterminated quoted attribute value.
+    try std.testing.expect(findTagEnd(" a= b=' c='>", 0) == null);
+
+    // Slash is ordinary data in an unquoted value. It must not make `b='`
+    // look like a new quoted attribute assignment.
+    try std.testing.expect(findTagEnd(" a=x/b=' c='>", 0) == null);
 }
 
 test "self-closing marker excludes slash inside unquoted attribute values" {

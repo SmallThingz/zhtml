@@ -757,6 +757,20 @@ test "minimal entity mode excludes optional common names" {
     try std.testing.expectEqualStrings("&&nbsp;&copy;", buf[0..n]);
 }
 
+test "full named entity lookup tolerates arbitrary prefixes" {
+    // gperf association values are generated as u16 in C, where additions are
+    // integer-promoted. Exercise every possible byte across every lookup length
+    // so translated hash arithmetic and association-table indexing stay safe.
+    var input: [32]u8 = undefined;
+    for (0..256) |value| {
+        @memset(&input, @intCast(value));
+        for (2..input.len + 1) |len| {
+            _ = decodeEntityWithMode(.full, false, input[0..len]);
+            _ = decodeEntityWithMode(.full, true, input[0..len]);
+        }
+    }
+}
+
 test "full named entity mode decodes uncommon and two-codepoint values" {
     var buf = "&eacute; &NotNestedGreaterGreater;".*;
     const n = decodeInPlaceWithMode(.full, false, &buf);
