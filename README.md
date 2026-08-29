@@ -44,7 +44,6 @@ Source: `bench/results/external_suite_report.json`
 - 🔎 CSS selector queries: comptime, runtime, and cached runtime selectors.
 - 🧭 DOM navigation: parent, siblings, first/last child, and children iteration.
 - 💤 Lazy decode/normalize path: attribute/entity decode and text normalization happen on query-time APIs.
-- 🧪 Debug tooling: selector mismatch diagnostics and instrumentation wrappers.
 - 🧰 Parse profiles: `strictest` and `fastest` option bundles for benchmarks/workloads.
 - 🧵 Destructive parsing by default for throughput, with an opt-in non-destructive read-only mode.
 

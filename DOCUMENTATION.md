@@ -175,11 +175,6 @@ Use cases:
 - preserving original bytes for hashing, diffing, or cache keys
 - running parser queries without allowing in-place mutation of shared buffers
 
-### Instrumentation wrappers
-
-- `queryWithHooks(doc, comptime_selector, hooks)`
-- `queryRuntimeWithHooks(doc, compiled_selector, hooks)`
-
 ## Selector Support
 
 Supported selectors:

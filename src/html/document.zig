@@ -685,10 +685,12 @@ fn GetNode(comptime options: ParseOptions) type {
                     if (item.value) |value| {
                         if (item.isDecoded()) {
                             try writeAttrValue(writer, value);
-                        } else {
+                        } else if (comptime entity_encoding == .force) {
                             try writer.writeAll("=\"");
                             try writeDecodedEscaped(writer, value, true);
                             try writeByte(writer, '"');
+                        } else {
+                            try writeRawAttrValue(writer, value);
                         }
                     }
                 }
@@ -724,6 +726,29 @@ fn GetNode(comptime options: ParseOptions) type {
         fn writeAttrValue(writer: anytype, value: []const u8) WriterError(@TypeOf(writer))!void {
             try writer.writeAll("=\"");
             try writeEscapedAttrValue(writer, value);
+            try writeByte(writer, '"');
+        }
+
+        /// Writes a raw compact value without decoding its existing entity syntax.
+        fn writeRawAttrValue(writer: anytype, value: []const u8) WriterError(@TypeOf(writer))!void {
+            try writer.writeAll("=\"");
+            var chunk_start: usize = 0;
+            for (value, 0..) |c, i| {
+                switch (c) {
+                    0, '<', '"' => {
+                        if (chunk_start < i) try writer.writeAll(value[chunk_start..i]);
+                        switch (c) {
+                            0 => try writer.writeAll(" "),
+                            '<' => try writer.writeAll("&lt;"),
+                            '"' => try writer.writeAll("&quot;"),
+                            else => unreachable,
+                        }
+                        chunk_start = i + 1;
+                    },
+                    else => {},
+                }
+            }
+            if (chunk_start < value.len) try writer.writeAll(value[chunk_start..]);
             try writeByte(writer, '"');
         }
 
@@ -2362,6 +2387,19 @@ test "expanding full entities use marked allocating fallbacks" {
     const text_end: usize = doc.nodes[text_idx].name_or_text.end();
     try std.testing.expect(text_end < doc.source.len);
     try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decode_failed)), doc.source[text_end]);
+
+    var never_out: std.Io.Writer.Allocating = .init(alloc);
+    defer never_out.deinit();
+    try div.writeHtml(&never_out.writer, .never);
+    try std.testing.expectEqualStrings(
+        "<div naked=\"&nLt;\" single=\"&nGt;\" double=\"&nLt;\">&nLt;</div>",
+        never_out.written(),
+    );
+
+    var auto_out: std.Io.Writer.Allocating = .init(alloc);
+    defer auto_out.deinit();
+    try div.writeHtml(&auto_out.writer, .auto);
+    try std.testing.expectEqualStrings(never_out.written(), auto_out.written());
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();

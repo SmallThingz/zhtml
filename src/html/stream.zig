@@ -85,6 +85,15 @@ pub const Parser = struct {
 
     pub fn parse(self: @This(), allocator: std.mem.Allocator, source: []const u8, ctx: anytype, comptime callback: anytype) !void {
         if (!common.lenFits(source.len)) return error.InputTooLarge;
+        if (!self.options.emit_start_tags and
+            !self.options.emit_text and
+            !self.options.emit_end_tags and
+            !self.options.include_comments and
+            !self.options.include_doctype and
+            !self.options.include_processing_instructions)
+        {
+            return;
+        }
 
         var stack_buffer: [32]OpenTag = undefined;
         var p = State(@TypeOf(ctx), callback){
@@ -718,6 +727,34 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             return tags.equalByLenAndKeyIgnoreCase(open_name, open.key, close_name, close.key);
         }
     };
+}
+
+test "streaming no-event config short-circuits without allocating" {
+    const Ctx = struct {
+        calls: usize = 0,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            _ = ev;
+            self.calls += 1;
+            return true;
+        }
+    };
+
+    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer source.deinit();
+    for (0..64) |_| try source.writer.writeAll("<div>");
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var ctx: Ctx = .{};
+    try (Parser{ .options = .{
+        .emit_start_tags = false,
+        .emit_text = false,
+        .emit_end_tags = false,
+        .include_comments = false,
+        .include_doctype = false,
+        .include_processing_instructions = false,
+    } }).parse(failing.allocator(), source.written(), &ctx, Ctx.cb);
+    try std.testing.expectEqual(@as(usize, 0), ctx.calls);
 }
 
 test "streaming parser emits element text and attrs" {
