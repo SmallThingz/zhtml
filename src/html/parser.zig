@@ -80,10 +80,10 @@ fn ParseState(comptime opts: ParseOptions) type {
             idx: IndexInt,
             /// Last direct element child only when sibling/child links are persisted.
             last_child: if (opts.store_last_child or opts.store_prev_sibling) IndexInt else void = if (opts.store_last_child or opts.store_prev_sibling) InvalidIndex else {},
-            /// Optional-close source class and scope boundary bits live in
-            /// otherwise-unused struct padding on the hot open stack.
+            /// Optional-close source class and source classes blocked below
+            /// this element live in otherwise-unused hot-stack padding.
             implicit_source: u8 = 0,
-            implicit_boundary: u8 = 0,
+            implicit_blockers: u8 = 0,
 
             pub inline fn keyValue(self: *const @This()) u64 {
                 return self.tag_key;
@@ -97,12 +97,13 @@ fn ParseState(comptime opts: ParseOptions) type {
             trigger: u8 = 0,
             boundary: u8 = 0,
         };
-        const ImplicitBoundary = struct {
-            const regular: u8 = 1 << 0;
-            const button: u8 = 1 << 1;
-            const list_item: u8 = 1 << 2;
-            const table: u8 = 1 << 3;
-            const select: u8 = 1 << 4;
+        const ImplicitBlockers = struct {
+            const M = tags.ImplicitCloseMask;
+            const regular: u8 = M.p | M.li | M.dt_dd | M.head;
+            const button: u8 = M.p;
+            const list_item: u8 = M.li;
+            const table: u8 = M.tr | M.td_th;
+            const select: u8 = M.option | M.optgroup;
         };
 
         const ParserKey = struct {
@@ -420,7 +421,7 @@ fn ParseState(comptime opts: ParseOptions) type {
             // LLVM lowers the dense slot switch to one indexed jump instead of
             // the large length-partitioned 64-bit comparison tree.
             const M = tags.ImplicitCloseMask;
-            const B = ImplicitBoundary;
+            const B = ImplicitBlockers;
             const K = ParserKey;
             const tag_meta: TagMeta = switch (tagMetaSlot(tag_name_key)) {
                 58 => if (tag_name_key == K.P and tag_name.len == 1) .{ .source = M.p, .trigger = M.p } else .{},
@@ -530,7 +531,7 @@ fn ParseState(comptime opts: ParseOptions) type {
                 .tag_key = tag_name_key,
                 .last_child = if (comptime opts.store_last_child or opts.store_prev_sibling) InvalidIndex else {},
                 .implicit_source = tag_meta.source,
-                .implicit_boundary = tag_meta.boundary,
+                .implicit_blockers = tag_meta.boundary,
             });
         }
 
@@ -586,31 +587,23 @@ fn ParseState(comptime opts: ParseOptions) type {
         }
 
         noinline fn applyImplicitClosures(noalias self: *Self, trigger_mask: u8, comptime indexed: bool) void {
-            const M = tags.ImplicitCloseMask;
-            const B = ImplicitBoundary;
-
             while (self.parse_stack.items.len > 1) {
+                var eligible = self.implicit_source_mask & trigger_mask;
+                if (eligible == 0) return;
+
                 var pos = self.parse_stack.items.len;
                 var found: ?usize = null;
-                var boundaries: u8 = 0;
                 while (pos > 1) {
                     pos -= 1;
                     const open = self.parse_stack.items[pos];
-                    if (open.implicit_source & trigger_mask != 0) {
-                        const blockers: u8 = switch (open.implicit_source) {
-                            M.p => B.regular | B.button,
-                            M.li => B.regular | B.list_item,
-                            M.dt_dd, M.head => B.regular,
-                            M.tr, M.td_th => B.table,
-                            M.option, M.optgroup => B.select,
-                            else => 0,
-                        };
-                        if (boundaries & blockers == 0) {
-                            found = pos;
-                            break;
-                        }
+                    if (open.implicit_source & eligible != 0) {
+                        found = pos;
+                        break;
                     }
-                    boundaries |= open.implicit_boundary;
+                    if (open.implicit_blockers != 0) {
+                        eligible &= ~open.implicit_blockers;
+                        if (eligible == 0) break;
+                    }
                 }
 
                 const found_pos = found orelse break;
