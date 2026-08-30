@@ -38,13 +38,19 @@ pub const Plan = struct {
     needs_child_position: bool = false,
     stateful: bool = false,
     has_tag_constraints: bool = false,
+    single_short_tag_only: bool = false,
     tag_length_mask: u32 = 0,
-    short_tag_only_mask: u64 = 0,
+    tag_only_mask: u64 = 0,
 };
 
 inline fn bit(index: usize) u64 {
     std.debug.assert(index < MaxForwardCompounds);
     return @as(u64, 1) << @intCast(index);
+}
+
+noinline fn equalLongTagTailIgnoreCase(a: []const u8, b: []const u8) bool {
+    std.debug.assert(a.len == b.len and a.len > 8);
+    return std.ascii.eqlIgnoreCase(a[8..], b[8..]);
 }
 
 pub fn buildPlan(selector: ast.Selector) Plan {
@@ -73,8 +79,10 @@ pub fn buildPlan(selector: ast.Selector) Plan {
             if (!compact) continue;
 
             const compound_bit = bit(absolute);
-            if (comp.hasTag() and comp.tag.len <= 8 and !comp.hasId() and comp.class_len == 0 and comp.attr_len == 0 and comp.pseudo_len == 0 and comp.not_len == 0)
-                plan.short_tag_only_mask |= compound_bit;
+            if (comp.hasTag() and !comp.hasId() and comp.class_len == 0 and comp.attr_len == 0 and comp.pseudo_len == 0 and comp.not_len == 0) {
+                plan.tag_only_mask |= compound_bit;
+                if (selector.compounds.len == 1 and comp.tag.len <= 8) plan.single_short_tag_only = true;
+            }
             if (relative + 1 < len) plan.continuation_mask |= compound_bit;
             if (relative == 0) {
                 // Leading combinators are anchored checks in processSimple, not
@@ -189,7 +197,8 @@ pub fn Executor(comptime Doc: type) type {
 
         pub fn processElement(self: *Self, idx: IndexInt) !bool {
             if (!self.plan.stateful) {
-                if (self.selector.compounds.len == 1 and self.plan.short_tag_only_mask != 0) return self.processSingleShortTag(idx);
+                if (self.selector.compounds.len == 1 and self.plan.single_short_tag_only) return self.processSingleShortTag(idx);
+                if (self.selector.compounds.len == 1 and self.plan.tag_only_mask != 0) return self.processSingleLongTag(idx);
                 return self.processSimpleElement(idx);
             }
             if (!self.initialized) try self.ensureInitialized();
@@ -205,14 +214,14 @@ pub fn Executor(comptime Doc: type) type {
             }
             var eligible_bits = self.eligibleMask(parent, raw.parent);
             if (self.plan.has_tag_constraints) eligible_bits &= self.tagAllowedMask(raw.name_or_text.slice(self.doc.source));
-            const direct_hits = eligible_bits & self.plan.short_tag_only_mask;
+            const direct_hits = eligible_bits & self.plan.tag_only_mask;
             if (comptime builtin.is_test) {
-                // All direct hits are exact short-tag matches for this one node,
+                // All direct hits are exact tag matches for this one node,
                 // so they represent one local predicate even when repeated in
                 // multiple automaton states.
                 if (direct_hits != 0) self.stats.local_unique_predicate_evals += 1;
             }
-            const matched = direct_hits | try self.evaluateEligible(idx, eligible_bits & ~self.plan.short_tag_only_mask, child_position);
+            const matched = direct_hits | try self.evaluateEligible(idx, eligible_bits & ~self.plan.tag_only_mask, child_position);
             const final_hits = matched & self.plan.final_mask;
             const persistent = matched & self.plan.continuation_mask;
 
@@ -258,6 +267,31 @@ pub fn Executor(comptime Doc: type) type {
             return matched;
         }
 
+        noinline fn processSingleLongTag(self: *Self, idx: IndexInt) bool {
+            const raw = &self.doc.nodes[idx];
+            if (comptime builtin.is_test) {
+                self.stats.nodes_processed += 1;
+                self.stats.local_unique_predicate_evals += 1;
+            }
+            const comp = self.selector.compounds[0];
+            const anchored = switch (comp.combinator) {
+                .none, .descendant => true,
+                .child => raw.parent == self.scope_root,
+                .adjacent, .sibling => false,
+            };
+            if (!anchored) return false;
+            const node_name = raw.name_or_text.slice(self.doc.source);
+            const tag = comp.tag.slice(self.selector.source);
+            if (node_name.len != tag.len) return false;
+            const node_key = tags.first8KeyWithMode(node_name, Doc.Options.non_destructive);
+            const tag_key = if (comp.tag_key != 0) comp.tag_key else tags.first8KeyWithMode(tag, false);
+            const matched = node_key == tag_key and equalLongTagTailIgnoreCase(node_name, tag);
+            if (comptime builtin.is_test) {
+                if (matched) self.stats.nodes_emitted += 1;
+            }
+            return matched;
+        }
+
         fn processSimpleElement(self: *Self, idx: IndexInt) !bool {
             const raw = &self.doc.nodes[idx];
             if (comptime builtin.is_test) self.stats.nodes_processed += 1;
@@ -275,7 +309,7 @@ pub fn Executor(comptime Doc: type) type {
                 };
                 if (anchored) {
                     if (comptime builtin.is_test) self.stats.local_unique_predicate_evals += 1;
-                    if ((self.plan.short_tag_only_mask & bit(absolute)) != 0) {
+                    if ((self.plan.tag_only_mask & bit(absolute)) != 0) {
                         if (comptime builtin.is_test) self.stats.nodes_emitted += 1;
                         return true;
                     }
@@ -360,7 +394,7 @@ pub fn Executor(comptime Doc: type) type {
                 }
                 const tag = comp.tag.slice(self.selector.source);
                 const tag_key = if (comp.tag_key != 0) comp.tag_key else tags.first8KeyWithMode(tag, false);
-                if (tag.len == node_name.len and tag_key == key) allowed |= bit(absolute);
+                if (tag.len == node_name.len and tag_key == key and (tag.len <= 8 or equalLongTagTailIgnoreCase(node_name, tag))) allowed |= bit(absolute);
             }
             cached.* = .{ .key = key, .allowed = allowed, .len = len };
             return allowed;
