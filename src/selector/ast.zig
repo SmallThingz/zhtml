@@ -218,6 +218,9 @@ pub const NotSimple = extern struct {
 pub const Compound = extern struct {
     /// Relationship to the compound immediately on the left.
     combinator: Combinator = .none,
+    /// Saturated count (0..3) of predicates that require attribute values.
+    /// Stored in existing struct padding so it does not increase `Compound` size.
+    value_attr_count: u8 = 0,
 
     /// Optional tag-name payload.
     tag: Range = .{},

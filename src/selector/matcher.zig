@@ -770,10 +770,8 @@ fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: as
     if (!doc.nodes[node_index].isElement(node_index)) return false;
     const node = &doc.nodes[node_index];
 
-    const possible_attr_requests: usize = @as(usize, @intFromBool(comp.hasId())) + @as(usize, @intFromBool(comp.class_len != 0)) + @as(usize, @intCast(comp.attr_len)) + @as(usize, @intCast(comp.not_len));
     var collected_attrs: CollectedAttrs = undefined;
-    const inspect_collected = possible_attr_requests >= 2 or comp.not_len != 0;
-    const use_collected = inspect_collected and prepareCollectedAttrs(selector, comp, &collected_attrs);
+    const use_collected = comp.value_attr_count >= 3 and prepareCollectedAttrs(selector, comp, &collected_attrs);
     const collected_ptr: ?*CollectedAttrs = if (use_collected) &collected_attrs else null;
     const attr_allocator: std.mem.Allocator = if (use_collected) ctx.scratchAllocator(doc.allocator) else doc.allocator;
     const last_child_cache = &ctx.last_child_cache;

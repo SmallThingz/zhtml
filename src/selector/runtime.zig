@@ -222,8 +222,32 @@ const Parser = struct {
         out.attr_len = @as(IndexInt, @intCast(self.attrs.items.len)) - out.attr_start;
         out.pseudo_len = @as(IndexInt, @intCast(self.pseudos.items.len)) - out.pseudo_start;
         out.not_len = @as(IndexInt, @intCast(self.not_items.items.len)) - out.not_start;
+        out.value_attr_count = self.valueAttrCount(out);
 
         try self.pushCompound(out);
+    }
+
+    fn valueAttrCount(noalias self: *Parser, comp: ast.Compound) u8 {
+        var count: u8 = @intFromBool(comp.hasId());
+        if (comp.class_len != 0 and count < 3) count += 1;
+
+        var attr_i: IndexInt = 0;
+        while (attr_i < comp.attr_len and count < 3) : (attr_i += 1) {
+            if (self.attrs.items[comp.attr_start + attr_i].op != .exists) count += 1;
+        }
+
+        var not_i: IndexInt = 0;
+        while (not_i < comp.not_len and count < 3) : (not_i += 1) {
+            const item = self.not_items.items[comp.not_start + not_i];
+            switch (item.kind) {
+                .id, .class => count += 1,
+                .attr => {
+                    if (item.attr.op != .exists) count += 1;
+                },
+                .tag => {},
+            }
+        }
+        return count;
     }
 
     fn parseAttrSelector(noalias self: *Parser) Error!ast.AttrSelector {
@@ -617,6 +641,23 @@ test "runtime selector parser supports leading combinator and pseudo-only compou
     try std.testing.expect(sel2.compounds[1].combinator == .descendant);
     try std.testing.expectEqual(@as(IndexInt, 1), sel2.compounds[1].pseudo_len);
     try std.testing.expect(sel2.pseudos[sel2.compounds[1].pseudo_start].kind == .nth_child);
+}
+
+test "runtime selector caches saturated value-attribute predicate count" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { source: []const u8, expected: u8 }{
+        .{ .source = "a[href][title]", .expected = 0 },
+        .{ .source = "a[href=x][title=y]", .expected = 2 },
+        .{ .source = "a.x[href=x][title=y]", .expected = 3 },
+        .{ .source = "a[href][title=x][class=y][data-z=z]", .expected = 3 },
+        .{ .source = "a:not([hidden]):not([title=x])", .expected = 1 },
+    };
+
+    for (cases) |case| {
+        var sel = try compileRuntimeImpl(alloc, case.source);
+        defer sel.deinit(alloc);
+        try std.testing.expectEqual(case.expected, sel.compounds[0].value_attr_count);
+    }
 }
 
 test "runtime selector parser accepts nth-child shorthand variants" {
