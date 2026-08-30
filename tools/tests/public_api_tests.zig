@@ -73,6 +73,9 @@ fn exerciseDocument(comptime opts: html.ParseOptions, source_input: opts.Input()
             "children",             "writeHtml",                 "writeSelfHtml",     "format",               "matches",     "matchesRuntime", "matchesPrepared",
             "query",                "queryRuntime",              "queryPrepared",
         });
+        assertPublicFunctions(Node.TextOptions, &.{"format"});
+        assertPublicFunctions(Node.TextResult, &.{"free"});
+        assertPublicFunctions(Node.AttributeValueResult, &.{"free"});
         assertPublicFunctions(RawNode, &.{ "isDocument", "isText", "isElement" });
         assertPublicFunctions(QueryIter, &.{ "deinit", "next", "format", "collect" });
         assertPublicFunctions(ChildrenIter, &.{ "next", "last", "collect", "format" });
@@ -92,6 +95,7 @@ fn exerciseDocument(comptime opts: html.ParseOptions, source_input: opts.Input()
     try std.testing.expect(!root.isElement());
     try formatDirect(root);
     try formatDirect(doc);
+    try formatDirect(Node.TextOptions{});
 
     const html_node = doc.html() orelse return error.TestUnexpectedResult;
     _ = doc.head() orelse return error.TestUnexpectedResult;
@@ -231,12 +235,21 @@ test "public API declaration coverage guard" {
     const NthExpr = @FieldType(Pseudo, "nth");
     const PseudoKind = @FieldType(Pseudo, "kind");
     const NotKind = @FieldType(NotSimple, "kind");
+    const PreparedPlan = @FieldType(html.PreparedSelector, "execution_plan");
+    const PreparedCompactPlan = @FieldType(html.PreparedSelector, "compact_plan");
+    const PredicatePlan = @FieldType(PreparedPlan, "predicates");
+    const TagDispatch = @FieldType(PreparedPlan, "tag_dispatch");
 
     comptime {
         assertPublicFunctions(html.ParseOptions, &.{ "Input", "Node", "QueryIter", "ChildrenIter", "parse", "Document", "format" });
+        assertPublicFunctions(html.ParseOptions.WhitespaceText, &.{});
+        assertPublicFunctions(html.EntityEncoding, &.{});
+        assertPublicFunctions(html.EntityDecoding, &.{});
         assertPublicFunctions(html.TextOptions, &.{"format"});
         assertPublicFunctions(SliceResult, &.{"free"});
         assertPublicFunctions(html.StreamingParser, &.{"parse"});
+        assertPublicFunctions(html.StreamingParser.Options, &.{});
+        assertPublicFunctions(html.StreamingParser.EventKind, &.{});
         assertPublicFunctions(Event, &.{ "nameSlice", "valueSlice", "attributes" });
         assertPublicFunctions(Attribute, &.{ "nameSlice", "valueRaw" });
         assertPublicFunctions(AttributeIterator, &.{"next"});
@@ -255,6 +268,10 @@ test "public API declaration coverage guard" {
         assertPublicFunctions(PseudoKind, &.{"format"});
         assertPublicFunctions(NotKind, &.{"format"});
         assertPublicFunctions(html.PreparedSelector, &.{ "compile", "deinit" });
+        assertPublicFunctions(PreparedCompactPlan, &.{});
+        assertPublicFunctions(PreparedPlan, &.{ "init", "deinit", "mask", "maskMut", "predicateStateUsesFor", "densePredicateStateMask", "stateIndexForCompound" });
+        assertPublicFunctions(PredicatePlan, &.{ "init", "deinit", "usesFor" });
+        assertPublicFunctions(TagDispatch, &.{ "find", "stateUses", "simpleIndices" });
     }
 }
 
@@ -332,6 +349,27 @@ test "public selector value API methods instantiate and run" {
     runtime.deinit(alloc);
 
     var prepared = try html.PreparedSelector.compile(alloc, "div.a[data-x]");
+
+    const PreparedPlan = @TypeOf(prepared.execution_plan);
+    var direct_plan = try PreparedPlan.init(alloc, prepared.selector);
+    defer direct_plan.deinit(alloc);
+    _ = direct_plan.mask(.start_none);
+    _ = direct_plan.maskMut(.start_none);
+    _ = direct_plan.stateIndexForCompound(0);
+    if (direct_plan.predicates.count != 0) {
+        _ = direct_plan.predicateStateUsesFor(0);
+        _ = direct_plan.predicates.usesFor(0);
+        if (direct_plan.dense_predicate_state_masks.len != 0) _ = direct_plan.densePredicateStateMask(0);
+    }
+
+    const TagEntry = sliceChild(@FieldType(@TypeOf(direct_plan.tag_dispatch), "entries"));
+    const TagSig = @FieldType(TagEntry, "sig");
+    const sig: TagSig = .{ .key = 0, .len = 0 };
+    if (direct_plan.tag_dispatch.find(sig)) |entry| {
+        _ = direct_plan.tag_dispatch.stateUses(entry);
+        _ = direct_plan.tag_dispatch.simpleIndices(entry);
+    }
+
     prepared.deinit();
 }
 

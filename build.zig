@@ -174,6 +174,8 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("tools/test_runner.zig"), .mode = .simple },
     });
     const run_public_api_tests = b.addRunArtifact(public_api_tests);
+    const public_api_test_step = b.step("test-public-api", "Run exhaustive consumer-facing public API tests");
+    public_api_test_step.dependOn(&run_public_api_tests.step);
 
     const scripts_tests = b.addTest(.{
         .root_module = b.createModule(.{
