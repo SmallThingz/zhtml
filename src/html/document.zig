@@ -4730,6 +4730,37 @@ test "prepared compact query reuses predicate plan without allocating" {
     try std.testing.expect(!failing.has_induced_failure);
 }
 
+test "prepared scoped compact query cleans up lazy seed workspace on allocation failure" {
+    const alloc = std.testing.allocator;
+    const Doc = GetDocument(.{});
+
+    var doc = Doc.init(alloc);
+    defer doc.deinit();
+    var html = "<html><body><div><a></a></div></body></html>".*;
+    try resetParsed(.{}, &doc, &html);
+    const body = doc.body() orelse return error.TestUnexpectedResult;
+
+    var prepared = try prepared_selector.PreparedSelector.compile(alloc, "html body div a");
+    defer prepared.deinit();
+    try std.testing.expect(prepared.compact_plan.stateful);
+
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator, original: *const Doc, program: *const prepared_selector.PreparedSelector, scope_index: IndexInt) !void {
+            var local_doc = original.*;
+            local_doc.allocator = allocator;
+            const scope = local_doc.nodeAt(scope_index);
+            var it = scope.queryPrepared(program);
+            defer it.deinit();
+            while (try it.next()) |_| {}
+        }
+    };
+    try std.testing.checkAllAllocationFailures(alloc, Case.run, .{ &doc, &prepared, body.index });
+
+    var final_it = body.queryPrepared(&prepared);
+    defer final_it.deinit();
+    try std.testing.expect((try final_it.next()) != null);
+}
+
 test "prepared point matching keeps borrowed plan valid across every scratch allocation failure" {
     const alloc = std.testing.allocator;
     const Doc = GetDocument(.{});

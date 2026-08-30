@@ -138,7 +138,7 @@ pub fn Executor(comptime Doc: type) type {
         node_ctx: matcher.NodeContext = .{},
         predicate_plan: matcher.PredicatePlan = .{},
         owns_predicate_plan: bool = true,
-        seed_workspace: matcher.MatchWorkspace,
+        seed_workspace: ?*matcher.MatchWorkspace = null,
         stats: Stats = .{},
         initialized: bool = false,
         tag_cache: [16]TagCacheEntry = [_]TagCacheEntry{.{}} ** 16,
@@ -158,7 +158,6 @@ pub fn Executor(comptime Doc: type) type {
                 .selector = selector,
                 .plan = plan,
                 .scope_root = scope_root,
-                .seed_workspace = matcher.MatchWorkspace.init(doc.allocator),
             };
         }
 
@@ -173,7 +172,11 @@ pub fn Executor(comptime Doc: type) type {
             self.stack.deinit(self.allocator);
             self.node_ctx.deinit();
             if (self.owns_predicate_plan) self.predicate_plan.deinit(self.allocator);
-            self.seed_workspace.deinit();
+            if (self.seed_workspace) |workspace| {
+                workspace.deinit();
+                self.allocator.destroy(workspace);
+                self.seed_workspace = null;
+            }
             self.stack = .empty;
             self.initialized = false;
         }
@@ -265,6 +268,14 @@ pub fn Executor(comptime Doc: type) type {
             self.root.lineage_matches |= self.root.self_matches;
         }
 
+        fn seedWorkspace(self: *Self) !*matcher.MatchWorkspace {
+            if (self.seed_workspace) |workspace| return workspace;
+            const workspace = try self.allocator.create(matcher.MatchWorkspace);
+            workspace.* = matcher.MatchWorkspace.init(self.allocator);
+            self.seed_workspace = workspace;
+            return workspace;
+        }
+
         fn seedMaskAt(self: *Self, mask: u64, node_index: IndexInt) !u64 {
             var pending = mask;
             var matched: u64 = 0;
@@ -275,7 +286,8 @@ pub fn Executor(comptime Doc: type) type {
                     const start: usize = @intCast(group.compound_start);
                     const len: usize = @intCast(group.compound_len);
                     if (absolute < start or absolute >= start + len) continue;
-                    if (try matcher.matchesPrefixAt(Doc, self.doc, self.selector, group, absolute - start + 1, node_index, &self.seed_workspace)) matched |= bit(absolute);
+                    const workspace = try self.seedWorkspace();
+                    if (try matcher.matchesPrefixAt(Doc, self.doc, self.selector, group, absolute - start + 1, node_index, workspace)) matched |= bit(absolute);
                     break;
                 }
             }
@@ -374,7 +386,7 @@ pub fn WideExecutor(comptime Doc: type) type {
         matched_predicates: []u64 = &.{},
         state_fanned_predicates: []u64 = &.{},
         touched_predicates: std.ArrayListUnmanaged(usize) = .empty,
-        seed_workspace: matcher.MatchWorkspace,
+        seed_workspace: ?*matcher.MatchWorkspace = null,
         stats: Stats = .{},
         initialized: bool = false,
         root_child_count: IndexInt = 0,
@@ -394,7 +406,6 @@ pub fn WideExecutor(comptime Doc: type) type {
                 .allocator = doc.allocator,
                 .selector = selector,
                 .scope_root = scope_root,
-                .seed_workspace = matcher.MatchWorkspace.init(doc.allocator),
             };
         }
 
@@ -425,7 +436,11 @@ pub fn WideExecutor(comptime Doc: type) type {
             self.state_fanned_predicates = &.{};
             self.touched_predicates.deinit(self.allocator);
             self.touched_predicates = .empty;
-            self.seed_workspace.deinit();
+            if (self.seed_workspace) |workspace| {
+                workspace.deinit();
+                self.allocator.destroy(workspace);
+                self.seed_workspace = null;
+            }
             self.word_count = 0;
             self.predicate_word_count = 0;
             self.owns_exec_plan = true;
@@ -556,6 +571,14 @@ pub fn WideExecutor(comptime Doc: type) type {
             }
         }
 
+        fn seedWorkspace(self: *Self) !*matcher.MatchWorkspace {
+            if (self.seed_workspace) |workspace| return workspace;
+            const workspace = try self.allocator.create(matcher.MatchWorkspace);
+            workspace.* = matcher.MatchWorkspace.init(self.allocator);
+            self.seed_workspace = workspace;
+            return workspace;
+        }
+
         fn seedMaskAt(self: *Self, wanted: []const u64, node_index: IndexInt, out: []u64) !void {
             for (wanted, 0..) |wanted_word, word_index| {
                 var pending = wanted_word;
@@ -573,7 +596,7 @@ pub fn WideExecutor(comptime Doc: type) type {
                         group,
                         @as(usize, @intCast(meta.relative)) + 1,
                         node_index,
-                        &self.seed_workspace,
+                        try self.seedWorkspace(),
                     )) setBit(out, state_index);
                 }
             }
