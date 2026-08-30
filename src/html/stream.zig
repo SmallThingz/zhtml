@@ -136,7 +136,7 @@ pub const Parser = struct {
         ctx: anytype,
         comptime callback: anytype,
     ) !void {
-        var stack_buffer: [32]OpenTag = undefined;
+        var stack_buffer: [64]OpenTag = undefined;
         var p = State(@TypeOf(ctx), callback, static_options){
             .allocator = allocator,
             .source = source,
