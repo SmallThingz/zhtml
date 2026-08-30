@@ -178,6 +178,12 @@ fn ParseState(comptime opts: ParseOptions) type {
             const WBR = tags.first8KeyWithMode("wbr", false);
         };
 
+        const TagMetaHashMagic: u64 = 0xe0856944fb7d0127;
+
+        inline fn tagMetaSlot(key: u64) u8 {
+            return @truncate((key *% TagMetaHashMagic) >> 56);
+        }
+
         /// Reserve capacities + add initial values to containers
         inline fn initContainers(noalias self: *Self) !void {
             const initial_nodes = if (self.input.len <= SmallInputThreshold)
@@ -410,78 +416,83 @@ fn ParseState(comptime opts: ParseOptions) type {
                 }
             };
 
-            // Compute every parser-relevant start-tag property in one dispatch.
-            // Keeping this literal in the hot parser avoids reclassifying the same
-            // `(len,key)` for optional-close trigger, special kind, and source.
+            // Hash parser-special tag keys into collision-free switch slots.
+            // LLVM lowers the dense slot switch to one indexed jump instead of
+            // the large length-partitioned 64-bit comparison tree.
             const M = tags.ImplicitCloseMask;
             const B = ImplicitBoundary;
             const K = ParserKey;
-            const tag_meta: TagMeta = switch (tag_name.len) {
-                1 => if (tag_name_key == K.P) .{ .source = M.p, .trigger = M.p } else .{},
-                2 => switch (tag_name_key) {
-                    K.BR => .{ .kind = .void },
-                    K.HR => .{ .kind = .void, .trigger = M.p | M.option | M.optgroup },
-                    K.LI => .{ .source = M.li, .trigger = M.p | M.li },
-                    K.DT, K.DD => .{ .source = M.dt_dd, .trigger = M.p | M.dt_dd },
-                    K.TR => .{ .source = M.tr, .trigger = M.tr },
-                    K.TD, K.TH => .{ .source = M.td_th, .trigger = M.td_th, .boundary = B.regular },
-                    K.OL, K.UL => .{ .trigger = M.p, .boundary = B.list_item },
-                    K.H1, K.H2, K.H3, K.H4, K.H5, K.H6, K.DL => .{ .trigger = M.p },
-                    else => .{},
-                },
-                3 => switch (tag_name_key) {
-                    K.COL, K.IMG, K.WBR => .{ .kind = .void },
-                    K.SVG => .{ .kind = .svg },
-                    K.DIV, K.NAV, K.PRE => .{ .trigger = M.p },
-                    else => .{},
-                },
-                4 => switch (tag_name_key) {
-                    K.AREA, K.BASE, K.LINK, K.META => .{ .kind = .void },
-                    K.HTML => .{ .boundary = B.regular | B.table },
-                    K.HEAD => .{ .source = M.head },
-                    K.BODY => .{ .trigger = M.head },
-                    K.FORM, K.MAIN, K.MENU => .{ .trigger = M.p },
-                    else => .{},
-                },
-                5 => switch (tag_name_key) {
-                    K.EMBED, K.INPUT, K.PARAM, K.TRACK => .{ .kind = .void },
-                    K.STYLE, K.TITLE => .{ .kind = .text_only },
-                    K.TABLE => .{ .trigger = M.p, .boundary = B.regular | B.table },
-                    K.ASIDE => .{ .trigger = M.p },
-                    else => .{},
-                },
-                6 => switch (tag_name_key) {
-                    K.SCRIPT => .{ .kind = .text_only },
-                    K.SOURCE => .{ .kind = .void },
-                    K.OPTION => .{ .source = M.option, .trigger = M.option },
-                    K.APPLET, K.OBJECT => .{ .boundary = B.regular },
-                    K.BUTTON => .{ .boundary = B.button },
-                    K.SELECT => .{ .boundary = B.select },
-                    K.DIALOG, K.FIGURE, K.FOOTER, K.HEADER, K.HGROUP, K.SEARCH => .{ .trigger = M.p },
-                    else => .{},
-                },
-                7 => switch (tag_name_key) {
-                    K.CAPTION, K.MARQUEE => .{ .boundary = B.regular },
-                    K.ADDRESS, K.ARTICLE, K.DETAILS, K.SECTION => .{ .trigger = M.p },
-                    else => .{},
-                },
-                8 => switch (tag_name_key) {
-                    K.TEXTAREA => .{ .kind = .text_only },
-                    K.FIELDSET => .{ .trigger = M.p },
-                    K.OPTGROUP => .{ .source = M.optgroup, .trigger = M.option | M.optgroup },
-                    K.TEMPLATE => .{ .boundary = B.regular | B.table },
-                    K.DATALIST => .{ .boundary = B.select },
-                    else => .{},
-                },
-                9 => if (tag_name_key == K.PLAINTEXT and std.ascii.toLower(tag_name[8]) == 't')
-                    .{ .kind = .plaintext, .trigger = M.p }
-                else
-                    .{},
-                10 => switch (tag_name_key) {
-                    K.BLOCKQUOTE => if (std.ascii.toLower(tag_name[8]) == 't' and std.ascii.toLower(tag_name[9]) == 'e') .{ .trigger = M.p } else .{},
-                    K.FIGCAPTION => if (std.ascii.toLower(tag_name[8]) == 'o' and std.ascii.toLower(tag_name[9]) == 'n') .{ .trigger = M.p } else .{},
-                    else => .{},
-                },
+            const tag_meta: TagMeta = switch (tagMetaSlot(tag_name_key)) {
+                58 => if (tag_name_key == K.P and tag_name.len == 1) .{ .source = M.p, .trigger = M.p } else .{},
+                91 => if (tag_name_key == K.BR and tag_name.len == 2) .{ .kind = .void } else .{},
+                159 => if (tag_name_key == K.HR and tag_name.len == 2) .{ .kind = .void, .trigger = M.p | M.option | M.optgroup } else .{},
+                112 => if (tag_name_key == K.LI and tag_name.len == 2) .{ .source = M.li, .trigger = M.p | M.li } else .{},
+                39 => if (tag_name_key == K.DT and tag_name.len == 2) .{ .source = M.dt_dd, .trigger = M.p | M.dt_dd } else .{},
+                209 => if (tag_name_key == K.DD and tag_name.len == 2) .{ .source = M.dt_dd, .trigger = M.p | M.dt_dd } else .{},
+                37 => if (tag_name_key == K.TR and tag_name.len == 2) .{ .source = M.tr, .trigger = M.tr } else .{},
+                217 => if (tag_name_key == K.TD and tag_name.len == 2) .{ .source = M.td_th, .trigger = M.td_th, .boundary = B.regular } else .{},
+                239 => if (tag_name_key == K.TH and tag_name.len == 2) .{ .source = M.td_th, .trigger = M.td_th, .boundary = B.regular } else .{},
+                162 => if (tag_name_key == K.OL and tag_name.len == 2) .{ .trigger = M.p, .boundary = B.list_item } else .{},
+                229 => if (tag_name_key == K.UL and tag_name.len == 2) .{ .trigger = M.p, .boundary = B.list_item } else .{},
+                191 => if (tag_name_key == K.H1 and tag_name.len == 2) .{ .trigger = M.p } else .{},
+                68 => if (tag_name_key == K.H2 and tag_name.len == 2) .{ .trigger = M.p } else .{},
+                202 => if (tag_name_key == K.H3 and tag_name.len == 2) .{ .trigger = M.p } else .{},
+                79 => if (tag_name_key == K.H4 and tag_name.len == 2) .{ .trigger = M.p } else .{},
+                212 => if (tag_name_key == K.H5 and tag_name.len == 2) .{ .trigger = M.p } else .{},
+                90 => if (tag_name_key == K.H6 and tag_name.len == 2) .{ .trigger = M.p } else .{},
+                252 => if (tag_name_key == K.DL and tag_name.len == 2) .{ .trigger = M.p } else .{},
+                21 => if (tag_name_key == K.COL and tag_name.len == 3) .{ .kind = .void } else .{},
+                63 => if (tag_name_key == K.IMG and tag_name.len == 3) .{ .kind = .void } else .{},
+                81 => if (tag_name_key == K.WBR and tag_name.len == 3) .{ .kind = .void } else .{},
+                181 => if (tag_name_key == K.SVG and tag_name.len == 3) .{ .kind = .svg } else .{},
+                242 => if (tag_name_key == K.DIV and tag_name.len == 3) .{ .trigger = M.p } else .{},
+                140 => if (tag_name_key == K.NAV and tag_name.len == 3) .{ .trigger = M.p } else .{},
+                43 => if (tag_name_key == K.PRE and tag_name.len == 3) .{ .trigger = M.p } else .{},
+                38 => if (tag_name_key == K.AREA and tag_name.len == 4) .{ .kind = .void } else .{},
+                1 => if (tag_name_key == K.BASE and tag_name.len == 4) .{ .kind = .void } else .{},
+                129 => if (tag_name_key == K.LINK and tag_name.len == 4) .{ .kind = .void } else .{},
+                17 => if (tag_name_key == K.META and tag_name.len == 4) .{ .kind = .void } else .{},
+                150 => if (tag_name_key == K.HTML and tag_name.len == 4) .{ .boundary = B.regular | B.table } else .{},
+                174 => if (tag_name_key == K.HEAD and tag_name.len == 4) .{ .source = M.head } else .{},
+                133 => if (tag_name_key == K.BODY and tag_name.len == 4) .{ .trigger = M.head } else .{},
+                141 => if (tag_name_key == K.FORM and tag_name.len == 4) .{ .trigger = M.p } else .{},
+                247 => if (tag_name_key == K.MAIN and tag_name.len == 4) .{ .trigger = M.p } else .{},
+                253 => if (tag_name_key == K.MENU and tag_name.len == 4) .{ .trigger = M.p } else .{},
+                34 => if (tag_name_key == K.EMBED and tag_name.len == 5) .{ .kind = .void } else .{},
+                243 => if (tag_name_key == K.INPUT and tag_name.len == 5) .{ .kind = .void } else .{},
+                223 => if (tag_name_key == K.PARAM and tag_name.len == 5) .{ .kind = .void } else .{},
+                210 => if (tag_name_key == K.TRACK and tag_name.len == 5) .{ .kind = .void } else .{},
+                99 => if (tag_name_key == K.STYLE and tag_name.len == 5) .{ .kind = .text_only } else .{},
+                122 => if (tag_name_key == K.TITLE and tag_name.len == 5) .{ .kind = .text_only } else .{},
+                232 => if (tag_name_key == K.TABLE and tag_name.len == 5) .{ .trigger = M.p, .boundary = B.regular | B.table } else .{},
+                88 => if (tag_name_key == K.ASIDE and tag_name.len == 5) .{ .trigger = M.p } else .{},
+                74 => if (tag_name_key == K.SCRIPT and tag_name.len == 6) .{ .kind = .text_only } else .{},
+                27 => if (tag_name_key == K.SOURCE and tag_name.len == 6) .{ .kind = .void } else .{},
+                120 => if (tag_name_key == K.OPTION and tag_name.len == 6) .{ .source = M.option, .trigger = M.option } else .{},
+                117 => if (tag_name_key == K.APPLET and tag_name.len == 6) .{ .boundary = B.regular } else .{},
+                31 => if (tag_name_key == K.OBJECT and tag_name.len == 6) .{ .boundary = B.regular } else .{},
+                163 => if (tag_name_key == K.BUTTON and tag_name.len == 6) .{ .boundary = B.button } else .{},
+                4 => if (tag_name_key == K.SELECT and tag_name.len == 6) .{ .boundary = B.select } else .{},
+                192 => if (tag_name_key == K.DIALOG and tag_name.len == 6) .{ .trigger = M.p } else .{},
+                94 => if (tag_name_key == K.FIGURE and tag_name.len == 6) .{ .trigger = M.p } else .{},
+                23 => if (tag_name_key == K.FOOTER and tag_name.len == 6) .{ .trigger = M.p } else .{},
+                144 => if (tag_name_key == K.HEADER and tag_name.len == 6) .{ .trigger = M.p } else .{},
+                77 => if (tag_name_key == K.HGROUP and tag_name.len == 6) .{ .trigger = M.p } else .{},
+                35 => if (tag_name_key == K.SEARCH and tag_name.len == 6) .{ .trigger = M.p } else .{},
+                137 => if (tag_name_key == K.CAPTION and tag_name.len == 7) .{ .boundary = B.regular } else .{},
+                47 => if (tag_name_key == K.MARQUEE and tag_name.len == 7) .{ .boundary = B.regular } else .{},
+                234 => if (tag_name_key == K.ADDRESS and tag_name.len == 7) .{ .trigger = M.p } else .{},
+                236 => if (tag_name_key == K.ARTICLE and tag_name.len == 7) .{ .trigger = M.p } else .{},
+                148 => if (tag_name_key == K.DETAILS and tag_name.len == 7) .{ .trigger = M.p } else .{},
+                78 => if (tag_name_key == K.SECTION and tag_name.len == 7) .{ .trigger = M.p } else .{},
+                41 => if (tag_name_key == K.TEXTAREA and tag_name.len == 8) .{ .kind = .text_only } else .{},
+                84 => if (tag_name_key == K.FIELDSET and tag_name.len == 8) .{ .trigger = M.p } else .{},
+                244 => if (tag_name_key == K.OPTGROUP and tag_name.len == 8) .{ .source = M.optgroup, .trigger = M.option | M.optgroup } else .{},
+                190 => if (tag_name_key == K.TEMPLATE and tag_name.len == 8) .{ .boundary = B.regular | B.table } else .{},
+                166 => if (tag_name_key == K.DATALIST and tag_name.len == 8) .{ .boundary = B.select } else .{},
+                33 => if (tag_name_key == K.PLAINTEXT and tag_name.len == 9 and std.ascii.toLower(tag_name[8]) == 't') .{ .kind = .plaintext, .trigger = M.p } else .{},
+                72 => if (tag_name_key == K.BLOCKQUOTE and tag_name.len == 10 and std.ascii.toLower(tag_name[8]) == 't' and std.ascii.toLower(tag_name[9]) == 'e') .{ .trigger = M.p } else .{},
+                180 => if (tag_name_key == K.FIGCAPTION and tag_name.len == 10 and std.ascii.toLower(tag_name[8]) == 'o' and std.ascii.toLower(tag_name[9]) == 'n') .{ .trigger = M.p } else .{},
                 else => .{},
             };
 
