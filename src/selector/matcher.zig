@@ -1009,7 +1009,7 @@ fn prepareCollectedAttrs(selector: ast.Selector, comp: ast.Compound, out: *Colle
         }
     }
 
-    return out.count >= 2;
+    return out.count >= 3;
 }
 
 fn pushCollectedName(out: *CollectedAttrs, name: []const u8) bool {
