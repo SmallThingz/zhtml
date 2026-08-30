@@ -839,6 +839,8 @@ fn ParseState(comptime opts: ParseOptions) type {
                         self.i = lt; // shared helpers expect the cursor at `<`
                         if (bang + 2 < self.input.len and self.input[bang + 1] == '-' and self.input[bang + 2] == '-') {
                             self.skipComment();
+                        } else if (std.mem.startsWith(u8, self.input[lt..], "<![CDATA[")) {
+                            self.i = scanner.findCdataEnd(self.input, lt + 9);
                         } else {
                             self.skipBangNode();
                         }
@@ -1318,6 +1320,18 @@ test "raw text element metadata remains valid after child append growth" {
 test "SVG opaque scan keeps cursor contracts for empty comments and PI" {
     const alloc = std.testing.allocator;
     var html = "<svg><!----><?pi?><g></g></svg><div id='tail'></div>".*;
+
+    var doc = TestDocument.init(alloc);
+    defer doc.deinit();
+    try resetParsed(DefaultTestOptions, &doc, &html);
+
+    try std.testing.expect(firstQuery(doc.query("svg")) != null);
+    try std.testing.expect(firstQuery(doc.query("#tail")) != null);
+}
+
+test "SVG opaque scan treats CDATA as opaque" {
+    const alloc = std.testing.allocator;
+    var html = "<svg><![CDATA[x > <svg>]]></svg><div id='tail'></div>".*;
 
     var doc = TestDocument.init(alloc);
     defer doc.deinit();

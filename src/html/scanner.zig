@@ -373,6 +373,14 @@ pub inline fn findCommentClose(source: []const u8, content_start: usize) Comment
     return .{ .content_end = source.len, .token_end = source.len };
 }
 
+/// Finds the exclusive end of a CDATA token whose payload starts at
+/// `content_start` (immediately after `<![CDATA[`). Unterminated CDATA runs
+/// through EOF.
+pub inline fn findCdataEnd(source: []const u8, content_start: usize) usize {
+    const close = std.mem.indexOfPos(u8, source, content_start, "]]>") orelse return source.len;
+    return close + 3;
+}
+
 /// Finds an opaque declaration's closing `>`. Unlike normal attributes,
 /// declaration syntax can contain standalone quoted spans.
 pub inline fn findDeclarationEnd(source: []const u8, start: usize) ?usize {

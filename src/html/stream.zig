@@ -145,6 +145,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         implicit_source_mask: u8 = 0,
         implicit_source_counts: [8]IndexInt = .{0} ** 8,
         slow_close_misses: u8 = 0,
+        next_start_foreign_context: ?bool = null,
 
         const Self = @This();
 
@@ -197,7 +198,9 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             const self_closing = self.source[tag_end - 1] == '/' and scanner.isSelfClosingStartTag(self.source, tag.end, tag_end);
             const tag_name = self.source[tag.start..tag.end];
             const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
-            const foreign_element = self.currentForeignContext() or tags.isSvgWithKey(tag_name, tag.key) or tags.isMathWithKey(tag_name, tag.key);
+            const parent_foreign = self.next_start_foreign_context orelse self.currentForeignContext();
+            self.next_start_foreign_context = null;
+            const foreign_element = parent_foreign or tags.isSvgWithKey(tag_name, tag.key) or tags.isMathWithKey(tag_name, tag.key);
             const void_element = !foreign_element and tags.isVoidTagWithKey(tag_name, tag.key);
             const closes_immediately = void_element or (foreign_element and self_closing);
 
@@ -324,6 +327,15 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn parseBang(self: *Self) !void {
+            if (self.currentForeignContext() and std.mem.startsWith(u8, self.source[self.i..], "<![CDATA[")) {
+                const content_start = self.i + 9;
+                const token_end = scanner.findCdataEnd(self.source, content_start);
+                const content_end = if (token_end >= 3 and std.mem.endsWith(u8, self.source[self.i..token_end], "]]>")) token_end - 3 else token_end;
+                self.i = token_end;
+                try self.emitTextAtDepth(content_start, content_end, self.currentDepth());
+                return;
+            }
+
             if (self.i + 3 < self.source.len and self.source[self.i + 2] == '-' and self.source[self.i + 3] == '-') {
                 const start = self.i;
                 const content_start = self.i + 4;
@@ -618,7 +630,11 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 }
 
                 if (self.source[lt + 1] == '!') {
-                    i = self.findBangEnd(lt + 2);
+                    if (skipForeignContext(root, descendants.items) and std.mem.startsWith(u8, self.source[lt..], "<![CDATA[")) {
+                        i = scanner.findCdataEnd(self.source, lt + 9);
+                    } else {
+                        i = self.findBangEnd(lt + 2);
+                    }
                     continue;
                 }
 
@@ -664,7 +680,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                             while (pos > 0) {
                                 pos -= 1;
                                 const open = self.skipOpenAt(ancestor_count, root, descendants.items, pos);
-                                if (tags.isImplicitCloseSourceWithLenAndKey(open.name.len, open.key) and
+                                if (!open.foreign and tags.isImplicitCloseSourceWithLenAndKey(open.name.len, open.key) and
                                     tags.shouldImplicitlyCloseWithLenAndKey(open.name.len, open.key, child_name, child.key) and
                                     scope.permits(open.name.len, open.key))
                                 {
@@ -674,7 +690,14 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                                 scope.observe(open.name.len, open.key);
                             }
                             const found_pos = found orelse break;
-                            if (found_pos <= root_pos) return lt;
+                            if (found_pos <= root_pos) {
+                                // The triggering start tag belongs outside the skipped subtree,
+                                // but HTML-vs-foreign classification is determined before its
+                                // implicit closes. Preserve the skipped top-of-stack context for
+                                // exactly this reconsumed start tag.
+                                self.next_start_foreign_context = parent_foreign;
+                                return lt;
+                            }
                             descendants.items.len = found_pos - root_pos - 1;
                         }
                     }
@@ -912,6 +935,44 @@ test "SVG foreignObject children use HTML self-closing rules" {
     var ctx: Ctx = .{};
     try parse(std.testing.allocator, "<svg><foreignObject><div/>x</div></foreignObject></svg>", &ctx, Ctx.cb);
     try std.testing.expectEqual(@as(?usize, 3), ctx.text_depth);
+}
+
+test "streaming SVG CDATA is opaque text" {
+    const Ctx = struct {
+        saw_cdata: bool = false,
+        saw_fake_svg: bool = false,
+        saw_tail: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .text and std.mem.eql(u8, ev.valueSlice(), "x > <svg>")) self.saw_cdata = true;
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "svg") and ev.depth != 0) self.saw_fake_svg = true;
+            if (ev.kind == .start_tag and std.mem.eql(u8, ev.nameSlice(), "div")) self.saw_tail = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<svg><![CDATA[x > <svg>]]></svg><div></div>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.saw_cdata);
+    try std.testing.expect(!ctx.saw_fake_svg);
+    try std.testing.expect(ctx.saw_tail);
+}
+
+test "skipping SVG treats CDATA as opaque" {
+    const Ctx = struct {
+        saw_tail: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .start_tag) return true;
+            if (std.mem.eql(u8, ev.nameSlice(), "svg")) return false;
+            if (std.mem.eql(u8, ev.nameSlice(), "div")) self.saw_tail = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(std.testing.allocator, "<svg><![CDATA[x > <svg>]]></svg><div></div>", &ctx, Ctx.cb);
+    try std.testing.expect(ctx.saw_tail);
 }
 
 test "skipping SVG honors nested self-closing foreign elements" {
@@ -1269,6 +1330,59 @@ test "streaming subtree skip ends when an ancestor is implicitly or explicitly c
     try std.testing.expectEqual(@as(usize, 1), explicit_ctx.span_starts);
     try std.testing.expectEqual(@as(usize, 1), explicit_ctx.section_ends);
     try std.testing.expectEqual(@as(usize, 1), explicit_ctx.div_starts);
+}
+
+test "streaming subtree skip preserves integration-point context for resume tag" {
+    const Ctx = struct {
+        skip_option: bool,
+        option_starts: usize = 0,
+        hr_depth: ?IndexInt = null,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .start_tag) return true;
+            if (std.mem.eql(u8, ev.nameSlice(), "option")) {
+                self.option_starts += 1;
+                if (self.skip_option) return false;
+            }
+            if (std.mem.eql(u8, ev.nameSlice(), "hr")) self.hr_depth = ev.depth;
+            return true;
+        }
+    };
+
+    const source = "<optgroup><svg><option><foreignObject><section><hr>";
+    var full: Ctx = .{ .skip_option = false };
+    try parse(std.testing.allocator, source, &full, Ctx.cb);
+    var skipped: Ctx = .{ .skip_option = true };
+    try parse(std.testing.allocator, source, &skipped, Ctx.cb);
+
+    try std.testing.expectEqual(@as(?IndexInt, 0), full.hr_depth);
+    try std.testing.expectEqual(full.hr_depth, skipped.hr_depth);
+}
+
+test "streaming subtree skip does not treat foreign optional-close names as sources" {
+    const Ctx = struct {
+        skip_option: bool,
+        hr_starts: usize = 0,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .start_tag) return true;
+            if (self.skip_option and std.mem.eql(u8, ev.nameSlice(), "option")) return false;
+            if (std.mem.eql(u8, ev.nameSlice(), "hr")) self.hr_starts += 1;
+            return true;
+        }
+    };
+
+    // The option is an SVG foreign element, so the HTML <hr> inside the
+    // integration-point section must not implicitly close it. A skipped option
+    // therefore suppresses that hr event as part of its subtree.
+    const source = "<svg><option><foreignObject><section><hr></section></foreignObject></option></svg>";
+    var full: Ctx = .{ .skip_option = false };
+    try parse(std.testing.allocator, source, &full, Ctx.cb);
+    var skipped: Ctx = .{ .skip_option = true };
+    try parse(std.testing.allocator, source, &skipped, Ctx.cb);
+
+    try std.testing.expectEqual(@as(usize, 1), full.hr_starts);
+    try std.testing.expectEqual(@as(usize, 0), skipped.hr_starts);
 }
 
 test "streaming subtree skip respects nested list scope" {
