@@ -205,7 +205,14 @@ pub fn Executor(comptime Doc: type) type {
             }
             var eligible_bits = self.eligibleMask(parent, raw.parent);
             if (self.plan.has_tag_constraints) eligible_bits &= self.tagAllowedMask(raw.name_or_text.slice(self.doc.source));
-            const matched = try self.evaluateEligible(idx, eligible_bits, child_position);
+            const direct_hits = eligible_bits & self.plan.short_tag_only_mask;
+            if (comptime builtin.is_test) {
+                // All direct hits are exact short-tag matches for this one node,
+                // so they represent one local predicate even when repeated in
+                // multiple automaton states.
+                if (direct_hits != 0) self.stats.local_unique_predicate_evals += 1;
+            }
+            const matched = direct_hits | try self.evaluateEligible(idx, eligible_bits & ~self.plan.short_tag_only_mask, child_position);
             const final_hits = matched & self.plan.final_mask;
             const persistent = matched & self.plan.continuation_mask;
 
