@@ -152,6 +152,25 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         slow_close_misses: u8 = 0,
 
         const Self = @This();
+        const ImplicitBlockers = struct {
+            const M = tags.ImplicitCloseMask;
+            const regular: u8 = M.p | M.li | M.dt_dd | M.head;
+            const button: u8 = M.p;
+            const list_item: u8 = M.li;
+            const table: u8 = M.tr | M.td_th;
+            const select: u8 = M.option | M.optgroup;
+        };
+        const blocker_by_boundary = blk: {
+            const B = tags.ImplicitCloseBoundaryMask;
+            var table = [_]u8{0} ** 32;
+            table[B.regular] = ImplicitBlockers.regular;
+            table[B.button] = ImplicitBlockers.button;
+            table[B.list_item] = ImplicitBlockers.list_item;
+            table[B.table] = ImplicitBlockers.table;
+            table[B.select] = ImplicitBlockers.select;
+            table[B.regular | B.table] = ImplicitBlockers.regular | ImplicitBlockers.table;
+            break :blk table;
+        };
 
         fn run(self: *Self) !void {
             while (self.i < self.source.len) {
@@ -292,7 +311,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     if (foreign_element)
                         foreignRegularScopeBlockers(tag_name, true)
                     else
-                        tags.implicitCloseBlockerMask(tag_name.len, tag.key)
+                        blocker_by_boundary[tags.implicitCloseBoundaryMask(tag_name.len, tag.key)]
                 else
                     0,
             });
@@ -787,7 +806,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
         fn foreignRegularScopeBlockers(name: []const u8, foreign: bool) u8 {
             if (!foreign or name.len != 13 or !std.ascii.eqlIgnoreCase(name, "foreignObject")) return 0;
-            return tags.ImplicitCloseBlockerMask.regular;
+            return ImplicitBlockers.regular;
         }
 
         fn openMatches(self: *Self, open: OpenTag, close: TagScan) bool {

@@ -205,48 +205,9 @@ pub const ImplicitCloseBoundaryMask = struct {
     pub const select: u8 = 1 << 4;
 };
 
-/// Optional-close source classes hidden below one scope boundary. Keeping this
-/// in source-bit space lets parsers prune candidates with one mask operation.
-pub const ImplicitCloseBlockerMask = struct {
-    pub const regular: u8 = ImplicitCloseMask.p | ImplicitCloseMask.li | ImplicitCloseMask.dt_dd | ImplicitCloseMask.head;
-    pub const button: u8 = ImplicitCloseMask.p;
-    pub const list_item: u8 = ImplicitCloseMask.li;
-    pub const table: u8 = ImplicitCloseMask.tr | ImplicitCloseMask.td_th;
-    pub const select: u8 = ImplicitCloseMask.option | ImplicitCloseMask.optgroup;
-};
-
 /// Returns the optional-close scope boundaries contributed by an open tag.
 pub noinline fn implicitCloseBoundaryMask(tag_len: usize, key: u64) u8 {
     const B = ImplicitCloseBoundaryMask;
-    return switch (tag_len) {
-        2 => switch (key) {
-            KEY.TD, KEY.TH => B.regular,
-            KEY.OL, KEY.UL => B.list_item,
-            else => 0,
-        },
-        4 => if (key == KEY.HTML) B.regular | B.table else 0,
-        5 => if (key == KEY.TABLE) B.regular | B.table else 0,
-        6 => switch (key) {
-            KEY.APPLET, KEY.OBJECT => B.regular,
-            KEY.BUTTON => B.button,
-            KEY.SELECT => B.select,
-            else => 0,
-        },
-        7 => if (key == KEY.CAPTION or key == KEY.MARQUEE) B.regular else 0,
-        8 => switch (key) {
-            KEY.TEMPLATE => B.regular | B.table,
-            KEY.DATALIST => B.select,
-            else => 0,
-        },
-        else => 0,
-    };
-}
-
-/// Returns optional-close source classes blocked below an open tag.
-/// This mirrors `implicitCloseBoundaryMask` but directly uses source-class bits,
-/// avoiding per-candidate boundary-to-source translation during stack walks.
-pub noinline fn implicitCloseBlockerMask(tag_len: usize, key: u64) u8 {
-    const B = ImplicitCloseBlockerMask;
     return switch (tag_len) {
         2 => switch (key) {
             KEY.TD, KEY.TH => B.regular,
