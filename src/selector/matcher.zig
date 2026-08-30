@@ -880,7 +880,7 @@ fn matchesAttrSelector(
     sel: ast.AttrSelector,
 ) !bool {
     const name = sel.name.slice(selector_source);
-    if (sel.op == .exists and collected == null) return attr.hasAttr(doc, node, name);
+    if (sel.op == .exists) return attr.hasAttr(doc, node, name);
     const result = (try attrValueByNameFrom(doc, node, allocator, collected, name)) orelse return false;
     defer result.free(allocator);
     const value = sel.value.slice(selector_source);
