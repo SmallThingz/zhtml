@@ -245,8 +245,8 @@ pub fn Executor(comptime Doc: type) type {
         fn processSimpleElement(self: *Self, idx: IndexInt) !bool {
             const raw = &self.doc.nodes[idx];
             if (comptime builtin.is_test) self.stats.nodes_processed += 1;
-            self.node_ctx.begin(0);
             const allowed = if (self.plan.has_tag_constraints) self.tagAllowedMask(raw.name_or_text.slice(self.doc.source)) else std.math.maxInt(u64);
+            var ctx_ready = false;
             for (self.selector.groups) |group| {
                 if (group.compound_len != 1) continue;
                 const absolute: usize = @intCast(group.compound_start);
@@ -259,7 +259,15 @@ pub fn Executor(comptime Doc: type) type {
                 };
                 if (anchored) {
                     if (comptime builtin.is_test) self.stats.local_unique_predicate_evals += 1;
-                    if ((self.plan.short_tag_only_mask & bit(absolute)) != 0 or try matcher.matchesCompoundForward(Doc, self.doc, self.selector, comp, idx, &self.node_ctx)) {
+                    if ((self.plan.short_tag_only_mask & bit(absolute)) != 0) {
+                        if (comptime builtin.is_test) self.stats.nodes_emitted += 1;
+                        return true;
+                    }
+                    if (!ctx_ready) {
+                        self.node_ctx.begin(0);
+                        ctx_ready = true;
+                    }
+                    if (try matcher.matchesCompoundForward(Doc, self.doc, self.selector, comp, idx, &self.node_ctx)) {
                         if (comptime builtin.is_test) self.stats.nodes_emitted += 1;
                         return true;
                     }
