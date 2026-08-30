@@ -147,9 +147,9 @@ pub inline fn scanTagName(source: []const u8, start: usize, comptime normalize_f
 pub inline fn findTagEnd(source: []const u8, start: usize) ?usize {
     if (start >= source.len) return null;
 
-    // The hot path scans only for `>` and `=`. Quotes matter to the tokenizer
-    // only when an `=` has actually begun a quoted attribute value; scanning
-    // for every quote doubles the number of candidates on ordinary HTML.
+    // Keep the ordinary path identical to the old vectorized scanner while
+    // every value encountered so far is quoted. The first unquoted candidate
+    // tail-calls a specialized path, so normal tags carry no extra state.
     var search = start;
     while (std.mem.indexOfAnyPos(u8, source, search, ">=")) |special| {
         if (source[special] == '>') return special;
@@ -160,20 +160,52 @@ pub inline fn findTagEnd(source: []const u8, start: usize) ?usize {
 
         const quote = source[value_start];
         if (quote != '\'' and quote != '"') {
-            search = special + 1;
-            continue;
+            return findTagEndAfterUnquoted(source, start, special + 1);
         }
 
-        // Once an equals sign is followed by a quote, local byte context is
-        // not enough to know whether that equals sign is an assignment. It may
-        // itself be data in an unquoted value or the first byte of a recovered
-        // attribute name. Use the exact tokenizer state machine for this tag.
-        return findTagEndSlow(source, start);
+        const direct_assignment = special > search and
+            !tables.WhitespaceTable[source[special - 1]] and source[special - 1] != '/';
+        if (!direct_assignment and !assignmentEqStartsAttributeValue(source, start, special)) {
+            @branchHint(.unlikely);
+            return findTagEndSlow(source, start);
+        }
+        search = findBytePosOrEnd(source, value_start + 1, quote);
+        if (search == source.len) return null;
+        search += 1;
     }
     return null;
 }
 
-fn findTagEndSlow(source: []const u8, start: usize) ?usize {
+/// A prior non-quoted `=` makes a later quote locally ambiguous: it may be
+/// ordinary unquoted data or the opening delimiter of a later attribute.
+/// Continue the old two-byte vector scan while no quotes occur; on the first
+/// quote, use the exact tokenizer for the complete tag.
+inline fn findTagEndAfterUnquoted(source: []const u8, start: usize, initial_search: usize) ?usize {
+    var search = initial_search;
+    while (std.mem.indexOfAnyPos(u8, source, search, ">=")) |special| {
+        if (source[special] == '>') return special;
+
+        var value_start = special + 1;
+        while (value_start < source.len and tables.WhitespaceTable[source[value_start]]) : (value_start += 1) {}
+        if (value_start >= source.len) return null;
+
+        const quote = source[value_start];
+        if (quote == '\'' or quote == '"') return findTagEndSlow(source, start);
+        search = special + 1;
+    }
+    return null;
+}
+
+inline fn assignmentEqStartsAttributeValue(source: []const u8, start: usize, eq: usize) bool {
+    var i = eq;
+    while (i > start and tables.WhitespaceTable[source[i - 1]]) : (i -= 1) {}
+    const name_end = i;
+    while (i > start and tables.AttrNameCharTable[source[i - 1]]) : (i -= 1) {}
+    if (i == name_end) return false;
+    return i == start or tables.WhitespaceTable[source[i - 1]] or source[i - 1] == '/';
+}
+
+noinline fn findTagEndSlow(source: []const u8, start: usize) ?usize {
     const State = enum {
         before_attribute,
         attribute_name,
@@ -525,4 +557,17 @@ test "destructive raw text search does not mutate rejected close candidates" {
     try std.testing.expectEqualStrings("tail", source[close.close_end..]);
     // Searching itself is read-only, including the ultimately accepted close.
     try std.testing.expectEqualSlices(u8, &original, &source);
+}
+
+test "fast tag end matches exact tokenizer on randomized malformed tails" {
+    var prng = std.Random.DefaultPrng.init(0x9e3779b97f4a7c15);
+    const random = prng.random();
+    const alphabet = " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789=/\\\"'<>\t\n";
+    var buf: [64]u8 = undefined;
+    for (0..250_000) |_| {
+        const len = random.intRangeAtMost(usize, 0, buf.len);
+        for (buf[0..len]) |*b| b.* = alphabet[random.uintLessThan(usize, alphabet.len)];
+        const src = buf[0..len];
+        try std.testing.expectEqual(findTagEndSlow(src, 0), findTagEnd(src, 0));
+    }
 }
