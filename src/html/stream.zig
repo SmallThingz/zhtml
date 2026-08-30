@@ -499,7 +499,17 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 } else {
                     eligible &= ~top.implicit_blockers;
                     if (eligible == 0) return;
-                    while (stack_pos > 1) {
+                    if (stack_pos > 1) {
+                        stack_pos -= 1;
+                        const next = self.stack.items[stack_pos];
+                        if (next.implicit_source & eligible != 0) {
+                            found = stack_pos;
+                        } else {
+                            eligible &= ~next.implicit_blockers;
+                            if (eligible == 0) return;
+                        }
+                    }
+                    while (found == null and stack_pos > 1) {
                         stack_pos -= 1;
                         const open = self.stack.items[stack_pos];
                         if (open.implicit_source & eligible != 0) {
