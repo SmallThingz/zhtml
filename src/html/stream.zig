@@ -73,6 +73,26 @@ const ParserEventKind = EventKind;
 const ParserAttribute = Attribute;
 const ParserAttributeIterator = AttributeIterator;
 
+const event_options_mask: u16 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6);
+
+inline fn optionsBits(options: ParserOptions) u16 {
+    return (@as(u16, @intFromBool(options.drop_whitespace_text_nodes)) << 0) |
+        (@as(u16, @intFromBool(options.include_comments)) << 1) |
+        (@as(u16, @intFromBool(options.include_doctype)) << 2) |
+        (@as(u16, @intFromBool(options.include_processing_instructions)) << 3) |
+        (@as(u16, @intFromBool(options.emit_start_tags)) << 4) |
+        (@as(u16, @intFromBool(options.emit_text)) << 5) |
+        (@as(u16, @intFromBool(options.emit_end_tags)) << 6) |
+        (@as(u16, @intFromBool(options.emit_implicit_end_tags)) << 7) |
+        (@as(u16, @intFromBool(options.track_nesting)) << 8) |
+        (@as(u16, @intFromBool(options.assume_no_gt_in_attribute_values)) << 9);
+}
+
+inline fn optionValue(comptime static_options: ?ParserOptions, runtime: ParserOptions, comptime field: []const u8) bool {
+    if (static_options) |options| return @field(options, field);
+    return @field(runtime, field);
+}
+
 pub const Parser = struct {
     /// Configuration and callback types are namespaced under the parser API.
     pub const Options = ParserOptions;
@@ -83,27 +103,48 @@ pub const Parser = struct {
 
     options: ParserOptions = .{},
 
+    const default_options: ParserOptions = .{};
+    const full_fast_options: ParserOptions = .{
+        .emit_text = true,
+        .emit_start_tags = true,
+        .emit_end_tags = true,
+        .emit_implicit_end_tags = true,
+        .include_comments = true,
+        .include_doctype = true,
+        .include_processing_instructions = true,
+        .track_nesting = true,
+        .assume_no_gt_in_attribute_values = true,
+    };
+
     pub fn parse(self: @This(), allocator: std.mem.Allocator, source: []const u8, ctx: anytype, comptime callback: anytype) !void {
         if (!common.lenFits(source.len)) return error.InputTooLarge;
-        if (!self.options.emit_start_tags and
-            !self.options.emit_text and
-            !self.options.emit_end_tags and
-            !self.options.include_comments and
-            !self.options.include_doctype and
-            !self.options.include_processing_instructions)
-        {
-            return;
-        }
+        const bits = optionsBits(self.options);
+        if (bits & event_options_mask == 0) return;
 
+        if (bits == optionsBits(default_options))
+            return self.parseImpl(default_options, allocator, source, ctx, callback);
+        if (bits == optionsBits(full_fast_options))
+            return self.parseImpl(full_fast_options, allocator, source, ctx, callback);
+        return self.parseImpl(null, allocator, source, ctx, callback);
+    }
+
+    fn parseImpl(
+        self: @This(),
+        comptime static_options: ?ParserOptions,
+        allocator: std.mem.Allocator,
+        source: []const u8,
+        ctx: anytype,
+        comptime callback: anytype,
+    ) !void {
         var stack_buffer: [32]OpenTag = undefined;
-        var p = State(@TypeOf(ctx), callback){
+        var p = State(@TypeOf(ctx), callback, static_options){
             .allocator = allocator,
             .source = source,
             .ctx = ctx,
             .options = self.options,
             .stack = .initBuffer(&stack_buffer),
         };
-        if (self.options.track_nesting) p.stack.appendAssumeCapacity(.{ .name = .{}, .key = 0 });
+        if (optionValue(static_options, self.options, "track_nesting")) p.stack.appendAssumeCapacity(.{ .name = .{}, .key = 0 });
         defer if (p.stack_heap) p.stack.deinit(allocator);
         defer p.tag_index.deinit(allocator);
         try p.run();
@@ -137,7 +178,7 @@ const SkipResult = struct {
     resume_parent_foreign: ?bool = null,
 };
 
-fn State(comptime Ctx: type, comptime callback: anytype) type {
+fn State(comptime Ctx: type, comptime callback: anytype, comptime static_options: ?Options) type {
     return struct {
         allocator: std.mem.Allocator,
         source: []const u8,
@@ -152,6 +193,10 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         slow_close_misses: u8 = 0,
 
         const Self = @This();
+
+        inline fn option(self: *const Self, comptime field: []const u8) bool {
+            return optionValue(static_options, self.options, field);
+        }
         const ImplicitBlockers = struct {
             const M = tags.ImplicitCloseMask;
             const regular: u8 = M.p | M.li | M.dt_dd | M.head;
@@ -175,11 +220,11 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         fn run(self: *Self) !void {
             while (self.i < self.source.len) {
                 const lt = scanner.findBytePosOrEnd(self.source, self.i, '<');
-                if (lt > self.i and self.options.emit_text) try self.emitText(self.i, lt);
+                if (lt > self.i and self.option("emit_text")) try self.emitText(self.i, lt);
                 if (lt >= self.source.len) break;
                 self.i = lt;
                 if (self.i + 1 >= self.source.len) {
-                    if (self.options.emit_text) try self.emitText(self.i, self.source.len);
+                    if (self.option("emit_text")) try self.emitText(self.i, self.source.len);
                     self.i = self.source.len;
                     break;
                 }
@@ -192,7 +237,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 }
             }
 
-            if (self.options.track_nesting) {
+            if (self.option("track_nesting")) {
                 while (self.stack.items.len > 1) {
                     const open = self.popOpen();
                     try self.emitEnd(open, self.i, self.i, true);
@@ -228,7 +273,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             if (tag.end == tag.start) {
                 // HTML's data-state `<` is emitted as text when the following
                 // byte cannot start a tag, then that byte is reconsumed.
-                if (self.options.emit_text) try self.emitText(token_start, token_start + 1);
+                if (self.option("emit_text")) try self.emitText(token_start, token_start + 1);
                 self.i = token_start + 1;
                 return;
             }
@@ -246,7 +291,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             const void_element = !foreign_element and tags.isVoidTagWithKey(tag_name, tag.key);
             const closes_immediately = void_element or (foreign_element and self_closing);
 
-            const implicit_meta = if (self.options.track_nesting and !foreign_element) tags.implicitCloseMeta(tag_name, tag.key) else 0;
+            const implicit_meta = if (self.option("track_nesting") and !foreign_element) tags.implicitCloseMeta(tag_name, tag.key) else 0;
             const implicit_source: u8 = @truncate(implicit_meta);
             const implicit_trigger: u8 = @truncate(implicit_meta >> 8);
             if (self.stack.items.len > 1 and self.implicit_source_mask & implicit_trigger != 0) {
@@ -258,7 +303,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             const attrs_end = if (self_closing and tag_end > attrs_start) tag_end - 1 else tag_end;
             self.i = tag_end + 1;
 
-            if (self.options.emit_start_tags) {
+            if (self.option("emit_start_tags")) {
                 const ev = Event{
                     .source = self.source,
                     .kind = .start_tag,
@@ -287,10 +332,10 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             if (closes_immediately) return;
 
             if (!foreign_element and tags.isPlainTextTagWithKey(tag_name, tag.key)) {
-                const text_depth = if (self.options.track_nesting) depth + 1 else 0;
-                if (self.options.emit_text and self.i < self.source.len) try self.emitTextAtDepth(self.i, self.source.len, text_depth);
+                const text_depth = if (self.option("track_nesting")) depth + 1 else 0;
+                if (self.option("emit_text") and self.i < self.source.len) try self.emitTextAtDepth(self.i, self.source.len, text_depth);
                 self.i = self.source.len;
-                if (self.options.track_nesting) {
+                if (self.option("track_nesting")) {
                     const open = OpenTag{ .name = name_span, .key = tag.key };
                     try self.emitEnd(open, self.i, self.i, true);
                 }
@@ -302,7 +347,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 return;
             }
 
-            if (self.options.track_nesting) try self.pushOpen(.{
+            if (self.option("track_nesting")) try self.pushOpen(.{
                 .name = name_span,
                 .key = tag.key,
                 .foreign = foreign_element,
@@ -320,7 +365,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         /// Returns whether a new start tag is parsed in foreign content. SVG's
         /// `foreignObject` is an HTML integration point for its children.
         fn currentForeignContext(self: *const Self) bool {
-            if (!self.options.track_nesting or self.stack.items.len <= 1) return false;
+            if (!self.option("track_nesting") or self.stack.items.len <= 1) return false;
             const open = self.stack.items[self.stack.items.len - 1];
             if (!open.foreign) return false;
             const name = open.name.slice(self.source);
@@ -342,8 +387,8 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             self.i = token_end;
             const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
 
-            if (!self.options.track_nesting) {
-                if (self.options.emit_end_tags and tag.end != tag.start) {
+            if (!self.option("track_nesting")) {
+                if (self.option("emit_end_tags") and tag.end != tag.start) {
                     _ = try callback(self.ctx, .{
                         .source = self.source,
                         .kind = .end_tag,
@@ -382,7 +427,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 const content_start = self.i + 4;
                 const close = scanner.findCommentClose(self.source, content_start);
                 self.i = close.token_end;
-                if (self.options.include_comments) {
+                if (self.option("include_comments")) {
                     _ = try callback(self.ctx, .{
                         .source = self.source,
                         .kind = .comment,
@@ -409,7 +454,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             const token_end = self.findBangEnd(self.i + 2);
             const value_end = if (token_end > start and self.source[token_end - 1] == '>') token_end - 1 else token_end;
             self.i = token_end;
-            if (self.options.include_doctype) {
+            if (self.option("include_doctype")) {
                 _ = try callback(self.ctx, .{
                     .source = self.source,
                     .kind = .doctype,
@@ -427,7 +472,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             const value_end = if (close > content_start and close < self.source.len and self.source[close - 1] == '?') close - 1 else close;
             const token_end = @min(close + 1, self.source.len);
             self.i = token_end;
-            if (self.options.include_processing_instructions) {
+            if (self.option("include_processing_instructions")) {
                 _ = try callback(self.ctx, .{
                     .source = self.source,
                     .kind = .processing_instruction,
@@ -441,7 +486,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         fn parseRawText(self: *Self, tag: TagScan, depth: IndexInt) !void {
             const content_start = self.i;
             const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
-            const text_depth = if (self.options.track_nesting) depth + 1 else 0;
+            const text_depth = if (self.option("track_nesting")) depth + 1 else 0;
             const open = OpenTag{ .name = name_span, .key = tag.key };
             if (self.findRawTextClose(self.source[tag.start..tag.end], tag.key, self.i)) |close| {
                 if (close.content_end > content_start) try self.emitTextAtDepth(content_start, close.content_end, text_depth);
@@ -450,7 +495,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             } else {
                 if (content_start < self.source.len) try self.emitTextAtDepth(content_start, self.source.len, text_depth);
                 self.i = self.source.len;
-                if (self.options.track_nesting) try self.emitEnd(open, self.i, self.i, true);
+                if (self.option("track_nesting")) try self.emitEnd(open, self.i, self.i, true);
             }
         }
 
@@ -459,9 +504,9 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn emitTextAtDepth(self: *Self, start: usize, end: usize, depth: IndexInt) !void {
-            if (!self.options.emit_text) return;
+            if (!self.option("emit_text")) return;
             if (start >= end) return;
-            if (self.options.drop_whitespace_text_nodes) {
+            if (self.option("drop_whitespace_text_nodes")) {
                 var i = start;
                 while (i < end and tables.WhitespaceTable[self.source[i]]) : (i += 1) {}
                 if (i == end) return;
@@ -476,8 +521,8 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn emitEnd(self: *Self, open: OpenTag, token_start: usize, token_end: usize, implicit: bool) !void {
-            if (!self.options.emit_end_tags) return;
-            if (implicit and !self.options.emit_implicit_end_tags) return;
+            if (!self.option("emit_end_tags")) return;
+            if (implicit and !self.option("emit_implicit_end_tags")) return;
             _ = try callback(self.ctx, .{
                 .source = self.source,
                 .kind = .end_tag,
@@ -637,13 +682,13 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn currentDepth(self: *Self) IndexInt {
-            return if (self.options.track_nesting) @intCast(self.stack.items.len - 1) else 0;
+            return if (self.option("track_nesting")) @intCast(self.stack.items.len - 1) else 0;
         }
 
         fn findTagEnd(self: *Self, start: usize) ?usize {
             if (start >= self.source.len) return null;
             if (self.source[start] == '>') return start;
-            if (self.options.assume_no_gt_in_attribute_values) {
+            if (self.option("assume_no_gt_in_attribute_values")) {
                 const end = scanner.findBytePosOrEnd(self.source, start, '>');
                 return if (end == self.source.len) null else end;
             }
@@ -655,7 +700,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn findBangEnd(self: *Self, start: usize) usize {
-            if (self.options.assume_no_gt_in_attribute_values) {
+            if (self.option("assume_no_gt_in_attribute_values")) {
                 const end = scanner.findBytePosOrEnd(self.source, start, '>');
                 return @min(end + 1, self.source.len);
             }
@@ -671,7 +716,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             // temporary list. Most skipped subtrees are leaves or shallow, so
             // this avoids both copying the live stack and allocating at all
             // until an actual nested non-void child is encountered.
-            const ancestor_count = if (self.options.track_nesting) self.stack.items.len - 1 else 0;
+            const ancestor_count = if (self.option("track_nesting")) self.stack.items.len - 1 else 0;
             const root_pos = ancestor_count;
             const root = SkipOpenTag{ .name = name, .key = key, .foreign = foreign_content };
             var descendants: std.ArrayList(SkipOpenTag) = .empty;
