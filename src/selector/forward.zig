@@ -233,9 +233,10 @@ pub fn Executor(comptime Doc: type) type {
             if (!anchored) return false;
             const node_name = raw.name_or_text.slice(self.doc.source);
             const tag = comp.tag.slice(self.selector.source);
+            if (node_name.len != tag.len) return false;
             const node_key = tags.first8KeyWithMode(node_name, Doc.Options.non_destructive);
             const tag_key = if (comp.tag_key != 0) comp.tag_key else tags.first8KeyWithMode(tag, false);
-            const matched = node_name.len == tag.len and node_key == tag_key;
+            const matched = node_key == tag_key;
             if (comptime builtin.is_test) {
                 if (matched) self.stats.nodes_emitted += 1;
             }
