@@ -37,8 +37,6 @@ pub const Plan = struct {
     continuation_mask: u64 = 0,
     needs_child_position: bool = false,
     stateful: bool = false,
-    scope_self_seed_mask: u64 = 0,
-    scope_lineage_seed_mask: u64 = 0,
     has_tag_constraints: bool = false,
     short_tag_only_mask: u64 = 0,
 };
@@ -90,10 +88,6 @@ pub fn buildPlan(selector: ast.Selector) Plan {
         }
     }
 
-    if (compact) {
-        plan.scope_self_seed_mask = (plan.child_targets | plan.descendant_targets) >> 1;
-        plan.scope_lineage_seed_mask = plan.descendant_targets >> 1;
-    }
     return plan;
 }
 
@@ -139,7 +133,7 @@ pub fn Executor(comptime Doc: type) type {
         predicate_plan: matcher.PredicatePlan = .{},
         owns_predicate_plan: bool = true,
         seed_workspace: ?*matcher.MatchWorkspace = null,
-        stats: Stats = .{},
+        stats: if (builtin.is_test) Stats else void = if (builtin.is_test) .{} else {},
         initialized: bool = false,
         tag_cache: [16]TagCacheEntry = [_]TagCacheEntry{.{}} ** 16,
 
@@ -281,9 +275,9 @@ pub fn Executor(comptime Doc: type) type {
             errdefer self.deinit();
             self.root = .{};
             if (self.scope_root == InvalidIndex or self.scope_root == 0 or self.scope_root >= self.doc.nodes.len) return;
-            self.root.self_matches = try self.seedMaskAt(self.plan.scope_self_seed_mask, self.scope_root);
+            self.root.self_matches = try self.seedMaskAt((self.plan.child_targets | self.plan.descendant_targets) >> 1, self.scope_root);
 
-            var pending = self.plan.scope_lineage_seed_mask;
+            var pending = self.plan.descendant_targets >> 1;
             var cursor = self.scope_root;
             while (pending != 0 and cursor != InvalidIndex and cursor != 0) {
                 const found = try self.seedMaskAt(pending, cursor);
@@ -413,7 +407,7 @@ pub fn WideExecutor(comptime Doc: type) type {
         state_fanned_predicates: []u64 = &.{},
         touched_predicates: std.ArrayListUnmanaged(usize) = .empty,
         seed_workspace: ?*matcher.MatchWorkspace = null,
-        stats: Stats = .{},
+        stats: if (builtin.is_test) Stats else void = if (builtin.is_test) .{} else {},
         initialized: bool = false,
         root_child_count: IndexInt = 0,
 
