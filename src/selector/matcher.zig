@@ -991,6 +991,7 @@ fn prepareCollectedAttrs(selector: ast.Selector, comp: ast.Compound, out: *Colle
     var attr_i: IndexInt = 0;
     while (attr_i < comp.attr_len) : (attr_i += 1) {
         const attr_sel = selector.attrs[comp.attr_start + attr_i];
+        if (attr_sel.op == .exists) continue;
         const name = attr_sel.name.slice(selector.source);
         if (!pushCollectedName(out, name)) return false;
     }
@@ -1002,6 +1003,7 @@ fn prepareCollectedAttrs(selector: ast.Selector, comp: ast.Compound, out: *Colle
             .id => if (!pushCollectedName(out, "id")) return false,
             .class => if (!pushCollectedName(out, "class")) return false,
             .attr => {
+                if (item.attr.op == .exists) continue;
                 const name = item.attr.name.slice(selector.source);
                 if (!pushCollectedName(out, name)) return false;
             },
