@@ -775,8 +775,7 @@ fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: as
     const inspect_collected = possible_attr_requests >= 2 or comp.not_len != 0;
     const use_collected = inspect_collected and prepareCollectedAttrs(selector, comp, &collected_attrs);
     const collected_ptr: ?*CollectedAttrs = if (use_collected) &collected_attrs else null;
-    const has_attr_requests = if (inspect_collected) collected_attrs.count != 0 else possible_attr_requests != 0;
-    const scratch_alloc: std.mem.Allocator = if (has_attr_requests) ctx.scratchAllocator(doc.allocator) else undefined;
+    const attr_allocator: std.mem.Allocator = if (use_collected) ctx.scratchAllocator(doc.allocator) else doc.allocator;
     const last_child_cache = &ctx.last_child_cache;
 
     if (comp.hasTag()) {
@@ -786,31 +785,33 @@ fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: as
 
     if (comp.hasId()) {
         const id = comp.id.slice(selector.source);
-        const value = try attrValueByNameFrom(
+        const result = try attrValueByNameFrom(
             doc,
             node,
-            scratch_alloc,
+            attr_allocator,
             collected_ptr,
             "id",
         ) orelse return false;
-        if (!std.mem.eql(u8, value, id)) return false;
+        defer result.free(attr_allocator);
+        if (!std.mem.eql(u8, result.value, id)) return false;
     }
 
     if (comp.class_len != 0) {
-        const class_attr = try attrValueByNameFrom(
+        const result = try attrValueByNameFrom(
             doc,
             node,
-            scratch_alloc,
+            attr_allocator,
             collected_ptr,
             "class",
         ) orelse return false;
-        if (!hasAllClassesOnePass(selector, comp, class_attr)) return false;
+        defer result.free(attr_allocator);
+        if (!hasAllClassesOnePass(selector, comp, result.value)) return false;
     }
 
     var attr_i: IndexInt = 0;
     while (attr_i < comp.attr_len) : (attr_i += 1) {
         const attr_sel = selector.attrs[comp.attr_start + attr_i];
-        if (!try matchesAttrSelector(doc, node, scratch_alloc, collected_ptr, selector.source, attr_sel)) return false;
+        if (!try matchesAttrSelector(doc, node, attr_allocator, collected_ptr, selector.source, attr_sel)) return false;
     }
 
     var pseudo_i: IndexInt = 0;
@@ -833,7 +834,7 @@ fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: as
     var not_i: IndexInt = 0;
     while (not_i < comp.not_len) : (not_i += 1) {
         const item = selector.not_items[comp.not_start + not_i];
-        if (try matchesNotSimple(doc, node, scratch_alloc, collected_ptr, selector.source, item)) return false;
+        if (try matchesNotSimple(doc, node, attr_allocator, collected_ptr, selector.source, item)) return false;
     }
 
     return true;
@@ -850,8 +851,9 @@ fn matchesNotSimple(
     return switch (item.kind) {
         .tag => std.ascii.eqlIgnoreCase(node.name_or_text.slice(doc.source), item.text.slice(selector_source)),
         .id => blk: {
-            const value = (try attrValueByNameFrom(doc, node, allocator, collected, "id")) orelse break :blk false;
-            break :blk std.mem.eql(u8, value, item.text.slice(selector_source));
+            const result = (try attrValueByNameFrom(doc, node, allocator, collected, "id")) orelse break :blk false;
+            defer result.free(allocator);
+            break :blk std.mem.eql(u8, result.value, item.text.slice(selector_source));
         },
         .class => try hasClass(doc, node, allocator, collected, item.text.slice(selector_source)),
         .attr => try matchesAttrSelector(doc, node, allocator, collected, selector_source, item.attr),
@@ -878,9 +880,10 @@ fn matchesAttrSelector(
     sel: ast.AttrSelector,
 ) !bool {
     const name = sel.name.slice(selector_source);
-    const raw = (try attrValueByNameFrom(doc, node, allocator, collected, name)) orelse return false;
+    const result = (try attrValueByNameFrom(doc, node, allocator, collected, name)) orelse return false;
+    defer result.free(allocator);
     const value = sel.value.slice(selector_source);
-    return evalAttrOp(raw, value, sel.op, sel.case);
+    return evalAttrOp(result.value, value, sel.op, sel.case);
 }
 
 fn hasClass(
@@ -890,8 +893,9 @@ fn hasClass(
     collected: ?*CollectedAttrs,
     class_name: []const u8,
 ) !bool {
-    const class_attr = (try attrValueByNameFrom(doc, node, allocator, collected, "class")) orelse return false;
-    return tables.tokenIncludesAsciiWhitespace(class_attr, class_name);
+    const result = (try attrValueByNameFrom(doc, node, allocator, collected, "class")) orelse return false;
+    defer result.free(allocator);
+    return tables.tokenIncludesAsciiWhitespace(result.value, class_name);
 }
 
 fn hasAllClassesOnePass(selector: ast.Selector, comp: ast.Compound, class_attr: []const u8) bool {
@@ -937,17 +941,17 @@ fn attrValueByNameFrom(
     allocator: std.mem.Allocator,
     collected: ?*CollectedAttrs,
     name: []const u8,
-) !?[]const u8 {
+) !?common.SliceResult {
     if (collected) |c| {
         if (findCollectedEntry(c, name)) |idx| {
-            if (c.materialized or c.looked[idx]) return c.values[idx];
+            if (c.materialized or c.looked[idx]) return if (c.values[idx]) |value| .{ .value = value } else null;
 
             if (!c.requested_once) {
-                const value = try attrValueByName(doc, node, allocator, name);
-                c.values[idx] = value;
+                const result = try attr.getAttrValue(doc, node, name, allocator);
+                c.values[idx] = if (result) |r| r.value else null;
                 c.looked[idx] = true;
                 c.requested_once = true;
-                return value;
+                return if (result) |r| .{ .value = r.value } else null;
             }
 
             try attr.collectSelectedValues(
@@ -960,15 +964,10 @@ fn attrValueByNameFrom(
             c.materialized = true;
             var i: usize = 0;
             while (i < c.count) : (i += 1) c.looked[i] = true;
-            return c.values[idx];
+            return if (c.values[idx]) |value| .{ .value = value } else null;
         }
     }
-    return try attrValueByName(doc, node, allocator, name);
-}
-
-fn attrValueByName(doc: anytype, node: anytype, allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
-    const result = try attr.getAttrValue(doc, node, name, allocator);
-    return if (result) |r| r.value else null;
+    return try attr.getAttrValue(doc, node, name, allocator);
 }
 
 const CollectedAttrs = struct {
