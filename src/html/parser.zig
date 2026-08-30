@@ -591,24 +591,27 @@ fn ParseState(comptime opts: ParseOptions) type {
                 var eligible = self.implicit_source_mask & trigger_mask;
                 if (eligible == 0) return;
 
-                var pos = self.parse_stack.items.len;
+                var pos = self.parse_stack.items.len - 1;
                 var found: ?usize = null;
-                while (pos > 1) {
-                    pos -= 1;
-                    const open = self.parse_stack.items[pos];
-                    if (open.implicit_source & eligible != 0) {
-                        found = pos;
-                        break;
-                    }
-                    if (open.implicit_blockers != 0) {
+                const top = self.parse_stack.items[pos];
+                if (top.implicit_source & eligible != 0) {
+                    found = pos;
+                } else {
+                    eligible &= ~top.implicit_blockers;
+                    if (eligible == 0) return;
+                    while (pos > 1) {
+                        pos -= 1;
+                        const open = self.parse_stack.items[pos];
+                        if (open.implicit_source & eligible != 0) {
+                            found = pos;
+                            break;
+                        }
                         eligible &= ~open.implicit_blockers;
                         if (eligible == 0) break;
                     }
                 }
 
-                const found_pos = found orelse break;
-                // Pop the optional-close source and every inline descendant
-                // above it, exactly as an explicit close of that source would.
+                const found_pos = found orelse return;
                 while (self.parse_stack.items.len > found_pos) {
                     const popped = self.popOpen(indexed);
                     var n = &self.nodes.items[popped.idx];
