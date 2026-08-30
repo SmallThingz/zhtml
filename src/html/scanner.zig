@@ -158,16 +158,16 @@ pub inline fn findTagEnd(source: []const u8, start: usize) ?usize {
         while (value_start < source.len and tables.WhitespaceTable[source[value_start]]) : (value_start += 1) {}
         if (value_start >= source.len) return null;
 
-        const quote = source[value_start];
-        if (quote != '\'' and quote != '"') {
-            return findTagEndAfterUnquoted(source, start, special + 1);
-        }
-
         const direct_assignment = special > search and
             !tables.WhitespaceTable[source[special - 1]] and source[special - 1] != '/';
         if (!direct_assignment and !assignmentEqStartsAttributeValue(source, start, special)) {
             @branchHint(.unlikely);
             return findTagEndSlow(source, start);
+        }
+
+        const quote = source[value_start];
+        if (quote != '\'' and quote != '"') {
+            return findTagEndAfterUnquoted(source, value_start);
         }
         search = findBytePosOrEnd(source, value_start + 1, quote);
         if (search == source.len) return null;
@@ -180,18 +180,12 @@ pub inline fn findTagEnd(source: []const u8, start: usize) ?usize {
 /// ordinary unquoted data or the opening delimiter of a later attribute.
 /// Continue the old two-byte vector scan while no quotes occur; on the first
 /// quote, use the exact tokenizer for the complete tag.
-inline fn findTagEndAfterUnquoted(source: []const u8, start: usize, initial_search: usize) ?usize {
-    var search = initial_search;
-    while (std.mem.indexOfAnyPos(u8, source, search, ">=")) |special| {
-        if (source[special] == '>') return special;
-
-        var value_start = special + 1;
-        while (value_start < source.len and tables.WhitespaceTable[source[value_start]]) : (value_start += 1) {}
-        if (value_start >= source.len) return null;
-
-        const quote = source[value_start];
-        if (quote == '\'' or quote == '"') return findTagEndSlow(source, start);
-        search = special + 1;
+noinline fn findTagEndAfterUnquoted(source: []const u8, value_start: usize) ?usize {
+    var i = value_start;
+    while (i < source.len) : (i += 1) {
+        const c = source[i];
+        if (c == '>') return i;
+        if (tables.WhitespaceTable[c]) return findTagEnd(source, i);
     }
     return null;
 }
