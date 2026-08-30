@@ -471,28 +471,34 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
         fn applyImplicitClosures(self: *Self, trigger: u8, pos: usize) !void {
             while (self.implicit_source_mask & trigger != 0) {
-                var stack_pos = self.stack.items.len;
+                var stack_pos = self.stack.items.len - 1;
                 var found: ?usize = null;
                 var scope: u8 = 0;
                 const B = tags.ImplicitCloseBoundaryMask;
-                while (stack_pos > 1) {
-                    stack_pos -= 1;
-                    const open = self.stack.items[stack_pos];
-                    if (open.implicit_source & trigger != 0) {
-                        const blockers: u8 = switch (open.implicit_source) {
-                            tags.ImplicitCloseMask.p => B.regular | B.button,
-                            tags.ImplicitCloseMask.li => B.regular | B.list_item,
-                            tags.ImplicitCloseMask.dt_dd, tags.ImplicitCloseMask.head => B.regular,
-                            tags.ImplicitCloseMask.tr, tags.ImplicitCloseMask.td_th => B.table,
-                            tags.ImplicitCloseMask.option, tags.ImplicitCloseMask.optgroup => B.select,
-                            else => 0,
-                        };
-                        if (scope & blockers == 0) {
-                            found = stack_pos;
-                            break;
+                const top = self.stack.items[stack_pos];
+                if (top.implicit_source & trigger != 0) {
+                    found = stack_pos;
+                } else {
+                    scope = top.implicit_boundary;
+                    while (stack_pos > 1) {
+                        stack_pos -= 1;
+                        const open = self.stack.items[stack_pos];
+                        if (open.implicit_source & trigger != 0) {
+                            const blockers: u8 = switch (open.implicit_source) {
+                                tags.ImplicitCloseMask.p => B.regular | B.button,
+                                tags.ImplicitCloseMask.li => B.regular | B.list_item,
+                                tags.ImplicitCloseMask.dt_dd, tags.ImplicitCloseMask.head => B.regular,
+                                tags.ImplicitCloseMask.tr, tags.ImplicitCloseMask.td_th => B.table,
+                                tags.ImplicitCloseMask.option, tags.ImplicitCloseMask.optgroup => B.select,
+                                else => 0,
+                            };
+                            if (scope & blockers == 0) {
+                                found = stack_pos;
+                                break;
+                            }
                         }
+                        scope |= open.implicit_boundary;
                     }
-                    scope |= open.implicit_boundary;
                 }
 
                 const found_pos = found orelse break;
