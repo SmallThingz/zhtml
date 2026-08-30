@@ -314,7 +314,7 @@ pub const Selector = struct {
 
     /// Compiles a selector at comptime with compile-time diagnostics.
     pub fn compile(comptime source: []const u8) @This() {
-        return @import("compile_time.zig").compileImpl(source);
+        return comptime @import("compile_time.zig").compileImpl(source);
     }
 
     /// Compiles a selector at runtime.

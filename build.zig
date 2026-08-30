@@ -162,6 +162,19 @@ pub fn build(b: *std.Build) void {
     });
     const run_behavioral_tests = b.addRunArtifact(behavioral_tests);
 
+    const public_api_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/tests/public_api_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "html", .module = mod },
+            },
+        }),
+        .test_runner = .{ .path = b.path("tools/test_runner.zig"), .mode = .simple },
+    });
+    const run_public_api_tests = b.addRunArtifact(public_api_tests);
+
     const scripts_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/scripts.zig"),
@@ -190,6 +203,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_examples_tests.step);
     test_step.dependOn(&run_behavioral_tests.step);
+    test_step.dependOn(&run_public_api_tests.step);
     test_step.dependOn(&run_scripts_tests.step);
     test_step.dependOn(&run_bench_tests.step);
 
