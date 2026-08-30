@@ -59,6 +59,7 @@ pub const ComptimeAllocator = struct {
 
 /// Compiles selector source at comptime into a fully materialized AST.
 pub fn compileImpl(comptime source: []const u8) ast.Selector {
+    @setEvalBranchQuota(100_000);
     const parsed = runtime.compileRuntimeImpl(ComptimeAllocator.interface, source) catch |err| {
         @compileError("invalid selector: " ++ source ++ " (" ++ @errorName(err) ++ ")");
     };
