@@ -263,7 +263,13 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 .key = tag.key,
                 .foreign = foreign_element,
                 .implicit_source = implicit_source,
-                .implicit_boundary = if (self.implicit_source_mask != 0) tags.implicitCloseBoundaryMask(tag_name.len, tag.key) else 0,
+                .implicit_boundary = if (self.implicit_source_mask != 0)
+                    if (foreign_element)
+                        foreignRegularScopeBoundary(tag_name, true)
+                    else
+                        tags.implicitCloseBoundaryMask(tag_name.len, tag.key)
+                else
+                    0,
             });
         }
 
@@ -687,7 +693,11 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                                     found = pos;
                                     break;
                                 }
-                                scope.observe(open.name.len, open.key);
+                                if (open.foreign) {
+                                    scope.regular = scope.regular or foreignRegularScopeBoundary(open.name, true) != 0;
+                                } else {
+                                    scope.observe(open.name.len, open.key);
+                                }
                             }
                             const found_pos = found orelse break;
                             if (found_pos <= root_pos) {
@@ -742,6 +752,14 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             const open = if (descendants.len != 0) descendants[descendants.len - 1] else root;
             if (!open.foreign) return false;
             return !(open.name.len == 13 and std.ascii.eqlIgnoreCase(open.name, "foreignObject"));
+        }
+
+        /// SVG `foreignObject` is both an HTML integration point and a regular
+        /// HTML scope boundary. A block start inside it must not reach through
+        /// the foreign subtree and implicitly close an HTML ancestor outside it.
+        fn foreignRegularScopeBoundary(name: []const u8, foreign: bool) u8 {
+            if (!foreign or name.len != 13 or !std.ascii.eqlIgnoreCase(name, "foreignObject")) return 0;
+            return tags.ImplicitCloseBoundaryMask.regular;
         }
 
         fn openMatches(self: *Self, open: OpenTag, close: TagScan) bool {
@@ -1614,4 +1632,97 @@ test "plaintext start tag implicitly closes paragraph before text" {
     try std.testing.expect(ctx.p_closed);
     // <p> has closed, so plaintext is at depth 0 and its text is at depth 1.
     try std.testing.expectEqual(@as(?IndexInt, 1), ctx.text_depth);
+}
+
+test "streaming SVG integration point is an HTML scope boundary" {
+    const Ctx = struct {
+        div_depth: ?IndexInt = null,
+        implicit_p_before_div: bool = false,
+        saw_div: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .end_tag and ev.implicit and std.ascii.eqlIgnoreCase(ev.nameSlice(), "p") and !self.saw_div) {
+                self.implicit_p_before_div = true;
+            }
+            if (ev.kind == .start_tag and std.ascii.eqlIgnoreCase(ev.nameSlice(), "div")) {
+                self.saw_div = true;
+                self.div_depth = ev.depth;
+            }
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(
+        std.testing.allocator,
+        "<p><svg><foreignObject><div>x</div></foreignObject></svg></p>",
+        &ctx,
+        Ctx.cb,
+    );
+    try std.testing.expect(!ctx.implicit_p_before_div);
+    try std.testing.expectEqual(@as(?IndexInt, 3), ctx.div_depth);
+}
+
+test "streaming subtree skip respects SVG integration-point scope boundary" {
+    const Ctx = struct {
+        saw_div: bool = false,
+        saw_tail: bool = false,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind == .start_tag and std.ascii.eqlIgnoreCase(ev.nameSlice(), "section")) return false;
+            if (ev.kind == .start_tag and std.ascii.eqlIgnoreCase(ev.nameSlice(), "div")) self.saw_div = true;
+            if (ev.kind == .start_tag and std.ascii.eqlIgnoreCase(ev.nameSlice(), "hr")) self.saw_tail = true;
+            return true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try parse(
+        std.testing.allocator,
+        "<p><svg><foreignObject><section><div>skip</div></section></foreignObject></svg></p><hr>",
+        &ctx,
+        Ctx.cb,
+    );
+    try std.testing.expect(!ctx.saw_div);
+    try std.testing.expect(ctx.saw_tail);
+}
+
+test "streaming foreign tag names do not create HTML optional-close scope boundaries" {
+    const Ctx = struct {
+        tr_count: usize = 0,
+        second_tr_depth: ?IndexInt = null,
+        option_count: usize = 0,
+        second_option_depth: ?IndexInt = null,
+
+        fn cb(self: *@This(), ev: Event) !bool {
+            if (ev.kind != .start_tag) return true;
+            if (std.ascii.eqlIgnoreCase(ev.nameSlice(), "tr")) {
+                self.tr_count += 1;
+                if (self.tr_count == 2) self.second_tr_depth = ev.depth;
+            }
+            if (std.ascii.eqlIgnoreCase(ev.nameSlice(), "option")) {
+                self.option_count += 1;
+                if (self.option_count == 2) self.second_option_depth = ev.depth;
+            }
+            return true;
+        }
+    };
+
+    var table_ctx: Ctx = .{};
+    try parse(
+        std.testing.allocator,
+        "<tr><svg><table><foreignObject><tr></tr></foreignObject></table></svg></tr>",
+        &table_ctx,
+        Ctx.cb,
+    );
+    try std.testing.expectEqual(@as(?IndexInt, 0), table_ctx.second_tr_depth);
+
+    var select_ctx: Ctx = .{};
+    try parse(
+        std.testing.allocator,
+        "<option><svg><select><foreignObject><option></option></foreignObject></select></svg></option>",
+        &select_ctx,
+        Ctx.cb,
+    );
+    try std.testing.expectEqual(@as(?IndexInt, 0), select_ctx.second_option_depth);
 }
