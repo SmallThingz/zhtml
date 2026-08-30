@@ -136,7 +136,7 @@ pub const Parser = struct {
         ctx: anytype,
         comptime callback: anytype,
     ) !void {
-        var stack_buffer: [64]OpenTag = undefined;
+        var stack_buffer: [76]OpenTag = undefined;
         var p = State(@TypeOf(ctx), callback, static_options){
             .allocator = allocator,
             .source = source,
@@ -157,7 +157,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8, ctx: anytype, com
 
 const OpenTag = struct {
     name: Span,
-    key: u64,
+    key: u64 align(4),
     foreign: bool = false,
     implicit_source: u8 = 0,
     implicit_blockers: u8 = 0,
