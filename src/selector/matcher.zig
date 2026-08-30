@@ -19,7 +19,6 @@ const common = @import("../common.zig");
 
 const IndexInt = common.IndexInt;
 const InvalidIndex: IndexInt = common.InvalidIndex;
-const MaxProbeEntries: usize = 24;
 const MaxCollectedAttrs: usize = 24;
 const matchesScopeAnchor = common.matchesScopeAnchor;
 const parentElement = common.parentElement;
@@ -737,13 +736,11 @@ fn matchDeterministicGroup(comptime Doc: type, doc: *const Doc, selector: ast.Se
 
 pub const NodeContext = struct {
     scratch: ?std.heap.ArenaAllocator = null,
-    probe: AttrProbe = .{},
     child_position: usize = 0,
     last_child_cache: ?bool = null,
 
     pub fn begin(self: *@This(), child_position: usize) void {
         if (self.scratch) |*scratch| _ = scratch.reset(.retain_capacity);
-        self.probe.reset();
         self.child_position = child_position;
         self.last_child_cache = null;
     }
@@ -780,7 +777,6 @@ fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: as
     const collected_ptr: ?*CollectedAttrs = if (use_collected) &collected_attrs else null;
     const has_attr_requests = if (inspect_collected) collected_attrs.count != 0 else possible_attr_requests != 0;
     const scratch_alloc: std.mem.Allocator = if (has_attr_requests) ctx.scratchAllocator(doc.allocator) else undefined;
-    const attr_probe = &ctx.probe;
     const last_child_cache = &ctx.last_child_cache;
 
     if (comp.hasTag()) {
@@ -794,7 +790,6 @@ fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: as
             doc,
             node,
             scratch_alloc,
-            attr_probe,
             collected_ptr,
             "id",
         ) orelse return false;
@@ -806,7 +801,6 @@ fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: as
             doc,
             node,
             scratch_alloc,
-            attr_probe,
             collected_ptr,
             "class",
         ) orelse return false;
@@ -816,7 +810,7 @@ fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: as
     var attr_i: IndexInt = 0;
     while (attr_i < comp.attr_len) : (attr_i += 1) {
         const attr_sel = selector.attrs[comp.attr_start + attr_i];
-        if (!try matchesAttrSelector(doc, node, scratch_alloc, attr_probe, collected_ptr, selector.source, attr_sel)) return false;
+        if (!try matchesAttrSelector(doc, node, scratch_alloc, collected_ptr, selector.source, attr_sel)) return false;
     }
 
     var pseudo_i: IndexInt = 0;
@@ -839,7 +833,7 @@ fn matchesCompoundCore(comptime Doc: type, noalias doc: *const Doc, selector: as
     var not_i: IndexInt = 0;
     while (not_i < comp.not_len) : (not_i += 1) {
         const item = selector.not_items[comp.not_start + not_i];
-        if (try matchesNotSimple(doc, node, scratch_alloc, attr_probe, collected_ptr, selector.source, item)) return false;
+        if (try matchesNotSimple(doc, node, scratch_alloc, collected_ptr, selector.source, item)) return false;
     }
 
     return true;
@@ -849,7 +843,6 @@ fn matchesNotSimple(
     doc: anytype,
     node: anytype,
     allocator: std.mem.Allocator,
-    noalias probe: *AttrProbe,
     collected: ?*CollectedAttrs,
     selector_source: []const u8,
     item: ast.NotSimple,
@@ -857,11 +850,11 @@ fn matchesNotSimple(
     return switch (item.kind) {
         .tag => std.ascii.eqlIgnoreCase(node.name_or_text.slice(doc.source), item.text.slice(selector_source)),
         .id => blk: {
-            const value = (try attrValueByNameFrom(doc, node, allocator, probe, collected, "id")) orelse break :blk false;
+            const value = (try attrValueByNameFrom(doc, node, allocator, collected, "id")) orelse break :blk false;
             break :blk std.mem.eql(u8, value, item.text.slice(selector_source));
         },
-        .class => try hasClass(doc, node, allocator, probe, collected, item.text.slice(selector_source)),
-        .attr => try matchesAttrSelector(doc, node, allocator, probe, collected, selector_source, item.attr),
+        .class => try hasClass(doc, node, allocator, collected, item.text.slice(selector_source)),
+        .attr => try matchesAttrSelector(doc, node, allocator, collected, selector_source, item.attr),
     };
 }
 
@@ -880,13 +873,12 @@ fn matchesAttrSelector(
     doc: anytype,
     node: anytype,
     allocator: std.mem.Allocator,
-    noalias probe: *AttrProbe,
     collected: ?*CollectedAttrs,
     selector_source: []const u8,
     sel: ast.AttrSelector,
 ) !bool {
     const name = sel.name.slice(selector_source);
-    const raw = (try attrValueByNameFrom(doc, node, allocator, probe, collected, name)) orelse return false;
+    const raw = (try attrValueByNameFrom(doc, node, allocator, collected, name)) orelse return false;
     const value = sel.value.slice(selector_source);
     return evalAttrOp(raw, value, sel.op, sel.case);
 }
@@ -895,11 +887,10 @@ fn hasClass(
     doc: anytype,
     node: anytype,
     allocator: std.mem.Allocator,
-    noalias probe: *AttrProbe,
     collected: ?*CollectedAttrs,
     class_name: []const u8,
 ) !bool {
-    const class_attr = (try attrValueByNameFrom(doc, node, allocator, probe, collected, "class")) orelse return false;
+    const class_attr = (try attrValueByNameFrom(doc, node, allocator, collected, "class")) orelse return false;
     return tables.tokenIncludesAsciiWhitespace(class_attr, class_name);
 }
 
@@ -944,7 +935,6 @@ fn attrValueByNameFrom(
     doc: anytype,
     node: anytype,
     allocator: std.mem.Allocator,
-    noalias probe: *AttrProbe,
     collected: ?*CollectedAttrs,
     name: []const u8,
 ) !?[]const u8 {
@@ -953,7 +943,7 @@ fn attrValueByNameFrom(
             if (c.materialized or c.looked[idx]) return c.values[idx];
 
             if (!c.requested_once) {
-                const value = try attrValueByName(doc, node, allocator, probe, name);
+                const value = try attrValueByName(doc, node, allocator, name);
                 c.values[idx] = value;
                 c.looked[idx] = true;
                 c.requested_once = true;
@@ -973,48 +963,13 @@ fn attrValueByNameFrom(
             return c.values[idx];
         }
     }
-    return try attrValueByName(doc, node, allocator, probe, name);
+    return try attrValueByName(doc, node, allocator, name);
 }
 
-fn attrValueByName(doc: anytype, node: anytype, allocator: std.mem.Allocator, noalias probe: *AttrProbe, name: []const u8) !?[]const u8 {
-    if (findProbeEntry(probe, name)) |idx| {
-        return probe.entries[idx].value;
-    }
-
-    if (!probe.overflow and probe.count < MaxProbeEntries) {
-        const result = try attr.getAttrValue(doc, node, name, allocator);
-        const value = if (result) |r| r.value else null;
-        const idx = probe.count;
-        probe.entries[idx] = .{
-            .name = name,
-            .value = value,
-        };
-        probe.count += 1;
-        return value;
-    }
-
-    probe.overflow = true;
-    // Fallback for very large compounds bypasses memoization once the fixed probe
-    // budget is exhausted. Rare expanding entity values may use arena scratch.
+fn attrValueByName(doc: anytype, node: anytype, allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
     const result = try attr.getAttrValue(doc, node, name, allocator);
     return if (result) |r| r.value else null;
 }
-
-const AttrProbeEntry = struct {
-    name: []const u8 = "",
-    value: ?[]const u8 = null,
-};
-
-const AttrProbe = struct {
-    count: usize = 0,
-    overflow: bool = false,
-    entries: [MaxProbeEntries]AttrProbeEntry = [_]AttrProbeEntry{.{}} ** MaxProbeEntries,
-
-    inline fn reset(self: *@This()) void {
-        self.count = 0;
-        self.overflow = false;
-    }
-};
 
 const CollectedAttrs = struct {
     count: usize = 0,
@@ -1074,17 +1029,6 @@ fn findCollectedEntry(collected: *const CollectedAttrs, needle: []const u8) ?usi
         if (cand.len != needle.len) continue;
         if (cand.len != 0 and std.ascii.toLower(cand[0]) != std.ascii.toLower(needle[0])) continue;
         if (std.ascii.eqlIgnoreCase(cand, needle)) return i;
-    }
-    return null;
-}
-
-fn findProbeEntry(noalias probe: *const AttrProbe, needle: []const u8) ?usize {
-    var i: usize = 0;
-    while (i < probe.count) : (i += 1) {
-        const entry = probe.entries[i];
-        if (entry.name.len != needle.len) continue;
-        if (entry.name.len != 0 and std.ascii.toLower(entry.name[0]) != std.ascii.toLower(needle[0])) continue;
-        if (std.ascii.eqlIgnoreCase(entry.name, needle)) return i;
     }
     return null;
 }

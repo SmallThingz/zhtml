@@ -2759,6 +2759,19 @@ test "attribute selectors support case-sensitivity flags" {
     try expectDocQueryRuntime(&doc, "a:not([data-k=hello-world i])", &.{});
 }
 
+test "attribute selector compounds beyond collected cache capacity remain correct" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+
+    var html = "<div id='x' a00 a01 a02 a03 a04 a05 a06 a07 a08 a09 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20 a21 a22 a23 a24></div>".*;
+    try resetParsed(.{}, &doc, &html);
+
+    const selector = "div[a00][a01][a02][a03][a04][a05][a06][a07][a08][a09][a10][a11][a12][a13][a14][a15][a16][a17][a18][a19][a20][a21][a22][a23][a24]";
+    try expectDocQueryComptime(&doc, selector, &.{"x"});
+    try expectDocQueryRuntime(&doc, selector, &.{"x"});
+}
+
 test "multiple class predicates in one compound match correctly" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);
