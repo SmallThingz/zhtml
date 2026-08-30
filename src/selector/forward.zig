@@ -146,9 +146,8 @@ pub fn Executor(comptime Doc: type) type {
         const Self = @This();
         const TagCacheEntry = struct {
             key: u64 = 0,
-            len: IndexInt = 0,
             allowed: u64 = 0,
-            valid: bool = false,
+            len: IndexInt = InvalidIndex,
         };
 
         pub fn init(doc: *const Doc, selector: ast.Selector, plan: Plan, scope_root: IndexInt) Self {
@@ -300,7 +299,7 @@ pub fn Executor(comptime Doc: type) type {
             const mixed = key ^ (@as(u64, len) *% 0x9e3779b97f4a7c15);
             const slot: usize = @intCast(mixed & 15);
             const cached = &self.tag_cache[slot];
-            if (cached.valid and cached.key == key and cached.len == len) return cached.allowed;
+            if (cached.len == len and cached.key == key) return cached.allowed;
 
             var allowed: u64 = 0;
             for (self.selector.compounds, 0..) |comp, absolute| {
@@ -312,7 +311,7 @@ pub fn Executor(comptime Doc: type) type {
                 const tag_key = if (comp.tag_key != 0) comp.tag_key else tags.first8KeyWithMode(tag, false);
                 if (tag.len == node_name.len and tag_key == key) allowed |= bit(absolute);
             }
-            cached.* = .{ .key = key, .len = len, .allowed = allowed, .valid = true };
+            cached.* = .{ .key = key, .allowed = allowed, .len = len };
             return allowed;
         }
 
