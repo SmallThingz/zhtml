@@ -132,6 +132,11 @@ const SkipOpenTag = struct {
     foreign: bool = false,
 };
 
+const SkipResult = struct {
+    pos: usize,
+    resume_parent_foreign: ?bool = null,
+};
+
 fn State(comptime Ctx: type, comptime callback: anytype) type {
     return struct {
         allocator: std.mem.Allocator,
@@ -145,7 +150,6 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         implicit_source_mask: u8 = 0,
         implicit_source_counts: [8]IndexInt = .{0} ** 8,
         slow_close_misses: u8 = 0,
-        next_start_foreign_context: ?bool = null,
 
         const Self = @This();
 
@@ -178,6 +182,26 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn parseStartTag(self: *Self) !void {
+            var resume_parent_foreign: ?bool = null;
+            try self.parseStartTagImpl(false, false, &resume_parent_foreign);
+            if (resume_parent_foreign) |parent_foreign| try self.parseResumedStartTags(parent_foreign);
+        }
+
+        noinline fn parseResumedStartTags(self: *Self, initial_parent_foreign: bool) !void {
+            var parent_foreign = initial_parent_foreign;
+            while (true) {
+                var resume_parent_foreign: ?bool = null;
+                try self.parseStartTagImpl(true, parent_foreign, &resume_parent_foreign);
+                parent_foreign = resume_parent_foreign orelse return;
+            }
+        }
+
+        fn parseStartTagImpl(
+            self: *Self,
+            comptime has_parent_override: bool,
+            parent_override: bool,
+            resume_parent_foreign: *?bool,
+        ) !void {
             const token_start = self.i;
             self.i += 1;
 
@@ -198,8 +222,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             const self_closing = self.source[tag_end - 1] == '/' and scanner.isSelfClosingStartTag(self.source, tag.end, tag_end);
             const tag_name = self.source[tag.start..tag.end];
             const name_span: Span = .{ .start = @intCast(tag.start), .len = @intCast(tag.end - tag.start) };
-            const parent_foreign = self.next_start_foreign_context orelse self.currentForeignContext();
-            self.next_start_foreign_context = null;
+            const parent_foreign = if (comptime has_parent_override) parent_override else self.currentForeignContext();
             const foreign_element = parent_foreign or tags.isSvgWithKey(tag_name, tag.key) or tags.isMathWithKey(tag_name, tag.key);
             const void_element = !foreign_element and tags.isVoidTagWithKey(tag_name, tag.key);
             const closes_immediately = void_element or (foreign_element and self_closing);
@@ -234,7 +257,9 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     } else if (!foreign_element and tags.isTextOnlyTagWithKey(tag_name, tag.key)) {
                         self.i = if (self.findRawTextClose(tag_name, tag.key, self.i)) |close| close.close_end else self.source.len;
                     } else if (!closes_immediately) {
-                        self.i = try self.skipSubtree(tag_name, tag.key, self.i, foreign_element);
+                        const skipped = try self.skipSubtree(tag_name, tag.key, self.i, foreign_element);
+                        self.i = skipped.pos;
+                        resume_parent_foreign.* = skipped.resume_parent_foreign;
                     }
                     return;
                 }
@@ -333,15 +358,6 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         }
 
         fn parseBang(self: *Self) !void {
-            if (self.currentForeignContext() and std.mem.startsWith(u8, self.source[self.i..], "<![CDATA[")) {
-                const content_start = self.i + 9;
-                const token_end = scanner.findCdataEnd(self.source, content_start);
-                const content_end = if (token_end >= 3 and std.mem.endsWith(u8, self.source[self.i..token_end], "]]>")) token_end - 3 else token_end;
-                self.i = token_end;
-                try self.emitTextAtDepth(content_start, content_end, self.currentDepth());
-                return;
-            }
-
             if (self.i + 3 < self.source.len and self.source[self.i + 2] == '-' and self.source[self.i + 3] == '-') {
                 const start = self.i;
                 const content_start = self.i + 4;
@@ -356,6 +372,17 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                         .token = .{ .start = @intCast(start), .len = @intCast(close.token_end - start) },
                     });
                 }
+                return;
+            }
+
+            if (self.i + 9 <= self.source.len and self.source[self.i + 2] == '[' and
+                std.mem.startsWith(u8, self.source[self.i..], "<![CDATA[") and self.currentForeignContext())
+            {
+                const content_start = self.i + 9;
+                const token_end = scanner.findCdataEnd(self.source, content_start);
+                const content_end = if (token_end >= 3 and std.mem.endsWith(u8, self.source[self.i..token_end], "]]>")) token_end - 3 else token_end;
+                self.i = token_end;
+                try self.emitTextAtDepth(content_start, content_end, self.currentDepth());
                 return;
             }
 
@@ -613,7 +640,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             return scanner.findRawTextClose(self.source, name, key, start);
         }
 
-        fn skipSubtree(self: *Self, name: []const u8, key: u64, start: usize, foreign_content: bool) !usize {
+        fn skipSubtree(self: *Self, name: []const u8, key: u64, start: usize, foreign_content: bool) !SkipResult {
             // Keep the skipped root and the parser's live ancestors out of the
             // temporary list. Most skipped subtrees are leaves or shallow, so
             // this avoids both copying the live stack and allocating at all
@@ -627,8 +654,8 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
             var i = start;
             while (true) {
                 const lt = scanner.findBytePosOrEnd(self.source, i, '<');
-                if (lt == self.source.len) return self.source.len;
-                if (lt + 1 >= self.source.len) return self.source.len;
+                if (lt == self.source.len) return .{ .pos = self.source.len };
+                if (lt + 1 >= self.source.len) return .{ .pos = self.source.len };
 
                 if (std.mem.startsWith(u8, self.source[lt..], "<!--")) {
                     i = scanner.findCommentClose(self.source, lt + 4).token_end;
@@ -663,8 +690,8 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                         pos -= 1;
                         const open = self.skipOpenAt(ancestor_count, root, descendants.items, pos);
                         if (!tags.equalByLenAndKeyIgnoreCase(open.name, open.key, close_name, close.key)) continue;
-                        if (pos < root_pos) return lt;
-                        if (pos == root_pos) return token_end;
+                        if (pos < root_pos) return .{ .pos = lt };
+                        if (pos == root_pos) return .{ .pos = token_end };
                         descendants.items.len = pos - root_pos - 1;
                         break;
                     }
@@ -672,7 +699,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     continue;
                 } else if (tables.TagNameCharTable[self.source[lt + 1]]) {
                     const child = self.scanTagName(lt + 1);
-                    const end_pos = self.findTagEnd(child.end) orelse return self.source.len;
+                    const end_pos = self.findTagEnd(child.end) orelse return .{ .pos = self.source.len };
                     const child_name = self.source[child.start..child.end];
                     const self_closing = self.source[end_pos - 1] == '/' and scanner.isSelfClosingStartTag(self.source, child.end, end_pos);
                     const parent_foreign = skipForeignContext(root, descendants.items);
@@ -705,8 +732,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                                 // but HTML-vs-foreign classification is determined before its
                                 // implicit closes. Preserve the skipped top-of-stack context for
                                 // exactly this reconsumed start tag.
-                                self.next_start_foreign_context = parent_foreign;
-                                return lt;
+                                return .{ .pos = lt, .resume_parent_foreign = parent_foreign };
                             }
                             descendants.items.len = found_pos - root_pos - 1;
                         }
@@ -715,7 +741,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                     i = end_pos + 1;
                     const closes_immediately = if (child_foreign) self_closing else tags.isVoidTagWithKey(child_name, child.key);
                     if (!closes_immediately) {
-                        if (!child_foreign and tags.isPlainTextTagWithKey(child_name, child.key)) return self.source.len;
+                        if (!child_foreign and tags.isPlainTextTagWithKey(child_name, child.key)) return .{ .pos = self.source.len };
                         if (!child_foreign and tags.isTextOnlyTagWithKey(child_name, child.key)) {
                             i = if (self.findRawTextClose(child_name, child.key, i)) |raw_close| raw_close.close_end else self.source.len;
                         } else {
@@ -726,7 +752,7 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 }
                 i = lt + 1;
             }
-            return self.source.len;
+            return .{ .pos = self.source.len };
         }
 
         fn skipOpenAt(
