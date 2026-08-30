@@ -186,7 +186,10 @@ pub fn Executor(comptime Doc: type) type {
         }
 
         pub fn processElement(self: *Self, idx: IndexInt) !bool {
-            if (!self.plan.stateful) return self.processSimpleElement(idx);
+            if (!self.plan.stateful) {
+                if (self.selector.compounds.len == 1 and self.plan.short_tag_only_mask != 0) return self.processSingleShortTag(idx);
+                return self.processSimpleElement(idx);
+            }
             if (!self.initialized) try self.ensureInitialized();
             self.syncStack(idx);
             const raw = &self.doc.nodes[idx];
@@ -219,6 +222,30 @@ pub fn Executor(comptime Doc: type) type {
                 if (is_match) self.stats.nodes_emitted += 1;
             }
             return is_match;
+        }
+
+        fn processSingleShortTag(self: *Self, idx: IndexInt) bool {
+            const raw = &self.doc.nodes[idx];
+            if (comptime builtin.is_test) {
+                self.stats.nodes_processed += 1;
+                self.stats.local_unique_predicate_evals += 1;
+            }
+            const comp = self.selector.compounds[0];
+            const anchored = switch (comp.combinator) {
+                .none, .descendant => true,
+                .child => raw.parent == self.scope_root,
+                .adjacent, .sibling => false,
+            };
+            if (!anchored) return false;
+            const node_name = raw.name_or_text.slice(self.doc.source);
+            const tag = comp.tag.slice(self.selector.source);
+            const node_key = tags.first8KeyWithMode(node_name, Doc.Options.non_destructive);
+            const tag_key = if (comp.tag_key != 0) comp.tag_key else tags.first8KeyWithMode(tag, false);
+            const matched = node_name.len == tag.len and node_key == tag_key;
+            if (comptime builtin.is_test) {
+                if (matched) self.stats.nodes_emitted += 1;
+            }
+            return matched;
         }
 
         fn processSimpleElement(self: *Self, idx: IndexInt) !bool {
