@@ -324,6 +324,10 @@ pub fn Executor(comptime Doc: type) type {
         }
 
         fn tagAllowedMask(self: *Self, node_name: []const u8) u64 {
+            if (self.selector.compounds.len == 1) {
+                const comp = self.selector.compounds[0];
+                if (comp.hasTag() and node_name.len != comp.tag.len) return 0;
+            }
             const key = tags.first8KeyWithMode(node_name, Doc.Options.non_destructive);
             const len: IndexInt = @intCast(node_name.len);
             const mixed = key ^ (@as(u64, len) *% 0x9e3779b97f4a7c15);
