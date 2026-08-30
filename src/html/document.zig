@@ -1007,7 +1007,7 @@ fn GetQueryIter(comptime options: ParseOptions) type {
                 .engine = if (use_wide)
                     .{ .wide = WideForwardExecutor.initPrepared(doc, selector, scope_root, &prepared.execution_plan) }
                 else
-                    .{ .compact = ForwardExecutor.init(doc, selector, plan, scope_root) },
+                    .{ .compact = ForwardExecutor.initPrepared(doc, selector, plan, scope_root, &prepared.execution_plan.predicates) },
             };
         }
 
@@ -4702,6 +4702,32 @@ test "prepared wide query keeps borrowed plan valid across every scratch allocat
     var final_it = doc.queryPrepared(&prepared);
     defer final_it.deinit();
     try std.testing.expect((try final_it.next()) == null);
+}
+
+test "prepared compact query reuses predicate plan without allocating" {
+    const alloc = std.testing.allocator;
+    const Doc = GetDocument(.{});
+
+    var doc = Doc.init(alloc);
+    defer doc.deinit();
+    var html = "<div></div><span></span>".*;
+    try resetParsed(.{}, &doc, &html);
+
+    var prepared = try prepared_selector.PreparedSelector.compile(alloc, "div + span");
+    defer prepared.deinit();
+    try std.testing.expect(prepared.execution_plan.predicates.state_ids.len != 0);
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    var local_doc = doc;
+    local_doc.allocator = failing.allocator();
+
+    var it = local_doc.queryPrepared(&prepared);
+    defer it.deinit();
+    const match = (try it.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("span", match.tagName());
+    try std.testing.expect((try it.next()) == null);
+    try std.testing.expectEqual(@as(usize, 0), failing.allocations);
+    try std.testing.expect(!failing.has_induced_failure);
 }
 
 test "prepared point matching keeps borrowed plan valid across every scratch allocation failure" {

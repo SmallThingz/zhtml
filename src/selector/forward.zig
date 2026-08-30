@@ -137,6 +137,7 @@ pub fn Executor(comptime Doc: type) type {
         stack: std.ArrayListUnmanaged(Frame) = .empty,
         node_ctx: matcher.NodeContext = .{},
         predicate_plan: matcher.PredicatePlan = .{},
+        owns_predicate_plan: bool = true,
         seed_workspace: matcher.MatchWorkspace,
         stats: Stats = .{},
         initialized: bool = false,
@@ -161,10 +162,17 @@ pub fn Executor(comptime Doc: type) type {
             };
         }
 
+        pub fn initPrepared(doc: *const Doc, selector: ast.Selector, plan: Plan, scope_root: IndexInt, predicate_plan: *const matcher.PredicatePlan) Self {
+            var out = init(doc, selector, plan, scope_root);
+            out.predicate_plan = predicate_plan.*;
+            out.owns_predicate_plan = false;
+            return out;
+        }
+
         pub fn deinit(self: *Self) void {
             self.stack.deinit(self.allocator);
             self.node_ctx.deinit();
-            self.predicate_plan.deinit(self.allocator);
+            if (self.owns_predicate_plan) self.predicate_plan.deinit(self.allocator);
             self.seed_workspace.deinit();
             self.stack = .empty;
             self.initialized = false;
