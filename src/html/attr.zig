@@ -359,6 +359,33 @@ pub inline fn getAttrValue(noalias doc_ptr: anytype, node: anytype, name: []cons
     }
 }
 
+/// Returns whether an attribute name is present without decoding/materializing
+/// its value. This is the selector `[attr]` hot path: existence tests must not
+/// pay entity-decoding or temporary-allocation costs for bytes they never use.
+pub inline fn hasAttr(noalias doc_ptr: anytype, node: anytype, name: []const u8) bool {
+    const source = doc_ptr.source;
+    const start: usize = node.name_or_text.end();
+    if (start >= source.len) return false;
+
+    if (comptime !hasConstSource(@TypeOf(doc_ptr.*))) {
+        // Destructive documents may already have a compacted attribute list.
+        // Raw lists always begin with HTML whitespace or a recovery slash.
+        if (!tables.WhitespaceTable[source[start]] and source[start] != '/') {
+            var it: CompactIterator = .{ .source = source, .cursor = start };
+            while (it.next()) |item| {
+                if (std.ascii.eqlIgnoreCase(item.name, name)) return true;
+            }
+            return false;
+        }
+    }
+
+    var it: RawIterator = .{ .source = source, .cursor = start, .end = source.len };
+    while (it.next()) |item| {
+        if (std.ascii.eqlIgnoreCase(item.name, name)) return true;
+    }
+    return false;
+}
+
 /// Returns the current raw attribute value span for `name`.
 /// In destructive documents this may point at already-mutated decoded bytes.
 pub fn getAttrValueRaw(noalias doc_ptr: anytype, node: anytype, name: []const u8) ?[]const u8 {
@@ -604,6 +631,30 @@ test "raw iterator recovers after stray slash between attributes" {
     try std.testing.expectEqualStrings("b", b.name);
     try std.testing.expectEqualStrings("y", b.valueRaw().?);
     try std.testing.expect(it.next() == null);
+}
+
+test "hasAttr checks raw and compact lists without materializing values" {
+    const RawDoc = struct { source: []const u8 };
+    const MutableDoc = struct { source: []u8 };
+    const FakeNode = struct { name_or_text: common.Span };
+    const node = FakeNode{ .name_or_text = .{ .start = 0, .len = 3 } };
+
+    const raw_source = "div href='a&amp;b' disabled data-x=1>";
+    const raw_doc = RawDoc{ .source = raw_source };
+    try std.testing.expect(hasAttr(&raw_doc, node, "href"));
+    try std.testing.expect(hasAttr(&raw_doc, node, "DISABLED"));
+    try std.testing.expect(!hasAttr(&raw_doc, node, "missing"));
+
+    var mutable_source = raw_source.*;
+    const before = mutable_source;
+    var mutable_doc = MutableDoc{ .source = &mutable_source };
+    try std.testing.expect(hasAttr(&mutable_doc, node, "href"));
+    try std.testing.expectEqualSlices(u8, &before, &mutable_source);
+
+    materializeAttributes(.common, &mutable_source, 3);
+    try std.testing.expect(hasAttr(&mutable_doc, node, "href"));
+    try std.testing.expect(hasAttr(&mutable_doc, node, "disabled"));
+    try std.testing.expect(!hasAttr(&mutable_doc, node, "missing"));
 }
 
 test "raw iterator preserves parse-error bytes in attribute names" {
