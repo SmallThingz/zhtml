@@ -36,6 +36,16 @@ Default fixture set includes:
 - `synthetic-news-feed.html`
 - `synthetic-ecommerce.html`
 - `synthetic-forum-thread.html`
+- `synthetic-implicit-close-mixed.html`
+- `synthetic-attributes-mixed.html`
+- `synthetic-rawtext.html`
+- `synthetic-svg-math.html`
+- `synthetic-custom-elements.html`
+- `synthetic-unicode.html`
+- `synthetic-recovery.html`
+- `synthetic-deep-mixed.html`
+- `synthetic-media.html`
+- `synthetic-definition-list.html`
 
 ## Setup
 

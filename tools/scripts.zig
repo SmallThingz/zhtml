@@ -98,6 +98,16 @@ const quick_fixtures = [_]FixtureCase{
     .{ .name = "synthetic-news-feed.html", .iterations = 20 },
     .{ .name = "synthetic-ecommerce.html", .iterations = 20 },
     .{ .name = "synthetic-forum-thread.html", .iterations = 20 },
+    .{ .name = "synthetic-implicit-close-mixed.html", .iterations = 20 },
+    .{ .name = "synthetic-attributes-mixed.html", .iterations = 20 },
+    .{ .name = "synthetic-rawtext.html", .iterations = 20 },
+    .{ .name = "synthetic-svg-math.html", .iterations = 20 },
+    .{ .name = "synthetic-custom-elements.html", .iterations = 20 },
+    .{ .name = "synthetic-unicode.html", .iterations = 20 },
+    .{ .name = "synthetic-recovery.html", .iterations = 20 },
+    .{ .name = "synthetic-deep-mixed.html", .iterations = 20 },
+    .{ .name = "synthetic-media.html", .iterations = 20 },
+    .{ .name = "synthetic-definition-list.html", .iterations = 20 },
 };
 
 const stable_fixtures = [_]FixtureCase{
@@ -122,6 +132,16 @@ const stable_fixtures = [_]FixtureCase{
     .{ .name = "synthetic-news-feed.html", .iterations = 120 },
     .{ .name = "synthetic-ecommerce.html", .iterations = 120 },
     .{ .name = "synthetic-forum-thread.html", .iterations = 120 },
+    .{ .name = "synthetic-implicit-close-mixed.html", .iterations = 120 },
+    .{ .name = "synthetic-attributes-mixed.html", .iterations = 120 },
+    .{ .name = "synthetic-rawtext.html", .iterations = 120 },
+    .{ .name = "synthetic-svg-math.html", .iterations = 120 },
+    .{ .name = "synthetic-custom-elements.html", .iterations = 120 },
+    .{ .name = "synthetic-unicode.html", .iterations = 120 },
+    .{ .name = "synthetic-recovery.html", .iterations = 120 },
+    .{ .name = "synthetic-deep-mixed.html", .iterations = 120 },
+    .{ .name = "synthetic-media.html", .iterations = 120 },
+    .{ .name = "synthetic-definition-list.html", .iterations = 120 },
 };
 
 const quick_query_parse = [_]QueryCase{
@@ -187,6 +207,16 @@ const synthetic_fixtures = [_]SyntheticFixture{
     .{ .name = "synthetic-news-feed.html", .unit = "<article class=story><header><h2><a href=/story>Breaking headline</a></h2><time datetime=2025-01-02>2 January</time></header><p>A concise summary with <strong>important</strong> context.</p><footer><a href=/author>Reporter</a><span>42 comments</span></footer></article>" },
     .{ .name = "synthetic-ecommerce.html", .unit = "<article class=product data-sku=ABC-123><a href=/product><img src=/image.webp alt=Product loading=lazy><h2>Useful Product</h2></a><p class=price><del>$99.00</del><ins>$79.00</ins></p><form><label>Quantity <input type=number min=1 value=1></label><button>Add to cart</button></form></article>" },
     .{ .name = "synthetic-forum-thread.html", .unit = "<article class=post><aside><a href=/user><img src=/avatar.png alt='User avatar'></a><span class=role>member</span></aside><div class=content><header><a href=#post>Posted just now</a></header><blockquote>Previous message</blockquote><p>Reply text with <code>inline_code()</code>.</p></div></article>" },
+    .{ .name = "synthetic-implicit-close-mixed.html", .unit = "<section><h2>Optional ends</h2><p>alpha<p>beta<ul><li>one<li>two<ol><li>three<li>four</ol></ul><dl><dt>term<dd>definition<dt>next<dd>value</dl><select><option>red<option selected>green<option>blue</select><table><tbody><tr><td>a<td>b<tr><td>c<td>d</tbody></table></section>" },
+    .{ .name = "synthetic-attributes-mixed.html", .unit = "<div id=x class='a b' hidden data-empty= data-u=plain data-s='single quoted' data-d=\"double quoted\" data-entity='a&amp;b' aria-label=label tabindex=-1><input disabled checked value=abc/def name='n&gt;m'><a href=/p?q=one&amp;x=two rel='nofollow noopener' download>attrs</a></div>" },
+    .{ .name = "synthetic-rawtext.html", .unit = "<section><script>const x = '<div data-x=\">\">'; if (a < b && c > d) console.log(\"</not-script>\");</script><style>.x::before{content:'<tag> & >';} .y{width:calc(100% - 2px)}</style><textarea>literal &amp; <b>not markup</b> > text</textarea><title>title &amp; <i>text</i></title></section>" },
+    .{ .name = "synthetic-svg-math.html", .unit = "<svg viewBox='0 0 10 10'><g><path d='M0 0L10 10'/><foreignObject><div class=html><p>HTML in SVG<p>second</div></foreignObject><text><![CDATA[<fake> & raw]]></text></g></svg><math><mrow><mi>x</mi><mo>=</mo><mfrac><mn>1</mn><mi>y</mi></mfrac></mrow><annotation-xml encoding='text/html'><div><b>html island</b></div></annotation-xml></math>" },
+    .{ .name = "synthetic-custom-elements.html", .unit = "<app-shell data-version=2><site-nav><nav-item active><a href=/home>Home</a></nav-item><nav-item><a href=/docs>Docs</a></nav-item></site-nav><template shadowrootmode=open><style>:host{display:block}</style><slot name=title></slot><slot></slot></template><x-card><h3 slot=title>Card</h3><p>Custom element body</p></x-card></app-shell>" },
+    .{ .name = "synthetic-unicode.html", .unit = "<article lang=mul><h2>Unicode 世界 مرحبا नमस्ते</h2><p>naïve café coöperate Ελληνικά русский עברית ไทย 한글 日本語 中文 🚀🧪</p><p title='é—中—🙂'>entities: &copy; &euro; &#x1F642; combining: é å</p></article>" },
+    .{ .name = "synthetic-recovery.html", .unit = "<section><div><p>mismatch <b>bold <i>italic</b> tail</i></p></span><ul><li>one<div>block<li>two</ul><table><tr><td>A<td>B</tr></table></ghost><p>after stray closes</section>" },
+    .{ .name = "synthetic-deep-mixed.html", .unit = "<main><section><article><header><nav><ul><li><a href=#x>deep</a><ul><li><span><em><strong>leaf</strong></em></span></li></ul></li></ul></nav></header><div><form><fieldset><label>x<input name=x></label><table><tbody><tr><td><ol><li>nested<li>again</ol></td></tr></tbody></table></fieldset></form></div><footer><small>end</small></footer></article></section></main>" },
+    .{ .name = "synthetic-media.html", .unit = "<article><picture><source srcset='a.avif 1x, b.avif 2x' type=image/avif><source srcset='a.webp 1x, b.webp 2x' type=image/webp><img src=a.jpg alt='photo' loading=lazy></picture><video controls poster=p.jpg><source src=v.webm type=video/webm><track kind=captions src=c.vtt srclang=en></video><audio controls><source src=a.ogg type=audio/ogg></audio><object data=/doc type=application/pdf><param name=page value=1></object></article>" },
+    .{ .name = "synthetic-definition-list.html", .unit = "<section><dl><dt>CPU<dd>Central processing unit<dt>RAM<dd>Random access memory<dt>HTML<dd><p>Hypertext markup<p>with optional paragraph ends<dt>DOM<dd><ul><li>nodes<li>edges<li>attributes</ul></dl></section>" },
 };
 
 fn setupSyntheticFixtures(io: std.Io, alloc: std.mem.Allocator, refresh: bool) !void {
