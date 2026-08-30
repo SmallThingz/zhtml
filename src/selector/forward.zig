@@ -38,6 +38,7 @@ pub const Plan = struct {
     needs_child_position: bool = false,
     stateful: bool = false,
     has_tag_constraints: bool = false,
+    tag_length_mask: u32 = 0,
     short_tag_only_mask: u64 = 0,
 };
 
@@ -49,6 +50,7 @@ inline fn bit(index: usize) u64 {
 pub fn buildPlan(selector: ast.Selector) Plan {
     var plan: Plan = .{};
     const compact = selector.compounds.len <= MaxForwardCompounds;
+    var all_compounds_tagged = selector.compounds.len != 0;
 
     for (selector.groups) |group| {
         if (group.compound_len == 0) continue;
@@ -62,7 +64,12 @@ pub fn buildPlan(selector: ast.Selector) Plan {
             const absolute = start + relative;
             const comp = selector.compounds[absolute];
             inspectCompoundFeatures(selector, comp, &plan);
-            plan.has_tag_constraints = plan.has_tag_constraints or comp.hasTag();
+            if (comp.hasTag()) {
+                plan.has_tag_constraints = true;
+                if (comp.tag.len <= 30) plan.tag_length_mask |= @as(u32, 1) << @intCast(comp.tag.len);
+            } else {
+                all_compounds_tagged = false;
+            }
             if (!compact) continue;
 
             const compound_bit = bit(absolute);
@@ -88,6 +95,7 @@ pub fn buildPlan(selector: ast.Selector) Plan {
         }
     }
 
+    if (all_compounds_tagged) plan.tag_length_mask |= @as(u32, 1) << 31;
     return plan;
 }
 
@@ -327,6 +335,8 @@ pub fn Executor(comptime Doc: type) type {
             if (self.selector.compounds.len == 1) {
                 const comp = self.selector.compounds[0];
                 if (comp.hasTag() and node_name.len != comp.tag.len) return 0;
+            } else if (node_name.len <= 30 and (self.plan.tag_length_mask & (@as(u32, 1) << 31)) != 0) {
+                if ((self.plan.tag_length_mask & (@as(u32, 1) << @intCast(node_name.len))) == 0) return 0;
             }
             const key = tags.first8KeyWithMode(node_name, Doc.Options.non_destructive);
             const len: IndexInt = @intCast(node_name.len);
