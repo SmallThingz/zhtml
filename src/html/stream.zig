@@ -119,7 +119,7 @@ const OpenTag = struct {
     key: u64,
     foreign: bool = false,
     implicit_source: u8 = 0,
-    implicit_boundary: u8 = 0,
+    implicit_blockers: u8 = 0,
 
     pub inline fn keyValue(self: *const @This()) u64 {
         return self.key;
@@ -288,11 +288,11 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
                 .key = tag.key,
                 .foreign = foreign_element,
                 .implicit_source = implicit_source,
-                .implicit_boundary = if (self.implicit_source_mask != 0)
+                .implicit_blockers = if (self.implicit_source_mask != 0)
                     if (foreign_element)
-                        foreignRegularScopeBoundary(tag_name, true)
+                        foreignRegularScopeBlockers(tag_name, true)
                     else
-                        tags.implicitCloseBoundaryMask(tag_name.len, tag.key)
+                        tags.implicitCloseBlockerMask(tag_name.len, tag.key)
                 else
                     0,
             });
@@ -471,33 +471,24 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
 
         fn applyImplicitClosures(self: *Self, trigger: u8, pos: usize) !void {
             while (self.implicit_source_mask & trigger != 0) {
+                var eligible = self.implicit_source_mask & trigger;
                 var stack_pos = self.stack.items.len - 1;
                 var found: ?usize = null;
-                var scope: u8 = 0;
-                const B = tags.ImplicitCloseBoundaryMask;
                 const top = self.stack.items[stack_pos];
-                if (top.implicit_source & trigger != 0) {
+                if (top.implicit_source & eligible != 0) {
                     found = stack_pos;
                 } else {
-                    scope = top.implicit_boundary;
+                    eligible &= ~top.implicit_blockers;
+                    if (eligible == 0) return;
                     while (stack_pos > 1) {
                         stack_pos -= 1;
                         const open = self.stack.items[stack_pos];
-                        if (open.implicit_source & trigger != 0) {
-                            const blockers: u8 = switch (open.implicit_source) {
-                                tags.ImplicitCloseMask.p => B.regular | B.button,
-                                tags.ImplicitCloseMask.li => B.regular | B.list_item,
-                                tags.ImplicitCloseMask.dt_dd, tags.ImplicitCloseMask.head => B.regular,
-                                tags.ImplicitCloseMask.tr, tags.ImplicitCloseMask.td_th => B.table,
-                                tags.ImplicitCloseMask.option, tags.ImplicitCloseMask.optgroup => B.select,
-                                else => 0,
-                            };
-                            if (scope & blockers == 0) {
-                                found = stack_pos;
-                                break;
-                            }
+                        if (open.implicit_source & eligible != 0) {
+                            found = stack_pos;
+                            break;
                         }
-                        scope |= open.implicit_boundary;
+                        eligible &= ~open.implicit_blockers;
+                        if (eligible == 0) break;
                     }
                 }
 
@@ -792,6 +783,11 @@ fn State(comptime Ctx: type, comptime callback: anytype) type {
         fn foreignRegularScopeBoundary(name: []const u8, foreign: bool) u8 {
             if (!foreign or name.len != 13 or !std.ascii.eqlIgnoreCase(name, "foreignObject")) return 0;
             return tags.ImplicitCloseBoundaryMask.regular;
+        }
+
+        fn foreignRegularScopeBlockers(name: []const u8, foreign: bool) u8 {
+            if (!foreign or name.len != 13 or !std.ascii.eqlIgnoreCase(name, "foreignObject")) return 0;
+            return tags.ImplicitCloseBlockerMask.regular;
         }
 
         fn openMatches(self: *Self, open: OpenTag, close: TagScan) bool {
