@@ -4549,6 +4549,32 @@ test "dynamic tag dispatch rejects incompatible simple predicates before local m
     try std.testing.expectEqual(@as(usize, 1), it.engine.wide.stats.local_unique_predicate_evals);
 }
 
+test "prepared forward query distinguishes long tags sharing first8 and length" {
+    const alloc = std.testing.allocator;
+    var doc = GetDocument(.{}).init(alloc);
+    defer doc.deinit();
+    var html = "<root><abcdefghx><span id=good></span></abcdefghx><abcdefghy><span id=bad></span></abcdefghy></root>".*;
+    try resetParsed(.{}, &doc, &html);
+
+    var prepared = try prepared_selector.PreparedSelector.compile(alloc, "abcdefghx > span");
+    defer prepared.deinit();
+    var it = doc.queryPrepared(&prepared);
+    defer it.deinit();
+
+    const first = (try it.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("good", first.getAttributeValueRaw("id").?);
+    try std.testing.expect(try it.next() == null);
+
+    var prepared_y = try prepared_selector.PreparedSelector.compile(alloc, "abcdefghy > span");
+    defer prepared_y.deinit();
+    var it_y = doc.queryPrepared(&prepared_y);
+    defer it_y.deinit();
+
+    const second = (try it_y.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("bad", second.getAttributeValueRaw("id").?);
+    try std.testing.expect(try it_y.next() == null);
+}
+
 test "node matches uses candidate-centric point matching" {
     const alloc = std.testing.allocator;
     var doc = GetDocument(.{}).init(alloc);

@@ -50,7 +50,9 @@ inline fn bit(index: usize) u64 {
 
 noinline fn equalLongTagTailIgnoreCase(a: []const u8, b: []const u8) bool {
     std.debug.assert(a.len == b.len and a.len > 8);
-    return std.ascii.eqlIgnoreCase(a[8..], b[8..]);
+    const a_tail = a[8..];
+    const b_tail = b[8..];
+    return std.mem.eql(u8, a_tail, b_tail) or std.ascii.eqlIgnoreCase(a_tail, b_tail);
 }
 
 pub fn buildPlan(selector: ast.Selector) Plan {
@@ -213,8 +215,10 @@ pub fn Executor(comptime Doc: type) type {
                 child_position = @intCast(parent.element_child_count);
             }
             var eligible_bits = self.eligibleMask(parent, raw.parent);
-            if (self.plan.has_tag_constraints) eligible_bits &= self.tagAllowedMask(raw.name_or_text.slice(self.doc.source));
-            const direct_hits = eligible_bits & self.plan.tag_only_mask;
+            const node_name = raw.name_or_text.slice(self.doc.source);
+            if (self.plan.has_tag_constraints) eligible_bits &= self.tagAllowedMask(node_name);
+            var direct_hits = eligible_bits & self.plan.tag_only_mask;
+            if (direct_hits != 0 and node_name.len > 8) direct_hits = self.exactLongTagOnlyMask(direct_hits, node_name);
             if (comptime builtin.is_test) {
                 // All direct hits are exact tag matches for this one node,
                 // so they represent one local predicate even when repeated in
@@ -295,7 +299,8 @@ pub fn Executor(comptime Doc: type) type {
         fn processSimpleElement(self: *Self, idx: IndexInt) !bool {
             const raw = &self.doc.nodes[idx];
             if (comptime builtin.is_test) self.stats.nodes_processed += 1;
-            const allowed = if (self.plan.has_tag_constraints) self.tagAllowedMask(raw.name_or_text.slice(self.doc.source)) else std.math.maxInt(u64);
+            const node_name = raw.name_or_text.slice(self.doc.source);
+            const allowed = if (self.plan.has_tag_constraints) self.tagAllowedMask(node_name) else std.math.maxInt(u64);
             var ctx_ready = false;
             for (self.selector.groups) |group| {
                 if (group.compound_len != 1) continue;
@@ -309,9 +314,13 @@ pub fn Executor(comptime Doc: type) type {
                 };
                 if (anchored) {
                     if (comptime builtin.is_test) self.stats.local_unique_predicate_evals += 1;
-                    if ((self.plan.tag_only_mask & bit(absolute)) != 0) {
-                        if (comptime builtin.is_test) self.stats.nodes_emitted += 1;
-                        return true;
+                    const direct_tag = self.plan.tag_only_mask & bit(absolute);
+                    if (direct_tag != 0) {
+                        if (node_name.len <= 8 or self.exactLongTagOnlyMask(direct_tag, node_name) != 0) {
+                            if (comptime builtin.is_test) self.stats.nodes_emitted += 1;
+                            return true;
+                        }
+                        continue;
                     }
                     if (!ctx_ready) {
                         self.node_ctx.begin(0);
@@ -372,6 +381,22 @@ pub fn Executor(comptime Doc: type) type {
             return matched;
         }
 
+        noinline fn exactLongTagOnlyMask(self: *const Self, candidates: u64, node_name: []const u8) u64 {
+            std.debug.assert(node_name.len > 8);
+            var pending = candidates;
+            var matched: u64 = 0;
+            while (pending != 0) {
+                const absolute: usize = @intCast(@ctz(pending));
+                const candidate = bit(absolute);
+                pending &= pending - 1;
+                const comp = self.selector.compounds[absolute];
+                const tag = comp.tag.slice(self.selector.source);
+                std.debug.assert(comp.hasTag() and tag.len == node_name.len);
+                if (equalLongTagTailIgnoreCase(node_name, tag)) matched |= candidate;
+            }
+            return matched;
+        }
+
         fn tagAllowedMask(self: *Self, node_name: []const u8) u64 {
             if (self.selector.compounds.len == 1) {
                 const comp = self.selector.compounds[0];
@@ -394,7 +419,7 @@ pub fn Executor(comptime Doc: type) type {
                 }
                 const tag = comp.tag.slice(self.selector.source);
                 const tag_key = if (comp.tag_key != 0) comp.tag_key else tags.first8KeyWithMode(tag, false);
-                if (tag.len == node_name.len and tag_key == key and (tag.len <= 8 or equalLongTagTailIgnoreCase(node_name, tag))) allowed |= bit(absolute);
+                if (tag.len == node_name.len and tag_key == key) allowed |= bit(absolute);
             }
             cached.* = .{ .key = key, .allowed = allowed, .len = len };
             return allowed;
