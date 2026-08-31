@@ -24,19 +24,15 @@ Source: `bench/results/latest.json` (`stable` profile).
 ### Parse Throughput (Average Across Fixtures)
 
 ```text
-ours-stream  │████████████████████│ 2032.18 MB/s (100.00%)
-ours-compact │███████████████████░│ 1957.05 MB/s (96.30%)
-ours-full    │██████████████████░░│ 1839.11 MB/s (90.50%)
-lol-html     │██████████░░░░░░░░░░│ 1050.95 MB/s (51.72%)
+ours-stream  │████████████████████│ 2199.52 MB/s (100.00%)
+ours-full    │████████████████████│ 2191.45 MB/s (99.63%)
+ours-compact │████████████████████│ 2169.42 MB/s (98.63%)
+lol-html     │█████████░░░░░░░░░░░│ 1021.84 MB/s (46.46%)
 ```
 
 ### Conformance Snapshot
 
-| Profile | nwmatcher | qwery_contextual | html5lib subset | WHATWG HTML parsing |
-|---|---:|---:|---:|---:|
-| `strictest/fastest` | 20/20 (0 failed) | 54/54 (0 failed) | 543/600 (57 failed) | 454/500 (46 failed) |
-
-Source: `bench/results/external_suite_report.json`
+Run `zig build conformance` to generate conformance summary.
 <!-- README_AUTO_SUMMARY:END -->
 
 ## ⚡ Features
