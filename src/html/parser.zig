@@ -499,7 +499,7 @@ fn ParseState(comptime opts: ParseOptions) type {
 
             // Resolve optional-close HTML elements before any special-content
             // branch so tags such as <plaintext> cannot remain nested in an open <p>.
-            if (self.implicit_source_mask & tag_meta.trigger != 0 and self.parse_stack.items.len > 1) {
+            if (self.implicit_source_mask & tag_meta.trigger != 0) {
                 const top = self.parse_stack.items[self.parse_stack.items.len - 1];
                 if (top.implicit_source & tag_meta.trigger != 0) {
                     const popped = self.popOpen(indexed);
