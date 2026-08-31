@@ -32,7 +32,11 @@ lol-html     │█████████░░░░░░░░░░░│ 
 
 ### Conformance Snapshot
 
-Run `zig build conformance` to generate conformance summary.
+| Profile | nwmatcher | qwery_contextual | html5lib subset | WHATWG HTML parsing |
+|---|---:|---:|---:|---:|
+| `strictest/fastest` | 20/20 (0 failed) | 54/54 (0 failed) | 542/600 (58 failed) | 454/500 (46 failed) |
+
+Source: `bench/results/external_suite_report.json`
 <!-- README_AUTO_SUMMARY:END -->
 
 ## ⚡ Features
