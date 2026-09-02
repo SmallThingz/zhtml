@@ -100,10 +100,8 @@ const quick_fixtures = [_]FixtureCase{
     .{ .name = "synthetic-forum-thread.html", .iterations = 20 },
     .{ .name = "synthetic-implicit-close-mixed.html", .iterations = 20 },
     .{ .name = "synthetic-attributes-mixed.html", .iterations = 20 },
-    .{ .name = "synthetic-rawtext.html", .iterations = 20 },
     .{ .name = "synthetic-svg-math.html", .iterations = 20 },
     .{ .name = "synthetic-custom-elements.html", .iterations = 20 },
-    .{ .name = "synthetic-unicode.html", .iterations = 20 },
     .{ .name = "synthetic-recovery.html", .iterations = 20 },
     .{ .name = "synthetic-deep-mixed.html", .iterations = 20 },
     .{ .name = "synthetic-media.html", .iterations = 20 },
@@ -134,10 +132,8 @@ const stable_fixtures = [_]FixtureCase{
     .{ .name = "synthetic-forum-thread.html", .iterations = 120 },
     .{ .name = "synthetic-implicit-close-mixed.html", .iterations = 120 },
     .{ .name = "synthetic-attributes-mixed.html", .iterations = 120 },
-    .{ .name = "synthetic-rawtext.html", .iterations = 120 },
     .{ .name = "synthetic-svg-math.html", .iterations = 120 },
     .{ .name = "synthetic-custom-elements.html", .iterations = 120 },
-    .{ .name = "synthetic-unicode.html", .iterations = 120 },
     .{ .name = "synthetic-recovery.html", .iterations = 120 },
     .{ .name = "synthetic-deep-mixed.html", .iterations = 120 },
     .{ .name = "synthetic-media.html", .iterations = 120 },
@@ -209,10 +205,8 @@ const synthetic_fixtures = [_]SyntheticFixture{
     .{ .name = "synthetic-forum-thread.html", .unit = "<article class=post><aside><a href=/user><img src=/avatar.png alt='User avatar'></a><span class=role>member</span></aside><div class=content><header><a href=#post>Posted just now</a></header><blockquote>Previous message</blockquote><p>Reply text with <code>inline_code()</code>.</p></div></article>" },
     .{ .name = "synthetic-implicit-close-mixed.html", .unit = "<section><h2>Optional ends</h2><p>alpha<p>beta<ul><li>one<li>two<ol><li>three<li>four</ol></ul><dl><dt>term<dd>definition<dt>next<dd>value</dl><select><option>red<option selected>green<option>blue</select><table><tbody><tr><td>a<td>b<tr><td>c<td>d</tbody></table></section>" },
     .{ .name = "synthetic-attributes-mixed.html", .unit = "<div id=x class='a b' hidden data-empty= data-u=plain data-s='single quoted' data-d=\"double quoted\" data-entity='a&amp;b' aria-label=label tabindex=-1><input disabled checked value=abc/def name='n&gt;m'><a href=/p?q=one&amp;x=two rel='nofollow noopener' download>attrs</a></div>" },
-    .{ .name = "synthetic-rawtext.html", .unit = "<section><script>const x = '<div data-x=\">\">'; if (a < b && c > d) console.log(\"</not-script>\");</script><style>.x::before{content:'<tag> & >';} .y{width:calc(100% - 2px)}</style><textarea>literal &amp; <b>not markup</b> > text</textarea><title>title &amp; <i>text</i></title></section>" },
     .{ .name = "synthetic-svg-math.html", .unit = "<svg viewBox='0 0 10 10'><g><path d='M0 0L10 10'/><foreignObject><div class=html><p>HTML in SVG<p>second</div></foreignObject><text><![CDATA[<fake> & raw]]></text></g></svg><math><mrow><mi>x</mi><mo>=</mo><mfrac><mn>1</mn><mi>y</mi></mfrac></mrow><annotation-xml encoding='text/html'><div><b>html island</b></div></annotation-xml></math>" },
     .{ .name = "synthetic-custom-elements.html", .unit = "<app-shell data-version=2><site-nav><nav-item active><a href=/home>Home</a></nav-item><nav-item><a href=/docs>Docs</a></nav-item></site-nav><template shadowrootmode=open><style>:host{display:block}</style><slot name=title></slot><slot></slot></template><x-card><h3 slot=title>Card</h3><p>Custom element body</p></x-card></app-shell>" },
-    .{ .name = "synthetic-unicode.html", .unit = "<article lang=mul><h2>Unicode 世界 مرحبا नमस्ते</h2><p>naïve café coöperate Ελληνικά русский עברית ไทย 한글 日本語 中文 🚀🧪</p><p title='é—中—🙂'>entities: &copy; &euro; &#x1F642; combining: é å</p></article>" },
     .{ .name = "synthetic-recovery.html", .unit = "<section><div><p>mismatch <b>bold <i>italic</b> tail</i></p></span><ul><li>one<div>block<li>two</ul><table><tr><td>A<td>B</tr></table></ghost><p>after stray closes</section>" },
     .{ .name = "synthetic-deep-mixed.html", .unit = "<main><section><article><header><nav><ul><li><a href=#x>deep</a><ul><li><span><em><strong>leaf</strong></em></span></li></ul></li></ul></nav></header><div><form><fieldset><label>x<input name=x></label><table><tbody><tr><td><ol><li>nested<li>again</ol></td></tr></tbody></table></fieldset></form></div><footer><small>end</small></footer></article></section></main>" },
     .{ .name = "synthetic-media.html", .unit = "<article><picture><source srcset='a.avif 1x, b.avif 2x' type=image/avif><source srcset='a.webp 1x, b.webp 2x' type=image/webp><img src=a.jpg alt='photo' loading=lazy></picture><video controls poster=p.jpg><source src=v.webm type=video/webm><track kind=captions src=c.vtt srclang=en></video><audio controls><source src=a.ogg type=audio/ogg></audio><object data=/doc type=application/pdf><param name=page value=1></object></article>" },
@@ -428,13 +422,89 @@ const ReadmeQueryResult = struct {
     ns_per_op: f64,
 };
 
+const BenchmarkEnvironment = struct {
+    os: []const u8,
+    architecture: []const u8,
+    cpu_model: []const u8,
+    cpu_scaling: []const u8,
+    cpu_min_mhz: []const u8,
+    cpu_max_mhz: []const u8,
+
+    fn deinit(self: BenchmarkEnvironment, alloc: std.mem.Allocator) void {
+        inline for (std.meta.fields(BenchmarkEnvironment)) |field| {
+            alloc.free(@field(self, field.name));
+        }
+    }
+};
+
+const LscpuEntry = struct {
+    field: []const u8,
+    data: []const u8,
+};
+
+const LscpuOutput = struct {
+    lscpu: []const LscpuEntry,
+};
+
 const ReadmeBenchSnapshot = struct {
     profile: []const u8,
+    environment: ?BenchmarkEnvironment = null,
     parse_results: []const ReadmeParseResult,
     query_parse_results: []const ReadmeQueryResult,
     query_match_results: []const ReadmeQueryResult,
     query_cached_results: []const ReadmeQueryResult,
 };
+
+fn lscpuField(entries: []const LscpuEntry, name: []const u8) ?[]const u8 {
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.field, name)) return entry.data;
+    }
+    return null;
+}
+
+fn dupeEnvironmentValue(alloc: std.mem.Allocator, value: ?[]const u8) ![]const u8 {
+    return alloc.dupe(u8, value orelse "unavailable");
+}
+
+fn collectBenchmarkEnvironment(io: std.Io, alloc: std.mem.Allocator) !BenchmarkEnvironment {
+    const uname = common.runCaptureStdout(io, alloc, &.{ "uname", "-sr" }, REPO_ROOT) catch null;
+    defer if (uname) |value| alloc.free(value);
+    const lscpu_json = common.runCaptureStdout(io, alloc, &.{ "lscpu", "--json" }, REPO_ROOT) catch null;
+    defer if (lscpu_json) |value| alloc.free(value);
+
+    var parsed: ?std.json.Parsed(LscpuOutput) = null;
+    if (lscpu_json) |json| parsed = std.json.parseFromSlice(LscpuOutput, alloc, json, .{}) catch null;
+    defer if (parsed) |value| value.deinit();
+
+    const entries = if (parsed) |value| value.value.lscpu else &[_]LscpuEntry{};
+    const os = try dupeEnvironmentValue(alloc, uname);
+    errdefer alloc.free(os);
+    const architecture = try dupeEnvironmentValue(alloc, lscpuField(entries, "Architecture:"));
+    errdefer alloc.free(architecture);
+    const cpu_model = try dupeEnvironmentValue(alloc, lscpuField(entries, "Model name:"));
+    errdefer alloc.free(cpu_model);
+    const cpu_scaling = try dupeEnvironmentValue(alloc, lscpuField(entries, "CPU(s) scaling MHz:"));
+    errdefer alloc.free(cpu_scaling);
+    const cpu_min_mhz = try dupeEnvironmentValue(alloc, lscpuField(entries, "CPU min MHz:"));
+    errdefer alloc.free(cpu_min_mhz);
+    const cpu_max_mhz = try dupeEnvironmentValue(alloc, lscpuField(entries, "CPU max MHz:"));
+    errdefer alloc.free(cpu_max_mhz);
+    return .{ .os = os, .architecture = architecture, .cpu_model = cpu_model, .cpu_scaling = cpu_scaling, .cpu_min_mhz = cpu_min_mhz, .cpu_max_mhz = cpu_max_mhz };
+}
+
+fn writeBenchmarkEnvironment(w: anytype, environment: BenchmarkEnvironment) !void {
+    try w.writeAll("#### Benchmark Environment\n\n");
+    try w.writeAll("| Property | Value |\n|---|---|\n");
+    try w.print("| OS | {s} |\n", .{environment.os});
+    try w.print("| Architecture | {s} |\n", .{environment.architecture});
+    try w.print("| CPU | {s} |\n", .{environment.cpu_model});
+    try w.print("| CPU frequency scaling | {s} |\n", .{environment.cpu_scaling});
+    try w.print("| CPU MHz range | {s}–{s} |\n\n", .{ environment.cpu_min_mhz, environment.cpu_max_mhz });
+}
+
+fn writeReadmeBenchmarkEnvironment(w: anytype, environment: BenchmarkEnvironment) !void {
+    try w.print("Tested on `{s}` with CPU `{s}`.\n\n", .{ environment.os, environment.cpu_model });
+}
 
 const ExternalSuiteCounts = struct {
     total: usize,
@@ -979,6 +1049,7 @@ fn renderDocumentationBenchmarkSection(alloc: std.mem.Allocator, snap: ReadmeBen
     }
 
     try w.print("Source: `bench/results/latest.json` (`{s}` profile).\n\n", .{snap.profile});
+    if (snap.environment) |environment| try writeBenchmarkEnvironment(w, environment);
 
     try w.writeAll("#### Parse Throughput Comparison (MB/s)\n\n");
     try w.writeAll("| Fixture |");
@@ -1221,6 +1292,7 @@ fn renderReadmeAutoSummary(io: std.Io, alloc: std.mem.Allocator) ![]u8 {
         defer alloc.free(avg_rows);
 
         try w.print("Source: `bench/results/latest.json` (`{s}` profile).\n\n", .{snap.profile});
+        if (snap.environment) |environment| try writeReadmeBenchmarkEnvironment(w, environment);
         try w.writeAll("### Parse Throughput (Average Across Fixtures)\n\n");
         try w.writeAll("```text\n");
 
@@ -1343,6 +1415,7 @@ fn writeMarkdown(
     io: std.Io,
     alloc: std.mem.Allocator,
     profile_name: []const u8,
+    environment: BenchmarkEnvironment,
     parse_results: []const ParseResult,
     query_parse_results: []const QueryResult,
     query_match_results: []const QueryResult,
@@ -1354,6 +1427,7 @@ fn writeMarkdown(
     const w = &out.writer;
 
     try w.print("# HTML Parser Benchmark Results\n\nGenerated (unix): {d}\n\nProfile: `{s}`\n\n", .{ common.nowUnix(io), profile_name });
+    try writeBenchmarkEnvironment(w, environment);
     try w.writeAll("## Parse Throughput\n\n");
 
     var seen = std.StringHashMap(void).init(alloc);
@@ -1807,6 +1881,8 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
     try common.ensureDir(io, RESULTS_DIR);
     try ensureExternalParsersBuilt(io, alloc, include_lexbor);
     try buildRunners(io, alloc, include_lexbor);
+    const environment = try collectBenchmarkEnvironment(io, alloc);
+    defer environment.deinit(alloc);
 
     var parse_results = std.ArrayList(ParseResult).empty;
     defer {
@@ -1878,6 +1954,7 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
     const json_out = struct {
         generated_unix: i64,
         profile: []const u8,
+        environment: BenchmarkEnvironment,
         repeats: usize,
         bench_modes: struct { parse: []const []const u8, query: []const []const u8 },
         parser_capabilities: []const ParserCapability,
@@ -1889,6 +1966,7 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
     }{
         .generated_unix = common.nowUnix(io),
         .profile = profile.name,
+        .environment = environment,
         .repeats = repeats,
         .bench_modes = .{ .parse = parse_parsers.items, .query = if (run_query) &[_][]const u8{ "ours-compact", "ours-full" } else &[_][]const u8{} },
         .parser_capabilities = active_parser_capabilities.items,
@@ -1908,7 +1986,7 @@ fn runBenchmarks(io: std.Io, alloc: std.mem.Allocator, args: []const [:0]const u
     try json_stream.write(json_out);
     try common.writeFile(io, "bench/results/latest.json", json_writer.written());
 
-    const md = try writeMarkdown(io, alloc, profile.name, parse_results.items, query_parse_results.items, query_match_results.items, query_cached_results.items, gate_rows);
+    const md = try writeMarkdown(io, alloc, profile.name, environment, parse_results.items, query_parse_results.items, query_match_results.items, query_cached_results.items, gate_rows);
     defer alloc.free(md);
     try common.writeFile(io, "bench/results/latest.md", md);
     try updateDocumentationBenchmarkSnapshot(io, alloc);

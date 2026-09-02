@@ -21,13 +21,15 @@ See the [latest benchmark snapshot](./DOCUMENTATION.md#latest-benchmark-snapshot
 
 Source: `bench/results/latest.json` (`stable` profile).
 
+Tested on `Linux 7.1.9-zen1-2-zen` with CPU `12th Gen Intel(R) Core(TM) i5-12450H`.
+
 ### Parse Throughput (Average Across Fixtures)
 
 ```text
-ours-stream  │████████████████████│ 2199.52 MB/s (100.00%)
-ours-full    │████████████████████│ 2191.45 MB/s (99.63%)
-ours-compact │████████████████████│ 2169.42 MB/s (98.63%)
-lol-html     │█████████░░░░░░░░░░░│ 1021.84 MB/s (46.46%)
+ours-stream  │████████████████████│ 2126.99 MB/s (100.00%)
+ours-full    │███████████████████░│ 2057.52 MB/s (96.73%)
+ours-compact │███████████████████░│ 2041.61 MB/s (95.99%)
+lol-html     │█████████░░░░░░░░░░░│ 978.69 MB/s (46.01%)
 ```
 
 ### Conformance Snapshot
