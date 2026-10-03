@@ -130,11 +130,11 @@ fn mainServer(init: std.process.Init.Minimal) !void {
     @disableInstrumentation();
     stdin_reader = .initStreaming(.stdin(), runner_threaded_io, &stdin_buffer);
     stdout_writer = .initStreaming(.stdout(), runner_threaded_io, &stdout_buffer);
-    var server = try std.zig.Server.init(.{
+    var server: std.zig.Server = .{
         .in = &stdin_reader.interface,
         .out = &stdout_writer.interface,
-        .zig_version = builtin.zig_version_string,
-    });
+    };
+    try server.serveStringMessage(.zig_version, builtin.zig_version_string);
 
     while (true) {
         const hdr = try server.receiveMessage();
@@ -143,8 +143,8 @@ fn mainServer(init: std.process.Init.Minimal) !void {
                 return std.process.exit(0);
             },
             .query_test_metadata => {
-                testing.allocator_instance = .{};
-                defer if (testing.allocator_instance.deinit() == .leak) {
+                testing.allocator_instance = .init(std.heap.page_allocator, .{ .check_write_after_free = true });
+                defer if (testing.allocator_instance.deinit() != 0) {
                     @panic("internal test runner memory leak");
                 };
 
@@ -175,7 +175,7 @@ fn mainServer(init: std.process.Init.Minimal) !void {
 
             .run_test => {
                 testing.environ = init.environ;
-                testing.allocator_instance = .{};
+                testing.allocator_instance = .init(std.heap.page_allocator, .{ .check_write_after_free = true });
                 testing.io_instance = .init(testing.allocator, .{
                     .argv0 = .init(init.args),
                     .environ = init.environ,
@@ -202,8 +202,7 @@ fn mainServer(init: std.process.Init.Minimal) !void {
                     },
                 };
                 testing.io_instance.deinit();
-                const leak_count = testing.allocator_instance.detectLeaks();
-                testing.allocator_instance.deinitWithoutLeakChecks();
+                const leak_count = testing.allocator_instance.deinit();
                 try server.serveTestResults(.{
                     .index = index,
                     .flags = .{
@@ -225,8 +224,8 @@ fn mainServer(init: std.process.Init.Minimal) !void {
                 // since they are not present.
                 if (!builtin.fuzz) unreachable;
 
-                var gpa_instance: std.heap.DebugAllocator(.{}) = .init;
-                defer if (gpa_instance.deinit() == .leak) {
+                var gpa_instance: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+                defer if (gpa_instance.deinit() != 0) {
                     @panic("internal test runner memory leak");
                 };
                 const gpa = gpa_instance.allocator();
@@ -237,7 +236,7 @@ fn mainServer(init: std.process.Init.Minimal) !void {
                 defer io_instance.deinit();
                 const io = io_instance.io();
 
-                const mode: fuzz_abi.LimitKind = @enumFromInt(try server.receiveBody_u8());
+                const mode: fuzz_abi.LimitKind = @fromBackingInt(@intCast(try server.receiveBody_u8()));
                 const amount_or_instance = try server.receiveBody_u64();
                 const main_instance = mode == .iterations or amount_or_instance == 0;
 
@@ -299,7 +298,7 @@ fn mainServer(init: std.process.Init.Minimal) !void {
             },
 
             else => {
-                std.debug.print("unsupported message: {x}\n", .{@intFromEnum(hdr.tag)});
+                std.debug.print("unsupported message: {x}\n", .{@backingInt(hdr.tag)});
                 std.process.exit(1);
             },
         }
@@ -548,7 +547,7 @@ fn printTestOutput(ctx: *const WorkerCtx, name: []const u8, res: ChildResult) vo
         }
         switch (res.term) {
             .exited => |code| if (code != 0) w.print(" | exit {d}", .{code}) catch return,
-            .signal => |sig| w.print(" | signal {d}", .{@intFromEnum(sig)}) catch return,
+            .signal => |sig| w.print(" | signal {d}", .{@backingInt(sig)}) catch return,
             .stopped => |code| w.print(" | stopped {d}", .{code}) catch return,
             .unknown => |code| w.print(" | unknown {d}", .{code}) catch return,
         }
@@ -560,7 +559,7 @@ fn printTestOutput(ctx: *const WorkerCtx, name: []const u8, res: ChildResult) vo
     w.print("{s}{s}\x1b[0m {s}", .{ color, label, name }) catch return;
     switch (res.term) {
         .exited => |code| if (code != 0) w.print(" | exit {d}", .{code}) catch return,
-        .signal => |sig| w.print(" | signal {d}", .{@intFromEnum(sig)}) catch return,
+        .signal => |sig| w.print(" | signal {d}", .{@backingInt(sig)}) catch return,
         .stopped => |code| w.print(" | stopped {d}", .{code}) catch return,
         .unknown => |code| w.print(" | unknown {d}", .{code}) catch return,
     }
@@ -637,12 +636,12 @@ fn runSingleTest(init: std.process.Init.Minimal, name: []const u8, seed: ?u32) v
     });
     defer testing.io_instance.deinit();
 
-    testing.allocator_instance = .{};
+    testing.allocator_instance = .init(std.heap.page_allocator, .{ .check_write_after_free = true });
     log_err_count = 0;
     const result = test_fn.func();
     const leak_status = testing.allocator_instance.deinit();
 
-    if (leak_status == .leak) {
+    if (leak_status != 0) {
         std.debug.print("memory leak\n", .{});
         std.process.exit(3);
     }
@@ -678,10 +677,10 @@ pub fn log(
     args: anytype,
 ) void {
     @disableInstrumentation();
-    if (@intFromEnum(message_level) <= @intFromEnum(std.log.Level.err)) {
+    if (@backingInt(message_level) <= @backingInt(std.log.Level.err)) {
         log_err_count +|= 1;
     }
-    if (@intFromEnum(message_level) <= @intFromEnum(testing.log_level)) {
+    if (@backingInt(message_level) <= @backingInt(testing.log_level)) {
         std.debug.print(
             "[" ++ @tagName(scope) ++ "] (" ++ @tagName(message_level) ++ "): " ++ format ++ "\n",
             args,
@@ -762,8 +761,8 @@ var fuzz_runner: if (builtin.fuzz) struct {
             error.WriteFailed => panic("failed to write to stdout: {t}", .{stdout_writer.err.?}),
         };
 
-        testing.allocator_instance = .{};
-        defer if (testing.allocator_instance.deinit() == .leak) std.process.exit(1);
+        testing.allocator_instance = .init(std.heap.page_allocator, .{ .check_write_after_free = true });
+        defer if (testing.allocator_instance.deinit() != 0) std.process.exit(1);
         is_fuzz_test = false;
 
         builtin.test_functions[fuzz_runner.indexes[i]].func() catch |err| switch (err) {
@@ -837,7 +836,7 @@ var fuzz_runner: if (builtin.fuzz) struct {
         while (true) {
             const hdr = try server.receiveMessage();
             if (hdr.tag != .new_fuzz_input) {
-                panic("unexpected message: {x}\n", .{@intFromEnum(hdr.tag)});
+                panic("unexpected message: {x}\n", .{@backingInt(hdr.tag)});
             }
             const test_i = try server.receiveBody_u32();
             const input_len = hdr.bytes_len - 4;
@@ -886,8 +885,8 @@ pub fn fuzz(
 
         fn test_one() callconv(.c) bool {
             @disableInstrumentation();
-            testing.allocator_instance = .{};
-            defer if (testing.allocator_instance.deinit() == .leak) std.process.exit(1);
+            testing.allocator_instance = .init(std.heap.page_allocator, .{ .check_write_after_free = true });
+            defer if (testing.allocator_instance.deinit() != 0) std.process.exit(1);
             log_err_count = 0;
             testOne(ctx, @constCast(&testing.Smith{ .in = null })) catch |err| switch (err) {
                 error.SkipZigTest => return true,
@@ -914,7 +913,7 @@ pub fn fuzz(
     if (builtin.fuzz) {
         // Preserve the calling test's allocator state
         const prev_allocator_state = testing.allocator_instance;
-        testing.allocator_instance = .{};
+        testing.allocator_instance = .init(std.heap.page_allocator, .{ .check_write_after_free = true });
         defer testing.allocator_instance = prev_allocator_state;
 
         global.ctx = context;

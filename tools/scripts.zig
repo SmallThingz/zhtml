@@ -338,7 +338,7 @@ fn ensureExternalParsersBuilt(io: std.Io, alloc: std.mem.Allocator, include_lexb
 
 fn buildRunners(io: std.Io, alloc: std.mem.Allocator, include_lexbor: bool) !void {
     try common.ensureDir(io, BIN_DIR);
-    const zig_build = [_][]const u8{ "zig", "build", "-Doptimize=ReleaseFast", "-Dcpu=native" };
+    const zig_build = [_][]const u8{ "zig", "build", "-Doptimize=fast", "-Dcpu=native" };
     try common.runInherit(io, alloc, &zig_build, REPO_ROOT);
 
     const strlen_cc = [_][]const u8{
@@ -431,8 +431,8 @@ const BenchmarkEnvironment = struct {
     cpu_max_mhz: []const u8,
 
     fn deinit(self: BenchmarkEnvironment, alloc: std.mem.Allocator) void {
-        inline for (std.meta.fields(BenchmarkEnvironment)) |field| {
-            alloc.free(@field(self, field.name));
+        inline for (comptime std.meta.fieldNames(BenchmarkEnvironment)) |field_name| {
+            alloc.free(@field(self, field_name));
         }
     }
 };
@@ -780,7 +780,7 @@ fn compareWorktrees(io: std.Io, alloc: std.mem.Allocator, args: []const []const 
     const fixture_dir = try std.fs.path.join(alloc, &.{ base_dir, FIXTURES_DIR });
     defer alloc.free(fixture_dir);
 
-    const build_argv = [_][]const u8{ "zig", "build", "-Doptimize=ReleaseFast", "-Dcpu=native" };
+    const build_argv = [_][]const u8{ "zig", "build", "-Doptimize=fast", "-Dcpu=native" };
     std.debug.print("building base: {s}\n", .{base_dir});
     try common.runInherit(io, alloc, &build_argv, base_dir);
     std.debug.print("building candidate: {s}\n", .{candidate_dir});
@@ -2223,7 +2223,7 @@ fn buildSuiteRunner(io: std.Io, alloc: std.mem.Allocator) !void {
     const html_mod = "-Mhtml=root.zig";
     const config_path = try tempConfigModule(io, alloc);
     defer {
-        std.Io.Dir.deleteFileAbsolute(io, config_path) catch {};
+        std.Io.Dir.cwd().deleteFile(io, config_path) catch {};
         alloc.free(config_path);
     }
     const config_mod = try std.fmt.allocPrint(alloc, "-Mconfig={s}", .{config_path});
@@ -2239,22 +2239,23 @@ fn buildSuiteRunner(io: std.Io, alloc: std.mem.Allocator) !void {
         html_mod,
         config_mod,
         "-O",
-        "ReleaseFast",
+        "fast",
         "-femit-bin=" ++ SUITE_RUNNER_BIN,
     };
     try common.runInherit(io, alloc, &argv, REPO_ROOT);
 }
 
 fn tempConfigModule(io: std.Io, alloc: std.mem.Allocator) ![]u8 {
+    try common.ensureDir(io, ".zig-cache");
     var src: std.Random.IoSource = .{ .io = io };
-    const path = try std.fmt.allocPrint(alloc, "/tmp/html-config-{x}.zig", .{src.interface().int(u64)});
+    const path = try std.fmt.allocPrint(alloc, ".zig-cache/html-config-{x}.zig", .{src.interface().int(u64)});
     errdefer alloc.free(path);
 
-    const file = try std.Io.Dir.createFileAbsolute(io, path, .{
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{
         .truncate = true,
         .exclusive = true,
     });
-    errdefer std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+    errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     defer file.close(io);
     try file.writeStreamingAll(io,
         \\pub const IntLen = enum {
@@ -3306,7 +3307,7 @@ fn runExamplesCheck(io: std.Io, alloc: std.mem.Allocator) !void {
 
     const config_path = try tempConfigModule(io, alloc);
     defer {
-        std.Io.Dir.deleteFileAbsolute(io, config_path) catch {};
+        std.Io.Dir.cwd().deleteFile(io, config_path) catch {};
         alloc.free(config_path);
     }
     const config_mod = try std.fmt.allocPrint(alloc, "-Mconfig={s}", .{config_path});
@@ -3572,7 +3573,10 @@ test "selector failure append frees partial ownership on allocation failure" {
 }
 
 test "console rendering frees partial rows on every allocation failure" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+    // SafeAllocator may resize in place depending on the allocation address.
+    // Force growth through alloc so every injected failure follows the same path.
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn run(alloc: std.mem.Allocator) !void {
             var samples: [0]u64 = .{};
             const parse_rows = [_]ParseResult{.{

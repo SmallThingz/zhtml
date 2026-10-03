@@ -67,7 +67,7 @@ fn ParseState(comptime opts: ParseOptions) type {
         parse_stack_heap_owned: bool = false,
         /// Optional-end-tag source classes currently present on the open stack.
         implicit_source_mask: u8 = 0,
-        implicit_source_counts: [8]IndexInt = .{0} ** 8,
+        implicit_source_counts: [8]IndexInt = @splat(0),
         /// Malformed-close index exists only after a deep full-stack miss.
         tag_index: ?*open_tag_index.LiveIndex(OpenElem) = null,
 
@@ -735,8 +735,8 @@ fn ParseState(comptime opts: ParseOptions) type {
 
         inline fn addNode(noalias self: *Self, name_or_text: anytype, is_element: bool, overrides: anytype) !void {
             const Overrides = @TypeOf(overrides);
-            comptime for (@typeInfo(Overrides).@"struct".fields) |field| {
-                std.debug.assert(std.mem.eql(u8, field.name, "parent"));
+            comptime for (@typeInfo(Overrides).@"struct".field_names) |field_name| {
+                std.debug.assert(std.mem.eql(u8, field_name, "parent"));
             };
             const parent_idx: IndexInt = @intCast(if (@hasField(Overrides, "parent")) overrides.parent else self.currentParent());
             const idx: IndexInt = @intCast(self.nodes.items.len);

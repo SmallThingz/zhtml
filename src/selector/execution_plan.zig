@@ -25,7 +25,7 @@ pub const Mask = enum(usize) {
     scope_lineage,
 };
 
-pub const MaskCount = @typeInfo(Mask).@"enum".fields.len;
+pub const MaskCount = @typeInfo(Mask).@"enum".field_names.len;
 
 pub const StatefulGroup = struct {
     compound_start: IndexInt,
@@ -162,12 +162,12 @@ pub const Plan = struct {
     }
 
     pub fn mask(self: *const @This(), which: Mask) []const u64 {
-        const start = @intFromEnum(which) * self.word_count;
+        const start = @backingInt(which) * self.word_count;
         return self.masks[start .. start + self.word_count];
     }
 
     pub fn maskMut(self: *@This(), which: Mask) []u64 {
-        const start = @intFromEnum(which) * self.word_count;
+        const start = @backingInt(which) * self.word_count;
         return self.masks[start .. start + self.word_count];
     }
 

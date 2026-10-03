@@ -63,7 +63,7 @@ fn evalAttrOpIgnoreCase(raw: []const u8, value: []const u8, op: ast.AttrOp) bool
         .eq => std.ascii.eqlIgnoreCase(raw, value),
         .prefix => std.ascii.startsWithIgnoreCase(raw, value),
         .suffix => std.ascii.endsWithIgnoreCase(raw, value),
-        .contains => std.ascii.indexOfIgnoreCase(raw, value) != null,
+        .contains => std.ascii.findIgnoreCase(raw, value) != null,
         .includes => tokenIncludesIgnoreCaseAscii(raw, value),
         .dash_match => std.ascii.eqlIgnoreCase(raw, value) or (raw.len > value.len and std.ascii.startsWithIgnoreCase(raw, value) and raw[value.len] == '-'),
     };
@@ -179,7 +179,7 @@ const ReverseInlineMapCapacity = 256;
 const ReverseInlineMapMaxLoad = ReverseInlineMapCapacity * 7 / 10;
 
 const ReverseNodeMap = struct {
-    keys: [ReverseInlineMapCapacity]IndexInt = [_]IndexInt{InvalidIndex} ** ReverseInlineMapCapacity,
+    keys: [ReverseInlineMapCapacity]IndexInt = @splat(InvalidIndex),
     values: [ReverseInlineMapCapacity]IndexInt = undefined,
     count: usize = 0,
     spill: std.AutoHashMapUnmanaged(IndexInt, IndexInt) = .empty,
@@ -257,7 +257,7 @@ const ReverseNodeMap = struct {
 
 const ReverseQueue = struct {
     const BucketCount = 65;
-    buckets: [BucketCount]std.ArrayListUnmanaged(IndexInt) = [_]std.ArrayListUnmanaged(IndexInt){.empty} ** BucketCount,
+    buckets: [BucketCount]std.ArrayListUnmanaged(IndexInt) = @splat(.empty),
     last_key: u64 = 0,
     len: usize = 0,
 
@@ -974,8 +974,8 @@ const CollectedAttrs = struct {
     requested_once: bool = false,
     materialized: bool = false,
     names: [MaxCollectedAttrs][]const u8 = undefined,
-    values: [MaxCollectedAttrs]?[]const u8 = [_]?[]const u8{null} ** MaxCollectedAttrs,
-    looked: [MaxCollectedAttrs]bool = [_]bool{false} ** MaxCollectedAttrs,
+    values: [MaxCollectedAttrs]?[]const u8 = @splat(null),
+    looked: [MaxCollectedAttrs]bool = @splat(false),
 };
 
 fn prepareCollectedAttrs(selector: ast.Selector, comp: ast.Compound, out: *CollectedAttrs) bool {

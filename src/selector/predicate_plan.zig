@@ -168,8 +168,8 @@ fn compoundHash(selector: ast.Selector, comp: ast.Compound) u64 {
     i = 0;
     while (i < comp.attr_len) : (i += 1) {
         const item = selector.attrs[comp.attr_start + i];
-        hashU64(&hash, @intFromEnum(item.op));
-        hashU64(&hash, @intFromEnum(item.case));
+        hashU64(&hash, @backingInt(item.op));
+        hashU64(&hash, @backingInt(item.case));
         hashRange(&hash, selector.source, item.name);
         hashRange(&hash, selector.source, item.value);
     }
@@ -178,7 +178,7 @@ fn compoundHash(selector: ast.Selector, comp: ast.Compound) u64 {
     i = 0;
     while (i < comp.pseudo_len) : (i += 1) {
         const item = selector.pseudos[comp.pseudo_start + i];
-        hashU64(&hash, @intFromEnum(item.kind));
+        hashU64(&hash, @backingInt(item.kind));
         hashU64(&hash, @bitCast(@as(i64, item.nth.a)));
         hashU64(&hash, @bitCast(@as(i64, item.nth.b)));
     }
@@ -187,12 +187,12 @@ fn compoundHash(selector: ast.Selector, comp: ast.Compound) u64 {
     i = 0;
     while (i < comp.not_len) : (i += 1) {
         const item = selector.not_items[comp.not_start + i];
-        hashU64(&hash, @intFromEnum(item.kind));
+        hashU64(&hash, @backingInt(item.kind));
         switch (item.kind) {
             .tag, .id, .class => hashRange(&hash, selector.source, item.text),
             .attr => {
-                hashU64(&hash, @intFromEnum(item.attr.op));
-                hashU64(&hash, @intFromEnum(item.attr.case));
+                hashU64(&hash, @backingInt(item.attr.op));
+                hashU64(&hash, @backingInt(item.attr.case));
                 hashRange(&hash, selector.source, item.attr.name);
                 hashRange(&hash, selector.source, item.attr.value);
             },
