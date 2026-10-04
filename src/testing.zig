@@ -10,17 +10,16 @@ fn ArgsTuple(comptime Function: type) ?type {
     if (info != .@"fn") @compileError("ArgsTuple expects a function type");
 
     const function_info = info.@"fn";
-    if (function_info.is_var_args) return null;
+    if (function_info.attrs.varargs) return null;
 
-    var argument_field_list: [function_info.params.len]type = undefined;
-    inline for (function_info.params, 0..) |arg, i| {
-        if (arg.is_generic) return null;
-        const T = arg.type orelse return null;
+    var argument_field_list: [function_info.param_types.len]type = undefined;
+    inline for (function_info.param_types, 0..) |arg, i| {
+        const T = arg orelse return null;
         if (T == type or @typeInfo(T) == .@"fn") return null;
         argument_field_list[i] = T;
     }
 
-    return std.meta.Tuple(&argument_field_list);
+    return @Tuple(&argument_field_list);
 }
 
 fn initType(comptime T: type) T {
@@ -37,26 +36,26 @@ fn initType(comptime T: type) T {
         .array => |ai| inline for (0..ai.len) |i| {
             retval[i] = initType(ai.child);
         },
-        .@"struct" => |si| inline for (si.fields) |field| {
-            @field(retval, field.name) = if (field.defaultValue()) |v| v else comptime initType(@FieldType(T, field.name));
+        .@"struct" => |si| inline for (si.field_names, si.field_types, si.field_attrs) |field_name, field_type, field_attrs| {
+            @field(retval, field_name) = if (field_attrs.defaultValue(field_type)) |v| v else comptime initType(field_type);
         },
         .comptime_float => return 0.0,
         .comptime_int => return 0,
         .undefined => unreachable,
         .null, .optional => return null,
         .error_union => |eu| return initType(eu.payload),
-        .error_set => |es_| if (es_) |es| {
+        .error_set => |es_| if (es_.error_names) |es| {
             if (es.len == 0) return undefined;
-            return @field(T, es[0].name);
+            return @field(T, es[0]);
         } else error.AnyError,
-        .@"enum" => |ei| if (ei.fields.len != 0) {
-            retval = @field(T, ei.fields[0].name);
+        .@"enum" => |ei| if (ei.field_names.len != 0) {
+            retval = @field(T, ei.field_names[0]);
         } else return undefined,
-        .@"union" => |ui| if (ui.fields.len != 0) {
-            retval = @unionInit(T, ui.fields[0].name, initType(ui.fields[0].type));
+        .@"union" => |ui| if (ui.field_names.len != 0) {
+            retval = @unionInit(T, ui.field_names[0], initType(ui.field_types[0]));
         },
         .@"fn" => return undefined,
-        .@"opaque", .frame, .@"anyframe" => unreachable,
+        .@"opaque", .frame, .@"anyframe", .spirv => unreachable,
         .vector => |vi| inline for (vi.len) |i| {
             @field(retval, i) = initType(vi.child);
         },
@@ -68,19 +67,19 @@ fn initType(comptime T: type) T {
 pub fn refAllDeclsRecursive(comptime T: type) void {
     var should_run: bool = false;
     std.mem.doNotOptimizeAway(&should_run);
-    inline for (comptime std.meta.declarations(T)) |decl| {
-        const field = @field(T, decl.name);
+    inline for (comptime std.meta.declarations(T)) |decl_name| {
+        const field = @field(T, decl_name);
         _ = &field;
 
         if (@TypeOf(field) == type) {
-            switch (@typeInfo(@field(T, decl.name))) {
-                .@"struct", .@"enum", .@"union", .@"opaque" => refAllDeclsRecursive(@field(T, decl.name)),
+            switch (@typeInfo(@field(T, decl_name))) {
+                .@"struct", .@"enum", .@"union", .@"opaque" => refAllDeclsRecursive(@field(T, decl_name)),
                 else => {},
             }
         } else if (@typeInfo(@TypeOf(field)) == .@"fn") {
             // Comptime compile APIs intentionally reject fabricated input and
             // are covered by focused tests with meaningful source strings.
-            if (should_run and !comptime std.mem.startsWith(u8, decl.name, "compile")) {
+            if (should_run and !comptime std.mem.startsWith(u8, decl_name, "compile")) {
                 if (ArgsTuple(@TypeOf(field))) |Args| {
                     _ = &@call(.auto, field, comptime initType(Args));
                 }

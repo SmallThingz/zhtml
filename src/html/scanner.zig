@@ -28,7 +28,7 @@ pub noinline fn countByte(source: []const u8, value: u8) usize {
         if (std.simd.suggestVectorLength(u8)) |suggested_len| {
             const Block = @Vector(suggested_len, u8);
             const BoolBlock = @Vector(suggested_len, bool);
-            const MaskInt = std.meta.Int(.unsigned, suggested_len);
+            const MaskInt = @Int(.unsigned, suggested_len);
             const mask: Block = @splat(value);
 
             while (index + suggested_len <= source.len) : (index += suggested_len) {
@@ -65,7 +65,7 @@ pub fn findBytePosOrEnd(source: []const u8, start: usize, value: u8) usize {
                 const block_cnt = @max(1, block_len_sum / block_len);
                 const Block = @Vector(block_len, u8);
                 const BoolBlock = @Vector(block_len, bool);
-                const MaskInt = std.meta.Int(.unsigned, block_len);
+                const MaskInt = @Int(.unsigned, block_len);
                 const mask: Block = @splat(value);
 
                 if (index + block_len_sum <= source.len) while (true) {

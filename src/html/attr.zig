@@ -232,7 +232,7 @@ pub const CompactIterator = struct {
             self.cursor += 1;
             return .{ .name = name, .value = null };
         }
-        const marker: CompactValueMarker = @enumFromInt(self.source[self.cursor]);
+        const marker: CompactValueMarker = @fromBackingInt(@intCast(self.source[self.cursor]));
         self.cursor += 1;
         const value_start = self.cursor;
         while (self.cursor < self.source.len and self.source[self.cursor] != 0) : (self.cursor += 1) {}
@@ -308,12 +308,12 @@ pub fn materializeAttributes(comptime entity_decoding: entities.EntityDecoding, 
                 const raw_slice = source[raw.start..raw.end];
                 const decoded = entities.decodeAttributeInPlaceResultWithMode(entity_decoding, raw_slice, null);
                 if (decoded.complete) {
-                    source[write] = @intFromEnum(CompactValueMarker.decoded);
+                    source[write] = @backingInt(CompactValueMarker.decoded);
                     write += 1;
                     std.mem.copyForwards(u8, source[write .. write + decoded.len], source[raw.start .. raw.start + decoded.len]);
                     write += decoded.len;
                 } else {
-                    source[write] = @intFromEnum(rawCompactMarker(raw));
+                    source[write] = @backingInt(rawCompactMarker(raw));
                     write += 1;
                     std.mem.copyForwards(u8, source[write .. write + raw_slice.len], raw_slice);
                     for (source[write .. write + raw_slice.len]) |*b| {

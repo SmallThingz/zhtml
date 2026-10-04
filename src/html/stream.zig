@@ -189,7 +189,7 @@ fn State(comptime Ctx: type, comptime callback: anytype, comptime static_options
         stack_heap: bool = false,
         tag_index: open_tag_index.LiveIndex(OpenTag) = .{},
         implicit_source_mask: u8 = 0,
-        implicit_source_counts: [8]IndexInt = .{0} ** 8,
+        implicit_source_counts: [8]IndexInt = @splat(0),
         slow_close_misses: u8 = 0,
 
         const Self = @This();
@@ -207,7 +207,7 @@ fn State(comptime Ctx: type, comptime callback: anytype, comptime static_options
         };
         const blocker_by_boundary = blk: {
             const B = tags.ImplicitCloseBoundaryMask;
-            var table = [_]u8{0} ** 32;
+            var table: [32]u8 = @splat(0);
             table[B.regular] = ImplicitBlockers.regular;
             table[B.button] = ImplicitBlockers.button;
             table[B.list_item] = ImplicitBlockers.list_item;

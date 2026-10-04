@@ -10,9 +10,9 @@ fn assertPublicFunctions(comptime T: type, comptime expected: []const []const u8
     @setEvalBranchQuota(1000_000);
     comptime {
         for (std.meta.declarations(T)) |decl| {
-            const value = @field(T, decl.name);
-            if (@typeInfo(@TypeOf(value)) == .@"fn" and !contains(expected, decl.name)) {
-                @compileError("public API function lacks explicit coverage: " ++ @typeName(T) ++ "." ++ decl.name);
+            const value = @field(T, decl);
+            if (@typeInfo(@TypeOf(value)) == .@"fn" and !contains(expected, decl)) {
+                @compileError("public API function lacks explicit coverage: " ++ @typeName(T) ++ "." ++ decl);
             }
         }
         for (expected) |name| {

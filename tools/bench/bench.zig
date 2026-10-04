@@ -9,7 +9,7 @@ const StreamBenchCtx = struct {
 
     fn cb(self: *@This(), event: root.StreamingParser.Event) !bool {
         self.events +%= 1;
-        self.checksum +%= @as(u64, @intFromEnum(event.kind)) + 1;
+        self.checksum +%= @as(u64, @backingInt(event.kind)) + 1;
         self.checksum +%= @as(u64, event.depth);
         self.checksum +%= @as(u64, event.name.start) + @as(u64, event.name.len);
         self.checksum +%= @as(u64, event.value.start) + @as(u64, event.value.len);

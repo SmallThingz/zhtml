@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Zig `0.16.0`
+- Zig `0.17.0`
 - Git
 
 ## Local Development Workflow
@@ -20,6 +20,8 @@ Use these additional commands when touching performance/conformance code:
 zig build bench-compare
 zig build conformance
 ```
+
+Use `zig build test -j1 -Dtest-jobs=1` to bound both compilation and test-process concurrency.
 
 ## Style
 

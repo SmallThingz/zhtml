@@ -11,6 +11,7 @@ const IntLen = enum {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const test_jobs = b.option(usize, "test-jobs", "Maximum concurrent test processes");
     const intlen = b.option(IntLen, "intlen", "Integer width used for document spans and node indexes") orelse .u32;
 
     const config_options = b.addOptions();
@@ -113,20 +114,19 @@ pub fn build(b: *std.Build) void {
     docs_check_cmd.step.dependOn(b.getInstallStep());
     examples_check_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        tools_cmd.addArgs(args);
-        compare_cmd.addArgs(args);
-        interleaved_cmd.addArgs(args);
-        conformance_cmd.addArgs(args);
-        docs_check_cmd.addArgs(args);
-        examples_check_cmd.addArgs(args);
-    }
+    tools_cmd.addPassthruArgs();
+    compare_cmd.addPassthruArgs();
+    interleaved_cmd.addPassthruArgs();
+    conformance_cmd.addPassthruArgs();
+    docs_check_cmd.addPassthruArgs();
+    examples_check_cmd.addPassthruArgs();
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
         .test_runner = .{ .path = b.path("tools/test_runner.zig"), .mode = .simple },
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
+    if (test_jobs) |jobs| run_mod_tests.addArgs(&.{ "--jobs", b.fmt("{d}", .{jobs}) });
 
     const examples_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -148,6 +148,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("tools/test_runner.zig"), .mode = .simple },
     });
     const run_examples_tests = b.addRunArtifact(examples_tests);
+    if (test_jobs) |jobs| run_examples_tests.addArgs(&.{ "--jobs", b.fmt("{d}", .{jobs}) });
 
     const behavioral_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -161,6 +162,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("tools/test_runner.zig"), .mode = .simple },
     });
     const run_behavioral_tests = b.addRunArtifact(behavioral_tests);
+    if (test_jobs) |jobs| run_behavioral_tests.addArgs(&.{ "--jobs", b.fmt("{d}", .{jobs}) });
 
     const public_api_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -174,6 +176,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("tools/test_runner.zig"), .mode = .simple },
     });
     const run_public_api_tests = b.addRunArtifact(public_api_tests);
+    if (test_jobs) |jobs| run_public_api_tests.addArgs(&.{ "--jobs", b.fmt("{d}", .{jobs}) });
     const public_api_test_step = b.step("test-public-api", "Run exhaustive consumer-facing public API tests");
     public_api_test_step.dependOn(&run_public_api_tests.step);
 
@@ -186,6 +189,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("tools/test_runner.zig"), .mode = .simple },
     });
     const run_scripts_tests = b.addRunArtifact(scripts_tests);
+    if (test_jobs) |jobs| run_scripts_tests.addArgs(&.{ "--jobs", b.fmt("{d}", .{jobs}) });
 
     const bench_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -200,6 +204,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("tools/test_runner.zig"), .mode = .simple },
     });
     const run_bench_tests = b.addRunArtifact(bench_tests);
+    if (test_jobs) |jobs| run_bench_tests.addArgs(&.{ "--jobs", b.fmt("{d}", .{jobs}) });
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);

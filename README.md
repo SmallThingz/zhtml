@@ -2,7 +2,7 @@
 
 High-throughput HTML parser + CSS selector engine for Zig.
 
-[![zig](https://img.shields.io/badge/zig-0.16.0-orange)](https://ziglang.org/)
+[![zig](https://img.shields.io/badge/zig-0.17.0-orange)](https://ziglang.org/)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
 ## ⚠️ Conformance Warning

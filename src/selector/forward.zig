@@ -153,7 +153,7 @@ pub fn Executor(comptime Doc: type) type {
         seed_workspace: ?*matcher.MatchWorkspace = null,
         stats: if (builtin.is_test) Stats else void = if (builtin.is_test) .{} else {},
         initialized: bool = false,
-        tag_cache: [16]TagCacheEntry = [_]TagCacheEntry{.{}} ** 16,
+        tag_cache: [16]TagCacheEntry = @splat(.{}),
 
         const Self = @This();
         const TagCacheEntry = struct {
@@ -490,7 +490,7 @@ pub fn WideExecutor(comptime Doc: type) type {
         stack: std.ArrayListUnmanaged(WideFrame) = .empty,
         node_ctx: matcher.NodeContext = .{},
         predicate_word_count: usize = 0,
-        small_seen_predicates: [SmallPredicateWordLimit]u64 = [_]u64{0} ** SmallPredicateWordLimit,
+        small_seen_predicates: [SmallPredicateWordLimit]u64 = @splat(0),
         seen_predicates: []u64 = &.{},
         matched_predicates: []u64 = &.{},
         state_fanned_predicates: []u64 = &.{},
@@ -1032,7 +1032,7 @@ pub fn WideExecutor(comptime Doc: type) type {
         }
 
         fn state(self: *Self, slot: usize, which: State) []u64 {
-            const start = (slot * 4 + @intFromEnum(which)) * self.word_count;
+            const start = (slot * 4 + @backingInt(which)) * self.word_count;
             return self.states.items[start .. start + self.word_count];
         }
 

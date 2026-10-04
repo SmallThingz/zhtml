@@ -415,7 +415,7 @@ fn replacementDecoded(consumed: usize) Decoded {
 }
 
 const NumericDigitTable = blk: {
-    var table = [_]u8{InvalidDigit} ** 256;
+    var table: [256]u8 = @splat(InvalidDigit);
     var c: u8 = '0';
     while (c <= '9') : (c += 1) table[c] = c - '0';
     c = 'a';

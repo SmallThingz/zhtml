@@ -8,7 +8,7 @@ test {
 /// Builds a 256-entry boolean lookup table from a predicate.
 pub fn makeClassTable(comptime predicate: fn (u8) bool) [256]bool {
     @setEvalBranchQuota(10_000);
-    var table = [_]bool{false} ** 256;
+    var table: [256]bool = @splat(false);
     inline for (0..256) |i| {
         table[i] = predicate(@as(u8, @intCast(i)));
     }
@@ -46,7 +46,7 @@ pub const TagNameCharTable = makeClassTable(isTagNameChar);
 /// Canonical lowercase byte for tag-name bytes; zero marks a tokenizer terminator.
 pub const TagNameLowerTable = blk: {
     @setEvalBranchQuota(10_000);
-    var table = [_]u8{0} ** 256;
+    var table: [256]u8 = @splat(0);
     for (0..256) |i| {
         const c: u8 = @intCast(i);
         if (isTagNameChar(c)) table[i] = std.ascii.toLower(c);

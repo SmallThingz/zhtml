@@ -485,9 +485,9 @@ fn GetNode(comptime options: ParseOptions) type {
             const end: usize = node.name_or_text.end();
             if (end >= doc.source.len) return .raw;
             return switch (doc.source[end]) {
-                @intFromEnum(RwTextState.decoded) => .decoded,
-                @intFromEnum(RwTextState.decode_failed) => .decode_failed,
-                @intFromEnum(RwTextState.raw_normalized) => .raw_normalized,
+                @backingInt(RwTextState.decoded) => .decoded,
+                @backingInt(RwTextState.decode_failed) => .decode_failed,
+                @backingInt(RwTextState.raw_normalized) => .raw_normalized,
                 else => .raw,
             };
         }
@@ -496,7 +496,7 @@ fn GetNode(comptime options: ParseOptions) type {
             if (comptime options.non_destructive) return;
             if (state == .raw) return;
             const end: usize = node.name_or_text.end();
-            if (end < doc.source.len) doc.source[end] = @intFromEnum(state);
+            if (end < doc.source.len) doc.source[end] = @backingInt(state);
         }
 
         /// Opaque children preserve both markup-looking bytes and entity syntax.
@@ -2124,7 +2124,7 @@ test "innerTextOwned returns allocated output and materializes RW source text" {
 
     const text_node_after = doc.nodes[node.index + 1];
     try std.testing.expectEqualStrings("a & b", text_node_after.name_or_text.slice(doc.source));
-    try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decoded)), doc.source[text_node_after.name_or_text.end()]);
+    try std.testing.expectEqual(@as(u8, @backingInt(RwTextState.decoded)), doc.source[text_node_after.name_or_text.end()]);
 }
 
 test "RW text decoding stores and moves the trailing decoded marker" {
@@ -2140,13 +2140,13 @@ test "RW text decoding stores and moves the trailing decoded marker" {
     const decoded = try p.innerTextWithOptions(alloc, .{ .normalize_whitespace = false });
     try std.testing.expectEqualStrings("a&  b ", decoded.value);
     const decoded_end: usize = doc.nodes[text_idx].name_or_text.end();
-    try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decoded)), doc.source[decoded_end]);
+    try std.testing.expectEqual(@as(u8, @backingInt(RwTextState.decoded)), doc.source[decoded_end]);
 
     const normalized = try p.innerTextWithOptions(alloc, .{ .unescape = false, .normalize_whitespace = true });
     try std.testing.expectEqualStrings("a& b", normalized.value);
     const normalized_end: usize = doc.nodes[text_idx].name_or_text.end();
     try std.testing.expect(normalized_end < decoded_end);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decoded)), doc.source[normalized_end]);
+    try std.testing.expectEqual(@as(u8, @backingInt(RwTextState.decoded)), doc.source[normalized_end]);
 }
 
 test "RW terminal text marks only when decoding creates room" {
@@ -2161,7 +2161,7 @@ test "RW terminal text marks only when decoding creates room" {
     try std.testing.expectEqualStrings("x&y", decoded.value);
     const encoded_text = encoded_doc.nodes[encoded_p.index + 1];
     try std.testing.expect(encoded_text.name_or_text.end() < encoded_doc.source.len);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decoded)), encoded_doc.source[encoded_text.name_or_text.end()]);
+    try std.testing.expectEqual(@as(u8, @backingInt(RwTextState.decoded)), encoded_doc.source[encoded_text.name_or_text.end()]);
 
     var plain_doc = GetDocument(.{}).init(alloc);
     defer plain_doc.deinit();
@@ -2190,7 +2190,7 @@ test "RW multi-node owned text materializes each span and still normalizes after
         if (!doc.nodes[idx].isText(idx)) continue;
         const end: usize = doc.nodes[idx].name_or_text.end();
         try std.testing.expect(end < doc.source.len);
-        try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decoded)), doc.source[end]);
+        try std.testing.expectEqual(@as(u8, @backingInt(RwTextState.decoded)), doc.source[end]);
         try std.testing.expect(std.mem.indexOf(u8, doc.nodes[idx].name_or_text.slice(doc.source), "&amp;") == null);
     }
 }
@@ -2386,7 +2386,7 @@ test "expanding full entities use marked allocating fallbacks" {
     const text_idx = div.index + 1;
     const text_end: usize = doc.nodes[text_idx].name_or_text.end();
     try std.testing.expect(text_end < doc.source.len);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(RwTextState.decode_failed)), doc.source[text_end]);
+    try std.testing.expectEqual(@as(u8, @backingInt(RwTextState.decode_failed)), doc.source[text_end]);
 
     var never_out: std.Io.Writer.Allocating = .init(alloc);
     defer never_out.deinit();
@@ -4612,7 +4612,8 @@ test "query collect frees partial output when growth fails" {
     defer alloc.free(doc_source);
     try resetParsed(.{}, &doc, doc_source);
 
-    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 1 });
+    // Reject in-place growth too, so SafeAllocator cannot bypass the failing allocation.
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 1, .resize_fail_index = 0 });
     var it = doc.query("span");
     try std.testing.expectError(error.OutOfMemory, it.collect(failing.allocator()));
 }
